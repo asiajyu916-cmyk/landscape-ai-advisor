@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: 'Microsoft JhengHei', 'Noto Sans TC', ui-sans-serif, system-ui, sans-serif;
+  background: #f4f5f7;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 可編輯儲存格 */
+.editable-cell input {
+  width: 100%;
+  border: none;
+  background: transparent;
+  outline: none;
+  font-size: 0.75rem;
+  padding: 2px 4px;
+}
+.editable-cell input:focus {
+  background: #fffde7;
+  border-radius: 2px;
+}
+
+/* 捲軸 */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #f1f1f1; }
+::-webkit-scrollbar-thumb { background: #c1c1c1; border-radius: 3px; }
+
+/* 隱藏橫向捲軸 */
+.scrollbar-hide { scrollbar-width: none; -ms-overflow-style: none; }
+.scrollbar-hide::-webkit-scrollbar { display: none; }
