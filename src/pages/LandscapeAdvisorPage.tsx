@@ -725,7 +725,8 @@ function PlantCardItem({ plant, imageData, added, fresh, isActive, onDetail, onA
 }) {
   const approvedUrl = (!imageData?.imageReviewStatus || imageData.imageReviewStatus === 'approved')
     ? imageData?.imageUrl : undefined
-  const imgSrc = imageData?.uploadedDataUrl ?? approvedUrl
+  const staticUrl = `/plant-images/${encodeURIComponent(plant.name)}.jpg`
+  const imgSrc = imageData?.uploadedDataUrl ?? approvedUrl ?? staticUrl
   const bgGrad = CARD_BG[plant.subCategory] ?? CARD_BG[plant.category] ?? 'from-stone-100 to-stone-50'
   const iconColor = CARD_ICON_COLOR[plant.subCategory] ?? CARD_ICON_COLOR[plant.category] ?? 'text-stone-400'
   const suitability = getSuitability(plant)
