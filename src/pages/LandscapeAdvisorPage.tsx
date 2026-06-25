@@ -545,55 +545,57 @@ function SelectedPlantCard({ plant, onRemove, imageStore }: {
   const [imgErr, setImgErr] = useState(false)
 
   return (
-    <div className="bg-white border border-stone-200 rounded-xl p-3.5 relative group hover:border-[#2d6a4f]/40 hover:shadow-sm transition-all">
+    <div className="bg-white border border-stone-200 rounded-xl overflow-hidden relative group hover:border-[#2d6a4f]/50 hover:shadow-md transition-all flex flex-col">
+      {/* 移除按鈕 */}
       <button onClick={onRemove}
-        className="absolute top-2.5 right-2.5 text-stone-300 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity">
-        <X size={14} />
+        className="absolute top-2 right-2 z-10 w-6 h-6 rounded-full bg-white/80 backdrop-blur-sm flex items-center justify-center text-stone-400 hover:text-red-500 hover:bg-red-50 opacity-0 group-hover:opacity-100 transition-all shadow-sm">
+        <X size={12} />
       </button>
-      <div className="flex items-start gap-3 pr-6">
-        <div className="w-10 h-10 rounded-lg overflow-hidden flex-shrink-0 bg-[#d8f3dc] flex items-center justify-center">
-          {!imgErr
-            ? <img src={imgSrc} alt={plant.name} className="w-full h-full object-cover" onError={() => setImgErr(true)} />
-            : <Leaf size={14} className="text-[#2d6a4f]" />
+
+      {/* 植物照片 */}
+      <div className="h-28 relative overflow-hidden bg-[#d8f3dc] flex-shrink-0">
+        {!imgErr
+          ? <img src={imgSrc} alt={plant.name} className="w-full h-full object-cover" onError={() => setImgErr(true)} />
+          : <div className="w-full h-full flex items-center justify-center">
+              <Leaf size={28} className="text-[#2d6a4f] opacity-40" />
+            </div>
+        }
+        {/* 類型 badge 懸浮在照片上 */}
+        <div className="absolute top-1.5 left-1.5">
+          <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold shadow-sm ${CAT_COLOR[plant.subCategory] ?? CAT_COLOR[plant.category] ?? 'bg-stone-100 text-stone-600'}`}>
+            {plant.subCategory || plant.category}
+          </span>
+        </div>
+      </div>
+
+      {/* 資訊區 */}
+      <div className="p-2.5 flex-1 flex flex-col gap-1.5">
+        <div>
+          <p className="font-bold text-stone-800 text-sm leading-tight truncate">{plant.name}</p>
+          {plant.scientificName
+            ? <p className="text-[10px] text-stone-400 italic truncate">{plant.scientificName}</p>
+            : <p className="text-[10px] text-stone-300">—</p>
           }
         </div>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-1.5 flex-wrap">
-            <p className="font-semibold text-stone-800 text-sm">{plant.name}</p>
-            <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium ${CAT_COLOR[plant.category] ?? 'bg-stone-100 text-stone-600'}`}>
-              {plant.subCategory || plant.category}
-            </span>
-            <span className={`text-xs px-1.5 py-0.5 rounded-full border font-medium ${STATUS_COLOR[plant.status]}`}>{plant.status}</span>
-            {!plant.dataComplete && (
-              <span className="text-xs px-1.5 py-0.5 rounded-full bg-stone-100 border border-stone-200 text-stone-500 font-medium">資料待補</span>
-            )}
-          </div>
-          {plant.scientificName && <p className="text-xs text-stone-400 italic mt-0.5">{plant.scientificName}</p>}
+        {/* 狀態 badges */}
+        <div className="flex gap-1 flex-wrap">
+          <span className={`text-[10px] px-1.5 py-0.5 rounded-full border font-medium ${STATUS_COLOR[plant.status]}`}>{plant.status}</span>
+          {!plant.dataComplete && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-stone-100 border border-stone-200 text-stone-400 font-medium">資料待補</span>
+          )}
         </div>
-      </div>
-      <div className="mt-2.5 grid grid-cols-3 gap-1.5">
-        {[
-          { label: '水分', value: plant.waterRequirement },
-          { label: '日照', value: plant.sunRequirement !== '待查' ? plant.sunRequirement : '—' },
-          { label: '維護', value: plant.maintenanceLevel },
-        ].map(item => (
-          <div key={item.label} className="bg-[#f7f5f0] rounded-lg px-2 py-1.5">
-            <p className="text-[10px] text-stone-400 leading-none mb-0.5">{item.label}</p>
-            <p className="text-xs font-medium text-stone-700 truncate">{item.value}</p>
-          </div>
-        ))}
-      </div>
-      <div className="mt-1.5 grid grid-cols-3 gap-1.5">
-        {[
-          { label: '耐旱', value: plant.droughtTolerance },
-          { label: '耐濕', value: plant.wetTolerance },
-          { label: '覆土', value: plant.soilDepth || '—' },
-        ].map(item => (
-          <div key={item.label} className="bg-[#f7f5f0] rounded-lg px-2 py-1.5">
-            <p className="text-[10px] text-stone-400 leading-none mb-0.5">{item.label}</p>
-            <p className="text-xs font-medium text-stone-700 truncate">{item.value}</p>
-          </div>
-        ))}
+        {/* 重點數據 */}
+        <div className="grid grid-cols-2 gap-1 mt-auto">
+          {[
+            { label: '日照', value: plant.sunRequirement !== '待查' ? plant.sunRequirement : '—' },
+            { label: '水分', value: plant.waterRequirement !== '待查' ? plant.waterRequirement : '—' },
+          ].map(item => (
+            <div key={item.label} className="bg-[#f4f8f4] rounded px-1.5 py-1">
+              <p className="text-[9px] text-stone-400 leading-none">{item.label}</p>
+              <p className="text-[10px] font-semibold text-stone-700 truncate leading-tight mt-0.5">{item.value}</p>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   )
@@ -2211,10 +2213,14 @@ export default function LandscapeAdvisorPage({
                   {allPlants.length > 0 ? '從植栽資料庫加入植物' : '請先匯入植栽資料庫'}
                 </button>
                 {selectedPlants.length === 0
-                  ? <p className="text-center text-stone-400 text-sm py-3">尚未加入植栽</p>
-                  : selectedPlants.map(p => (
-                      <SelectedPlantCard key={p.instanceId} plant={p} onRemove={() => removePlant(p.instanceId)} imageStore={imageStore} />
-                    ))
+                  ? <p className="text-center text-stone-400 text-sm py-6">尚未加入植栽</p>
+                  : (
+                    <div className="grid grid-cols-2 gap-2 max-h-[520px] overflow-y-auto pr-0.5">
+                      {selectedPlants.map(p => (
+                        <SelectedPlantCard key={p.instanceId} plant={p} onRemove={() => removePlant(p.instanceId)} imageStore={imageStore} />
+                      ))}
+                    </div>
+                  )
                 }
               </div>
             </Section>
