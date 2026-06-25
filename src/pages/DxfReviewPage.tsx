@@ -1838,6 +1838,77 @@ function ZoneReviewTab({ reviews }: { reviews: ZoneReviewResult[] }) {
                 {cautionCnt > 0 && <span className="text-xs px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 font-semibold">注意 {cautionCnt} 項</span>}
               </div>
 
+              {/* 本區植栽一覽（置頂，預設展開）*/}
+              {r.blockEntries.length > 0 && (() => {
+                // 合併 blockEntries（數量）與 plants（DB 詳細資料）
+                const plantMap = new Map(r.plants.map(p => [p.name, p]))
+                return (
+                  <div className="rounded-xl border border-stone-200 overflow-hidden">
+                    <div className="px-4 py-2.5 bg-stone-50 border-b border-stone-100 flex items-center justify-between">
+                      <p className="text-xs font-semibold text-stone-700">
+                        本區植栽一覽（{r.blockEntries.reduce((s, b) => s + b.count, 0)} 株 / {r.blockEntries.length} 種）
+                      </p>
+                    </div>
+                    <div className="divide-y divide-stone-100">
+                      {r.blockEntries.map((b, i) => {
+                        const dbPlant = b.plantName ? plantMap.get(b.plantName) : undefined
+                        return (
+                          <div key={i} className={`flex items-start gap-3 px-4 py-2.5 ${
+                            b.matchStatus === 'db-matched' ? '' :
+                            b.matchStatus === 'name-only'  ? 'bg-amber-50/40' : 'bg-red-50/20'
+                          }`}>
+                            {/* 左：植物名稱 + 數量 */}
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="font-semibold text-stone-800 text-sm">
+                                  {b.plantName ?? <span className="text-stone-400 italic text-xs">未對應（{b.blockName}）</span>}
+                                </span>
+                                {dbPlant?.scientificName && (
+                                  <span className="text-xs text-stone-400 italic">{dbPlant.scientificName}</span>
+                                )}
+                                <span className={`text-xs px-1.5 py-0.5 rounded-full border font-medium ${
+                                  b.matchStatus === 'db-matched' ? 'bg-emerald-50 border-emerald-200 text-emerald-700' :
+                                  b.matchStatus === 'name-only'  ? 'bg-amber-50 border-amber-200 text-amber-600' :
+                                                                    'bg-red-50 border-red-200 text-red-500'
+                                }`}>
+                                  {b.matchStatus === 'db-matched' ? (dbPlant?.subCategory || dbPlant?.category || b.detectedType || '—')
+                                    : b.matchStatus === 'name-only' ? '索引表名稱'
+                                    : '未對應'}
+                                </span>
+                              </div>
+                              {/* DB 詳細資訊列 */}
+                              {dbPlant && (
+                                <div className="flex flex-wrap gap-x-4 gap-y-0.5 mt-1 text-xs text-stone-500">
+                                  {dbPlant.height       && <span>樹高 {dbPlant.height}</span>}
+                                  {dbPlant.crownWidth   && <span>冠幅 {dbPlant.crownWidth}</span>}
+                                  {dbPlant.sunRequirement && <span>日照 {dbPlant.sunRequirement}</span>}
+                                  {dbPlant.waterRequirement && <span>需水 {dbPlant.waterRequirement}</span>}
+                                  {dbPlant.droughtTolerance && <span>耐旱 {dbPlant.droughtTolerance}</span>}
+                                  {dbPlant.nativeStatus && <span>原生 {dbPlant.nativeStatus}</span>}
+                                  {dbPlant.flowerColor  && dbPlant.flowerMonth && (
+                                    <span>花期 {dbPlant.flowerMonth}（{dbPlant.flowerColor}）</span>
+                                  )}
+                                  {dbPlant.maintenanceLevel && <span>維護 {dbPlant.maintenanceLevel}</span>}
+                                </div>
+                              )}
+                              {/* 無 DB 資料時只顯示圖塊名稱 */}
+                              {!dbPlant && b.plantName && (
+                                <p className="text-xs text-stone-400 mt-0.5">圖塊：{b.blockName}</p>
+                              )}
+                            </div>
+                            {/* 右：數量 */}
+                            <div className="flex-shrink-0 text-right">
+                              <span className="text-base font-bold text-stone-700">{b.count}</span>
+                              <span className="text-xs text-stone-400 ml-0.5">株</span>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )
+              })()}
+
               {/* AI 審查建議（置頂）*/}
               {r.evalResult && (
                 <div className="p-4 bg-stone-50 border border-stone-200 rounded-xl">
