@@ -1648,50 +1648,46 @@ function PlantDatabaseModal({ plants, onClose, onSelect, selectedIds, imageStore
               className="flex items-center gap-2 px-4 py-2 rounded-xl border border-stone-200 text-sm text-stone-600 hover:bg-stone-50 font-medium">
               <FileDown size={14} />匯出待補充 CSV
             </button>
-            {/* 匯出照片庫 */}
+            {/* 匯出植栽庫 CSV（含圖片網址） */}
             <button
               onClick={() => {
-                const filled = Object.entries(imageStore).filter(([, v]) => v.uploadedDataUrl || v.imageUrl)
-                if (filled.length === 0) { alert('目前沒有已上傳的照片可以匯出。'); return }
-                const exportData = Object.fromEntries(filled)
-                const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' })
+                // Tab 分隔，與原始 CSV 格式相容，欄位 32 加圖片網址
+                const headers = [
+                  '植物名稱','喬木.灌木.草本','細分類','學名',
+                  '樹高','冠幅','幹徑','樹形',
+                  '花色','花期月份','花期','原生狀態','花期補充',
+                  '土壤深度','生物多樣性','維護備注','單價','種植間距',
+                  '參考頁碼','參考備注','官方連結','備注',
+                  '日照需求','耐旱性','耐濕性','水分需求','耐水標籤',
+                  '日照水分來源','日照水分來源URL','驗證狀態','驗證時間','驗證摘要',
+                  '圖片網址',
+                ]
+                const rows = plants.map(p => {
+                  const img = imageStore[p.name]
+                  const imgUrl = img?.imageUrl || img?.uploadedDataUrl || ''
+                  return [
+                    p.name, p.category, p.subCategory, p.scientificName,
+                    p.height, p.crownWidth, p.trunkDiameter, p.treeForm,
+                    p.flowerColor, p.flowerMonth, p.flowerPeriod, p.nativeStatus, p.flowerSupplement,
+                    p.soilDepth, p.biodiversityValue, p.maintenanceNote, p.price, p.plantingSpacing,
+                    p.referencePageNo, p.referenceNote, p.officialUrl, p.remarks,
+                    p.sunRequirement, p.droughtTolerance, p.wetTolerance, p.waterRequirement, p.waterToleranceTag,
+                    p.sunWaterSource, p.sunWaterSourceUrl, p.verificationStatus, p.verifiedAt, p.verificationSummary,
+                    imgUrl,
+                  ].join('\t')
+                })
+                const tsv = [headers.join('\t'), ...rows].join('\n')
+                const bom = '﻿'
+                const blob = new Blob([bom + tsv], { type: 'text/tab-separated-values;charset=utf-8' })
                 const url = URL.createObjectURL(blob)
                 const a = document.createElement('a'); a.href = url
-                a.download = `植栽照片庫_${filled.length}筆.json`
+                a.download = `植栽資料庫_含圖片網址_${plants.length}筆.csv`
                 a.click(); URL.revokeObjectURL(url)
               }}
-              title="匯出照片庫 JSON，傳給同事後可匯入共用"
-              className="flex items-center gap-2 px-4 py-2 rounded-xl border border-stone-200 text-sm text-stone-600 hover:bg-stone-50 font-medium">
-              <FileDown size={14} />匯出照片庫
+              title="匯出完整植栽庫，最後一欄含圖片網址，同事匯入後可直接看到圖片"
+              className="flex items-center gap-2 px-4 py-2 rounded-xl border border-green-300 bg-green-50 text-sm text-green-700 hover:bg-green-100 font-medium">
+              <FileDown size={14} />匯出含圖片網址 CSV
             </button>
-            {/* 匯入照片庫 */}
-            <button
-              onClick={() => importPhotoRef.current?.click()}
-              title="匯入同事提供的照片庫 JSON 檔"
-              className="flex items-center gap-2 px-4 py-2 rounded-xl border border-stone-200 text-sm text-stone-600 hover:bg-stone-50 font-medium">
-              <Upload size={14} />匯入照片庫
-            </button>
-            <input ref={importPhotoRef} type="file" accept=".json" className="hidden"
-              onChange={e => {
-                const file = e.target.files?.[0]; if (!file) return
-                const reader = new FileReader()
-                reader.onload = ev => {
-                  try {
-                    const incoming = JSON.parse(ev.target?.result as string)
-                    if (typeof incoming !== 'object' || Array.isArray(incoming)) throw new Error()
-                    // 合併：incoming 優先，不覆蓋本機已有的 uploadedDataUrl
-                    const merged = { ...incoming }
-                    for (const [k, v] of Object.entries(imageStore)) {
-                      if ((v as { uploadedDataUrl?: string }).uploadedDataUrl) merged[k] = v
-                    }
-                    saveImageStore(merged as ImageStore)
-                    onSaveImage('__reload__', {})   // 觸發父層 re-render
-                    alert(`照片庫匯入完成！共 ${Object.keys(incoming).length} 筆`)
-                  } catch { alert('檔案格式錯誤，請確認是由本系統匯出的 JSON 檔。') }
-                }
-                reader.readAsText(file)
-                e.target.value = ''
-              }} />
             <button
               onClick={() => { setShowPhotoManager(v => !v); setDetail(null) }}
               className={`flex items-center gap-2 px-4 py-2 rounded-xl border text-sm font-medium transition-colors relative ${
@@ -2011,6 +2007,18 @@ export default function LandscapeAdvisorPage({
   const handleCsvImported = (res: ImportResult) => {
     setAllPlants(res.plants)
     savePlantsToStorage(res.plants)
+    // 若 CSV 含圖片網址欄，自動合併進 imageStore（不覆蓋本機已上傳的檔案）
+    if (Object.keys(res.imageUrls).length > 0) {
+      const current = loadImageStore()
+      const merged = { ...current }
+      for (const [plantName, url] of Object.entries(res.imageUrls)) {
+        if (!merged[plantName]?.uploadedDataUrl) {
+          merged[plantName] = { ...(merged[plantName] ?? {}), imageUrl: url, hasImage: true }
+        }
+      }
+      saveImageStore(merged)
+      setImageStore(merged)
+    }
     setDbStatus('loaded')
     setSelectedPlants([])
     setResult(null)

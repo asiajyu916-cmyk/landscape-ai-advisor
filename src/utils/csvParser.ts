@@ -38,6 +38,7 @@ const COL = {
   verificationStatus: 29,
   verifiedAt:         30,
   verificationSummary:31,
+  imageUrl:           32,   // 圖片網址（選用欄，匯出時自動附加）
 } as const
 
 const REQUIRED_COLUMNS = ['植物名稱', '喬木.灌木.草本', '日照需求', '水分需求']
@@ -177,6 +178,7 @@ export function parsePlantCsv(text: string): ImportResult {
   })
 
   const plants: CsvPlantRecord[] = []
+  const imageUrls: Record<string, string> = {}
   let skippedRows = 0
 
   for (let i = 1; i < lines.length; i++) {
@@ -255,6 +257,10 @@ export function parsePlantCsv(text: string): ImportResult {
       dataComplete,
     }
     plants.push(record)
+
+    // 若 CSV 含圖片網址欄（col 32），記錄下來
+    const imgUrl = get(COL.imageUrl)
+    if (imgUrl) imageUrls[name] = imgUrl
   }
 
   return {
@@ -264,6 +270,7 @@ export function parsePlantCsv(text: string): ImportResult {
     missingColumns,
     skippedRows,
     columnMap,
+    imageUrls,
   }
 }
 

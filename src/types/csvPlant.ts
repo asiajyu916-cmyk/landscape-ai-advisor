@@ -113,4 +113,5 @@ export interface ImportResult {
   missingColumns: string[]
   skippedRows: number
   columnMap: Record<string, boolean>
+  imageUrls: Record<string, string>   // plantName → imageUrl（若 CSV 含圖片網址欄）
 }
