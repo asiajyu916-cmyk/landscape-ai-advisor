@@ -1,0 +1,721 @@
+// ── DXF 解析器（純文字解析，無外部依賴）────────────────────────────────────
+
+import type { DxfInsert, DxfText, BlockGroup, DxfPolygon, DxfParseResult, ZoneType, PlantSchedule, PlantScheduleEntry } from '@/types/dxf'
+
+// ── 植栽索引表偵測 ────────────────────────────────────────────────────────────
+
+// 欄位角色
+type ColRole = 'code' | 'plantName' | 'scientificName' | 'spec' | 'quantity' | 'unit' | 'note' | 'plantType' | 'unknown'
+
+const COL_ROLE_PATTERNS: Array<{ kws: string[]; role: ColRole }> = [
+  { kws: ['項次', '編號', '代號', '圖例', '符號', '號碼', 'NO', 'No.', '序號'], role: 'code' },
+  { kws: ['植物名稱', '植名', '中文名稱', '名稱', '植栽名稱', '植物', '中名'], role: 'plantName' },
+  { kws: ['學名', '拉丁名', 'Latin', '學名與規格'], role: 'scientificName' },
+  { kws: ['規格', '尺寸', '大小', 'SIZE', '胸徑', '樹高', '冠幅'], role: 'spec' },
+  { kws: ['小計', '數量', '株數', '面積', '合計', '總計', 'QTY', '棵數', '數目'], role: 'quantity' },
+  { kws: ['單位', 'UNIT', 'unit'], role: 'unit' },
+  { kws: ['備註', '說明', '注意', 'REMARK', 'Remark', '備注'], role: 'note' },
+  { kws: ['類型', '型態', '喬木類', '灌木類'], role: 'plantType' },
+]
+
+function headerCellRole(content: string): ColRole {
+  const t = content.trim()
+  for (const { kws, role } of COL_ROLE_PATTERNS) {
+    if (kws.some(kw => t.includes(kw))) return role
+  }
+  return 'unknown'
+}
+
+// 解析「13株」「120m2」「13」→ { qty, unit }
+function parseQtyUnit(raw: string): { qty?: number; unit?: string } {
+  const t = raw.trim()
+  const m = t.match(/^(\d+(?:\.\d+)?)\s*(株|棵|本|叢|桿|盆|m²|㎡|m2|M2|平方公尺|公頃|ha|才)?$/)
+  if (!m) return {}
+  const qty = parseFloat(m[1])
+  let unit = m[2]
+  if (unit === 'm2' || unit === 'M2' || unit === '平方公尺') unit = '㎡'
+  return { qty, unit }
+}
+
+// 依植物名稱 / 規格推測預設單位
+function inferUnit(plantName: string, spec?: string): { unit: string; note?: string } {
+  const text = plantName + ' ' + (spec ?? '')
+  if (/喬木|行道樹|樹木|喬木類/.test(text)) return { unit: '株' }
+  if (/草皮|草坪|草地|lawn|turf/.test(text))  return { unit: '㎡' }
+  if (/地被|groundcover|草花/.test(text))       return { unit: '㎡' }
+  if (/灌木|灌叢|綠籬|hedge|shrub/.test(text))  return { unit: '㎡', note: '單位需確認（㎡ 或 株）' }
+  return { unit: '株', note: '單位待確認' }
+}
+
+export function detectPlantSchedule(texts: DxfText[]): PlantSchedule {
+  if (texts.length === 0) return { entries: [], detected: false, textCount: 0 }
+
+  // ── 1. 依 Y 座標分群成列 ─────────────────────────────────────────────────────
+  const ys = texts.map(t => t.y).sort((a, b) => a - b)
+  const yRange = ys[ys.length - 1] - ys[0]
+  const tolerance = Math.max(2, Math.min(50, yRange * 0.015 || 5))
+
+  const rows: DxfText[][] = []
+  for (const t of [...texts].sort((a, b) => b.y - a.y)) {
+    const row = rows.find(r => Math.abs(r[0].y - t.y) <= tolerance)
+    if (row) { row.push(t); row.sort((a, b) => a.x - b.x) }
+    else rows.push([t])
+  }
+
+  const tableRows = rows.filter(r => r.length >= 2)
+  if (tableRows.length < 3) return { entries: [], detected: false, textCount: texts.length }
+
+  // ── 2. 找表頭列，建立欄位 X 座標→角色的對照 ──────────────────────────────────
+  let headerRowIdx = -1
+  let colSchema: Array<{ x: number; role: ColRole }> = []
+
+  for (let ri = 0; ri < tableRows.length; ri++) {
+    const row = tableRows[ri]
+    const mapped = row.map(t => ({ x: t.x, role: headerCellRole(t.content) }))
+    const namedCount = mapped.filter(m => m.role !== 'unknown').length
+    if (namedCount >= 2) { headerRowIdx = ri; colSchema = mapped; break }
+  }
+
+  // 依最近欄位 X 座標指派角色
+  const assignRole = (cell: DxfText): ColRole => {
+    if (colSchema.length === 0) return 'unknown'
+    let best: ColRole = 'unknown'; let minDist = Infinity
+    for (const col of colSchema) {
+      const d = Math.abs(cell.x - col.x)
+      if (d < minDist) { minDist = d; best = col.role }
+    }
+    return best
+  }
+
+  // ── 3. 解析每一資料列 ─────────────────────────────────────────────────────────
+  const entries: PlantScheduleEntry[] = []
+
+  for (let ri = 0; ri < tableRows.length; ri++) {
+    if (ri === headerRowIdx) continue
+    const row = tableRows[ri]
+    const rawRow = row.map(t => t.content)
+
+    let code = ''
+    let plantName = ''
+    let scientificName: string | undefined
+    let plantType: string | undefined
+    let spec: string | undefined
+    let quantity: number | undefined
+    let unit: string | undefined
+    let note: string | undefined
+    let quantityNote: string | undefined
+    let unitNote: string | undefined
+
+    if (colSchema.length > 0) {
+      // ── 表頭已知：按欄位角色分派 ──────────────────────────────────────────
+      for (const cell of row) {
+        const role = assignRole(cell)
+        const t = cell.content.trim()
+        if (!t) continue
+        switch (role) {
+          case 'code':     code = t; break
+          case 'plantName':
+            if (/[一-鿿]/.test(t)) plantName = t
+            break
+          case 'scientificName': scientificName = t; break
+          case 'spec':     spec = t; break
+          case 'plantType': plantType = t; break
+          case 'note':     note = t; break
+          case 'unit':     unit = t; break
+          case 'quantity': {
+            const { qty, unit: u } = parseQtyUnit(t)
+            if (qty !== undefined) {
+              quantity = qty
+              if (u && !unit) unit = u
+            } else {
+              quantityNote = `數量待確認（原始值：${t}）`
+            }
+            break
+          }
+        }
+      }
+
+      // ── Fallback：若欄位指派未能解析植物名稱，掃全列找中文 2-8 字 cell ──
+      // 解決：灌木 / 地被欄位因 X 座標偏移被指派到錯誤角色導致 plantName 為空
+      if (!plantName) {
+        const fallbackCell = row.find(c => /^[一-鿿]{2,8}$/.test(c.content.trim()))
+        if (fallbackCell) {
+          plantName = fallbackCell.content.trim()
+          // 若代號也為空，找植物名稱左側最近的純數字
+          if (!code) {
+            const leftNum = row
+              .filter(c => /^\d{2,}$/.test(c.content.trim()) && c.x < fallbackCell.x)
+              .pop()
+            if (leftNum) code = leftNum.content.trim()
+          }
+        }
+      }
+    } else {
+      // ── 無表頭：啟發式推測 ────────────────────────────────────────────────
+      // 找中文植物名稱（純中文 2-8 字，或含中文且不像規格描述）
+      const plantCell =
+        row.find(t => /^[一-鿿]{2,8}$/.test(t.content.trim())) ??
+        row.find(t => /^[一-鿿]{2,}/.test(t.content.trim()) && !/\d/.test(t.content))
+      if (!plantCell) continue
+      plantName = plantCell.content.trim()
+
+      // 植物名稱左側第一個數字 → 代號（項次），不是數量
+      const leftNums = row.filter(c => /^\d+$/.test(c.content.trim()) && c.x < plantCell.x)
+      if (leftNums.length > 0) code = leftNums[leftNums.length - 1].content.trim()
+
+      // 植物名稱右側最後一個數字（可能含單位）→ 數量
+      const rightNums = row.filter(c => /^\d+/.test(c.content.trim()) && c.x > plantCell.x)
+      if (rightNums.length > 0) {
+        const last = rightNums[rightNums.length - 1]
+        const { qty, unit: u } = parseQtyUnit(last.content.trim())
+        quantity = qty
+        unit = u
+      }
+
+      // 規格：含維度資訊的格
+      const specCell = row.find(c =>
+        /[HWBhwb]\d|\d+[xX×]\d+|cm|CM|公分|公尺/.test(c.content) && c.x > plantCell.x
+      )
+      spec = specCell?.content.trim()
+    }
+
+    if (!plantName) continue
+
+    // ── 4. 單位補全推測 ──────────────────────────────────────────────────────
+    if (!unit) {
+      if (quantity !== undefined) {
+        const inf = inferUnit(plantName, spec)
+        unit = inf.unit
+        unitNote = inf.note
+      } else if (!quantityNote) {
+        quantityNote = '數量待確認'
+      }
+    }
+
+    // ── 5. 信心評分 ──────────────────────────────────────────────────────────
+    const confidence: PlantScheduleEntry['confidence'] =
+      (code && quantity !== undefined) ? 'high'
+      : (code || quantity !== undefined) ? 'medium'
+      : 'low'
+
+    entries.push({
+      rowIndex: ri, code, plantName, scientificName, plantType,
+      spec, quantity, unit, note, quantityNote, unitNote,
+      rawRow, dbMatched: false, confidence,
+    })
+  }
+
+  return {
+    entries,
+    headerRow: headerRowIdx >= 0 ? tableRows[headerRowIdx].map(t => t.content) : undefined,
+    detected: entries.length > 0,
+    textCount: texts.length,
+  }
+}
+
+// ── 附近文字搜尋 ──────────────────────────────────────────────────────────────
+
+export function findNearbyTexts(
+  pos: { x: number; y: number },
+  texts: DxfText[],
+  radius: number,
+): string[] {
+  return texts
+    .filter(t => Math.hypot(t.x - pos.x, t.y - pos.y) <= radius)
+    .map(t => t.content)
+}
+
+interface GroupCode { code: number; value: string }
+
+function parseGroupCodes(text: string): GroupCode[] {
+  const lines = text.replace(/\r/g, '').split('\n').map(l => l.trim())
+  const groups: GroupCode[] = []
+  for (let i = 0; i + 1 < lines.length; i += 2) {
+    const code = parseInt(lines[i], 10)
+    if (!isNaN(code)) groups.push({ code, value: lines[i + 1] ?? '' })
+  }
+  return groups
+}
+
+function stripMtextCodes(raw: string): string {
+  return raw
+    .replace(/\{\\[^}]*\}/g, '')
+    .replace(/\\P/gi, ' ')
+    .replace(/\\~/g, ' ')
+    .replace(/\\[a-zA-Z][^;]*;/g, '')
+    .replace(/[{}\\]/g, '')
+    .trim()
+}
+
+// ── Zone keyword classification ───────────────────────────────────────────────
+
+const ZONE_PATTERNS: Array<{ type: Exclude<ZoneType, 'unknown'>; keywords: string[] }> = [
+  { type: 'high_irrigation', keywords: ['高澆灌', '喬木澆灌', 'high_irr', 'HIGH_IRR', '高灌'] },
+  { type: 'low_irrigation',  keywords: ['低澆灌', '草皮澆灌', 'low_irr', 'LOW_IRR', '低灌'] },
+  { type: 'lawn',            keywords: ['草皮', 'lawn', 'LAWN', '草地', 'turf', 'TURF', '草坪'] },
+  { type: 'shrub',           keywords: ['灌木', 'shrub', 'SHRUB', '灌叢', '低木'] },
+  { type: 'groundcover',     keywords: ['地被', 'groundcover', 'ground_cov', '草花', '覆蓋'] },
+  { type: 'tree',            keywords: ['喬木', 'tree', 'TREE', '樹木', '高木'] },
+]
+
+export function classifyZone(layerName: string): ZoneType {
+  const lower = layerName.toLowerCase()
+  for (const { type, keywords } of ZONE_PATTERNS) {
+    if (keywords.some(kw => lower.includes(kw.toLowerCase()))) return type
+  }
+  return 'unknown'
+}
+
+// ── HATCH boundary extraction ─────────────────────────────────────────────────
+//
+// DXF HATCH 結構：
+//   91  numBoundaryPaths        ← 此函式從這裡開始（呼叫端已跳過 HATCH header）
+//   92  pathType (2=polyline, 1=edge)
+//   [boundary vertex data: 10/20 pairs]
+//   75  hatchStyle              ← 邊界資料結束標記
+//   76  patternType
+//   52  patternAngle
+//   [fill pattern line 10/20 pairs ← 不要讀這區！]
+//   98  seedCount
+//   10/20 seed points
+//   0   next entity
+//
+// 關鍵修正：必須在 code 75 前停止，否則 HATCH 填充線的 10/20 座標
+// 會被誤判為邊界頂點，污染分區 polygon。
+
+function parseHatchBoundary(groups: GroupCode[], startIdx: number): {
+  vertices: Array<{ x: number; y: number }>; end: number
+} {
+  const vertices: Array<{ x: number; y: number }> = []
+  let i = startIdx
+
+  // 呼叫端應已停在 code 91；若不是則嘗試找到它
+  if (i < groups.length && groups[i].code !== 91) {
+    while (i < groups.length && groups[i].code !== 91 && groups[i].code !== 75 && groups[i].code !== 0) i++
+  }
+  if (i >= groups.length || groups[i].code !== 91) {
+    // 沒找到邊界資料段，跳到下一個 entity 結束
+    while (i < groups.length && groups[i].code !== 0) i++
+    return { vertices, end: i }
+  }
+  i++ // 跳過 code 91 本身
+
+  // 讀取邊界頂點，直到 code 75（填充圖案起始）或 code 0（下一實體）
+  let currentX: number | null = null
+  let endX:     number | null = null   // line edge 終點 (code 11/21)
+
+  while (i < groups.length && groups[i].code !== 0 && groups[i].code !== 75) {
+    const g = groups[i]
+    // ── 頂點（polyline boundary 或 line/arc edge 起點）──────────────────
+    if (g.code === 10) { currentX = parseFloat(g.value) || 0 }
+    else if (g.code === 20 && currentX !== null) {
+      vertices.push({ x: currentX, y: parseFloat(g.value) || 0 })
+      currentX = null
+    }
+    // ── line edge 終點（code 11/21）── 讓折線不斷開 ─────────────────────
+    if (g.code === 11) { endX = parseFloat(g.value) || 0 }
+    else if (g.code === 21 && endX !== null) {
+      vertices.push({ x: endX, y: parseFloat(g.value) || 0 })
+      endX = null
+    }
+    i++
+  }
+
+  // 跳過剩餘 HATCH 資料（填充線、seed points 等）到下一個 entity
+  while (i < groups.length && groups[i].code !== 0) i++
+
+  return { vertices, end: i }
+}
+
+// ── Block definition parser ───────────────────────────────────────────────────
+
+interface BlockDef {
+  baseX: number
+  baseY: number
+  texts: Array<{ content: string; layer: string; localX: number; localY: number; type: 'TEXT' | 'MTEXT' }>
+  inserts: Array<{ blockName: string; layer: string; localX: number; localY: number }>
+  polygons: Array<{ layer: string; vertices: Array<{x:number;y:number}>; closed: boolean; source: 'LWPOLYLINE'|'HATCH'|'POLYLINE' }>
+  // 本地 bbox（以 block origin 為原點），供計算世界座標 bbox 中心使用
+  localBBox?: { minX: number; maxX: number; minY: number; maxY: number; cx: number; cy: number }
+}
+
+function parseBlockDefs(groups: GroupCode[]): Map<string, BlockDef> {
+  const defs = new Map<string, BlockDef>()
+
+  // 找到 BLOCKS section（用 SECTION + BLOCKS 兩個標記組合定位）
+  let i = 0
+  while (i < groups.length - 1) {
+    if (groups[i].code === 0 && groups[i].value === 'SECTION' &&
+        groups[i + 1].code === 2 && groups[i + 1].value === 'BLOCKS') {
+      i += 2; break
+    }
+    i++
+  }
+
+  while (i < groups.length) {
+    if (groups[i].code === 0 && groups[i].value === 'ENDSEC') break
+
+    // 每個 BLOCK 定義
+    if (groups[i].code === 0 && groups[i].value === 'BLOCK') {
+      i++
+      let blockName = ''; let baseX = 0; let baseY = 0
+      const blockTexts: BlockDef['texts'] = []
+
+      // 讀 block header（非 entity 行）
+      while (i < groups.length && groups[i].code !== 0) {
+        if (groups[i].code === 2)  blockName = groups[i].value
+        if (groups[i].code === 10) baseX     = parseFloat(groups[i].value) || 0
+        if (groups[i].code === 20) baseY     = parseFloat(groups[i].value) || 0
+        i++
+      }
+
+      // 讀 block 內所有 entities 直到 ENDBLK
+      const blockInserts: BlockDef['inserts'] = []
+      const blockPolygons: BlockDef['polygons'] = []
+
+      while (i < groups.length) {
+        if (groups[i].code === 0 && groups[i].value === 'ENDBLK') { i++; break }
+        if (groups[i].code === 0 && groups[i].value === 'ENDSEC') break
+
+        const eVal = groups[i].value
+
+        // TEXT / MTEXT / ATTDEF
+        if (groups[i].code === 0 && (eVal === 'TEXT' || eVal === 'MTEXT' || eVal === 'ATTDEF' || eVal === 'ATTRIB')) {
+          const eType = eVal as 'TEXT' | 'MTEXT' | 'ATTDEF' | 'ATTRIB'
+          let layer = ''; let content = ''; let lx = 0; let ly = 0
+          i++
+          while (i < groups.length && groups[i].code !== 0) {
+            if (groups[i].code === 8)  layer   = groups[i].value
+            if (groups[i].code === 1)  content = (eType === 'MTEXT') ? stripMtextCodes(groups[i].value) : groups[i].value
+            if (groups[i].code === 10) lx      = parseFloat(groups[i].value) || 0
+            if (groups[i].code === 20) ly      = parseFloat(groups[i].value) || 0
+            i++
+          }
+          if (content.trim()) {
+            blockTexts.push({ content: content.trim(), layer, localX: lx, localY: ly, type: eType === 'MTEXT' ? 'MTEXT' : 'TEXT' })
+          }
+
+        // INSERT（nested block）
+        } else if (groups[i].code === 0 && eVal === 'INSERT') {
+          let layer = ''; let bname = ''; let lx = 0; let ly = 0
+          i++
+          while (i < groups.length && groups[i].code !== 0) {
+            if (groups[i].code === 8) layer = groups[i].value
+            if (groups[i].code === 2) bname = groups[i].value
+            if (groups[i].code === 10) lx   = parseFloat(groups[i].value) || 0
+            if (groups[i].code === 20) ly   = parseFloat(groups[i].value) || 0
+            i++
+          }
+          if (bname) blockInserts.push({ blockName: bname, layer, localX: lx, localY: ly })
+
+        // LWPOLYLINE
+        } else if (groups[i].code === 0 && eVal === 'LWPOLYLINE') {
+          let layer = ''; let closed = false
+          const verts: Array<{x:number;y:number}> = []; let px: number|null = null
+          i++
+          while (i < groups.length && groups[i].code !== 0) {
+            if (groups[i].code === 8)  layer  = groups[i].value
+            if (groups[i].code === 70) closed = (parseInt(groups[i].value) & 1) === 1
+            if (groups[i].code === 10) px     = parseFloat(groups[i].value) || 0
+            if (groups[i].code === 20 && px !== null) { verts.push({ x: px, y: parseFloat(groups[i].value) || 0 }); px = null }
+            i++
+          }
+          if (verts.length >= 3) blockPolygons.push({ layer, vertices: verts, closed: closed || isApproxClosed(verts), source: 'LWPOLYLINE' })
+
+        // HATCH
+        } else if (groups[i].code === 0 && eVal === 'HATCH') {
+          let layer = ''
+          i++
+          while (i < groups.length && groups[i].code !== 0 && groups[i].code !== 91) {
+            if (groups[i].code === 8) layer = groups[i].value
+            i++
+          }
+          const { vertices: hv, end: he } = parseHatchBoundary(groups, i)
+          i = he
+          if (hv.length >= 3) blockPolygons.push({ layer, vertices: hv, closed: true, source: 'HATCH' })
+
+        // CIRCLE（樹木圓形圖案最常見的幾何元素）
+        } else if (groups[i].code === 0 && eVal === 'CIRCLE') {
+          let cx = 0; let cy = 0; let r = 0
+          i++
+          while (i < groups.length && groups[i].code !== 0) {
+            if (groups[i].code === 10) cx = parseFloat(groups[i].value) || 0
+            if (groups[i].code === 20) cy = parseFloat(groups[i].value) || 0
+            if (groups[i].code === 40) r  = parseFloat(groups[i].value) || 0
+            i++
+          }
+          if (r > 0) {
+            // 近似為 8 邊形頂點，供 bbox 計算
+            const pts: Array<{x:number;y:number}> = []
+            for (let a = 0; a < 8; a++) {
+              const angle = (a / 8) * Math.PI * 2
+              pts.push({ x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) })
+            }
+            blockPolygons.push({ layer: '', vertices: pts, closed: true, source: 'LWPOLYLINE' })
+          }
+
+        } else {
+          i++
+        }
+      }
+
+      // ── 計算 block 本地 bbox（以 baseX/baseY 為原點偏移後的 local 座標系）
+      let localBBox: BlockDef['localBBox'] = undefined
+      const allLocalPts: Array<{x:number;y:number}> = []
+      for (const poly of blockPolygons) allLocalPts.push(...poly.vertices)
+      for (const t of blockTexts) allLocalPts.push({ x: t.localX, y: t.localY })
+      if (allLocalPts.length > 0) {
+        const xs = allLocalPts.map(p => p.x); const ys = allLocalPts.map(p => p.y)
+        const minX = Math.min(...xs); const maxX = Math.max(...xs)
+        const minY = Math.min(...ys); const maxY = Math.max(...ys)
+        localBBox = { minX, maxX, minY, maxY, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 }
+      }
+
+      if (blockName) defs.set(blockName, { baseX, baseY, texts: blockTexts, inserts: blockInserts, polygons: blockPolygons, localBBox })
+    } else {
+      i++
+    }
+  }
+
+  return defs
+}
+
+// ── Main parser ───────────────────────────────────────────────────────────────
+
+export function parseDxf(text: string): DxfParseResult {
+  const groups = parseGroupCodes(text)
+  const inserts: DxfInsert[] = []
+  const texts: DxfText[] = []
+  const polygons: DxfPolygon[] = []
+
+  // 預先解析 BLOCKS section（block 定義內的文字）
+  const blockDefs = parseBlockDefs(groups)
+
+  // ── AutoCAD R2004+ 格式：model space 實體存在 *Model_Space block 而非 ENTITIES section ──
+  // 找 *Model_Space（各種大小寫）block，直接輸出其文字與幾何
+  for (const [bname, bdef] of blockDefs) {
+    const low = bname.toLowerCase()
+    const isModelSpace = low === '*model_space' || low === '*modelspace' || low.includes('model_space')
+    const isPaperSpace = low.includes('paper')
+    if (isModelSpace && !isPaperSpace) {
+      // 文字
+      for (const bt of bdef.texts) {
+        texts.push({ type: bt.type, layer: bt.layer, content: bt.content, x: bt.localX, y: bt.localY })
+      }
+      // 幾何（HATCH / LWPOLYLINE）
+      for (const bp of bdef.polygons) {
+        polygons.push({ layer: bp.layer, vertices: bp.vertices, closed: bp.closed, zoneType: classifyZone(bp.layer), source: bp.source })
+      }
+    }
+  }
+
+  // Locate ENTITIES section（傳統格式的 entity 也繼續讀）
+  let i = 0
+  while (i < groups.length) {
+    if (groups[i].code === 2 && groups[i].value === 'ENTITIES') { i++; break }
+    i++
+  }
+
+  // Parse entities
+  while (i < groups.length) {
+    const g = groups[i]
+    if (g.code === 0 && g.value === 'ENDSEC') break
+
+    // ── INSERT, TEXT, MTEXT, ATTRIB, ATTDEF ─────────────────────────────────
+    // ATTRIB  = INSERT 後接的屬性值（植物名稱、代號等）
+    // ATTDEF  = 屬性定義模板（通常在 BLOCK 段，但舊版 CAD 有時出現在 ENTITIES）
+    // SEQEND  = ATTRIB 序列結束標記，直接跳過
+    if (g.code === 0 && g.value === 'SEQEND') { i++; continue }
+
+    if (g.code === 0 && (
+      g.value === 'INSERT' || g.value === 'TEXT' ||
+      g.value === 'MTEXT'  || g.value === 'ATTRIB' || g.value === 'ATTDEF'
+    )) {
+      const type = g.value as 'INSERT' | 'TEXT' | 'MTEXT' | 'ATTRIB' | 'ATTDEF'
+      let layer = ''; let blockName = ''; let content = ''; let altContent = ''
+      let attribTag = ''   // ATTRIB / ATTDEF 的屬性名稱（group code 2）
+      let x = 0; let y = 0
+      let scaleX = 1; let scaleY = 1; let rotDeg = 0
+      i++
+      while (i < groups.length && groups[i].code !== 0) {
+        const eg = groups[i]
+        if (eg.code === 8)  layer = eg.value
+        if (eg.code === 2 && type === 'INSERT')               blockName = eg.value
+        if (eg.code === 2 && (type === 'ATTRIB' || type === 'ATTDEF')) attribTag = eg.value
+        // code 1 = 文字內容；code 3 = MTEXT 續接段落
+        if (eg.code === 1) content    = type === 'MTEXT' ? stripMtextCodes(eg.value) : eg.value
+        if (eg.code === 3) altContent = type === 'MTEXT' ? stripMtextCodes(eg.value) : eg.value
+        if (eg.code === 10) x      = parseFloat(eg.value) || 0
+        if (eg.code === 20) y      = parseFloat(eg.value) || 0
+        if (eg.code === 41) scaleX = parseFloat(eg.value) || 1
+        if (eg.code === 42) scaleY = parseFloat(eg.value) || 1
+        if (eg.code === 50) rotDeg = parseFloat(eg.value) || 0
+        i++
+      }
+      // 合併 MTEXT 多段
+      const fullContent = (altContent + content).trim() || content.trim()
+      if (type === 'INSERT' && blockName) {
+        inserts.push({ type: 'INSERT', layer, blockName, x, y, scaleX, scaleY, rotation: rotDeg })
+
+        // 把 block 定義內的文字以世界座標輸出（讓分區標籤可以被偵測到）
+        const bdef = blockDefs.get(blockName)
+        if (bdef && bdef.texts.length > 0) {
+          const rad = rotDeg * Math.PI / 180
+          const cos = Math.cos(rad); const sin = Math.sin(rad)
+          for (const bt of bdef.texts) {
+            const dx = bt.localX - bdef.baseX; const dy = bt.localY - bdef.baseY
+            const wx = x + dx * scaleX * cos - dy * scaleY * sin
+            const wy = y + dx * scaleX * sin + dy * scaleY * cos
+            texts.push({ type: bt.type, layer: bt.layer || layer, content: bt.content, x: wx, y: wy })
+          }
+        }
+      } else if (fullContent) {
+        // ATTRIB / ATTDEF 的屬性名稱（tag）也一併輸出為文字，供植物名稱比對使用
+        // 例如 ATTRIB tag="植物名稱" value="樟樹" → 輸出 "樟樹"（value 已在 fullContent）
+        // 若 tag 本身也含有用資訊（如「灌木區」），也會被輸出
+        if ((type === 'ATTRIB' || type === 'ATTDEF') && attribTag && attribTag !== fullContent) {
+          const tagNorm = attribTag.trim()
+          if (tagNorm && /[一-鿿A-Za-z]/.test(tagNorm)) {
+            texts.push({ type: 'TEXT', layer, content: tagNorm, x, y })
+          }
+        }
+        texts.push({ type: type === 'MTEXT' ? 'MTEXT' : 'TEXT', layer, content: fullContent, x, y })
+      }
+
+    // ── LWPOLYLINE ───────────────────────────────────────────────────────────
+    } else if (g.code === 0 && g.value === 'LWPOLYLINE') {
+      let layer = ''; let closed = false
+      const vertices: Array<{ x: number; y: number }> = []
+      let pendingX: number | null = null
+      i++
+      while (i < groups.length && groups[i].code !== 0) {
+        const eg = groups[i]
+        if (eg.code === 8)  layer  = eg.value
+        if (eg.code === 70) closed = (parseInt(eg.value) & 1) === 1
+        if (eg.code === 10) pendingX = parseFloat(eg.value) || 0
+        if (eg.code === 20 && pendingX !== null) {
+          vertices.push({ x: pendingX, y: parseFloat(eg.value) || 0 })
+          pendingX = null
+        }
+        i++
+      }
+      if (vertices.length >= 3) {
+        polygons.push({
+          layer, vertices,
+          closed: closed || isApproxClosed(vertices),
+          zoneType: classifyZone(layer),
+          source: 'LWPOLYLINE',
+        })
+      }
+
+    // ── HATCH ────────────────────────────────────────────────────────────────
+    } else if (g.code === 0 && g.value === 'HATCH') {
+      let layer = ''
+      i++
+      // Read layer then try to extract boundary vertices
+      while (i < groups.length && groups[i].code !== 0 && groups[i].code !== 91) {
+        if (groups[i].code === 8) layer = groups[i].value
+        i++
+      }
+      const { vertices, end } = parseHatchBoundary(groups, i)
+      i = end
+      if (vertices.length >= 3) {
+        polygons.push({
+          layer, vertices,
+          closed: true,  // HATCH is always closed
+          zoneType: classifyZone(layer),
+          source: 'HATCH',
+        })
+      }
+
+    // ── POLYLINE (old style) ─────────────────────────────────────────────────
+    } else if (g.code === 0 && g.value === 'POLYLINE') {
+      let layer = ''; let closed = false
+      i++
+      while (i < groups.length && groups[i].code !== 0) {
+        if (groups[i].code === 8)  layer  = groups[i].value
+        if (groups[i].code === 70) closed = (parseInt(groups[i].value) & 1) === 1
+        i++
+      }
+      // Collect VERTEX entities that follow
+      const vertices: Array<{ x: number; y: number }> = []
+      while (i < groups.length && groups[i].code === 0 && groups[i].value === 'VERTEX') {
+        let vx = 0; let vy = 0
+        i++
+        while (i < groups.length && groups[i].code !== 0) {
+          if (groups[i].code === 10) vx = parseFloat(groups[i].value) || 0
+          if (groups[i].code === 20) vy = parseFloat(groups[i].value) || 0
+          i++
+        }
+        vertices.push({ x: vx, y: vy })
+      }
+      if (vertices.length >= 3) {
+        polygons.push({
+          layer, vertices,
+          closed: closed || isApproxClosed(vertices),
+          zoneType: classifyZone(layer),
+          source: 'POLYLINE',
+        })
+      }
+
+    } else {
+      i++
+    }
+  }
+
+  // Group INSERTs: store ALL positions (no limit, for spatial analysis)
+  const groupMap = new Map<string, BlockGroup>()
+  for (const ins of inserts) {
+    const key = `${ins.blockName}||${ins.layer}`
+    if (!groupMap.has(key)) {
+      groupMap.set(key, { blockName: ins.blockName, layer: ins.layer, count: 0, positions: [] })
+    }
+    const grp = groupMap.get(key)!
+    grp.count++
+    grp.positions.push({ x: ins.x, y: ins.y })
+  }
+
+  const blockGroups = Array.from(groupMap.values()).sort((a, b) => b.count - a.count)
+  const allLayers = [...new Set([
+    ...inserts.map(e => e.layer),
+    ...texts.map(e => e.layer),
+    ...polygons.map(p => p.layer),
+  ])].filter(Boolean).sort()
+
+  const classifiedPolygons = polygons.filter(p => p.zoneType !== 'unknown').length
+
+  // 將 block def 的 localBBox 轉成公開型別
+  const blockExtents: Record<string, import('@/types/dxf').BlockExtent> = {}
+  for (const [name, def] of blockDefs.entries()) {
+    if (def.localBBox) {
+      blockExtents[name] = {
+        baseX: def.baseX, baseY: def.baseY,
+        localCx: def.localBBox.cx, localCy: def.localBBox.cy,
+        localMinX: def.localBBox.minX, localMaxX: def.localBBox.maxX,
+        localMinY: def.localBBox.minY, localMaxY: def.localBBox.maxY,
+      }
+    }
+  }
+
+  return {
+    inserts, texts, blockGroups, polygons, allLayers, blockExtents,
+    stats: {
+      totalInserts: inserts.length,
+      totalTexts: texts.length,
+      uniqueBlocks: blockGroups.length,
+      uniqueLayers: allLayers.length,
+      totalPolygons: polygons.length,
+      classifiedPolygons,
+    },
+  }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function isApproxClosed(vertices: Array<{ x: number; y: number }>): boolean {
+  if (vertices.length < 3) return false
+  const first = vertices[0]; const last = vertices[vertices.length - 1]
+  const dx = Math.abs(first.x - last.x); const dy = Math.abs(first.y - last.y)
+  // Consider closed if first ≈ last (within 1 unit)
+  return dx < 1 && dy < 1
+}

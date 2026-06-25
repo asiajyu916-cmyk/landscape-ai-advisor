@@ -1,72 +1,50 @@
-import { useState, useEffect } from 'react'
-import { authService } from '@/services/authService'
-import { seedMockDataIfEmpty } from '@/data/mockData'
-import LoginPage from '@/pages/LoginPage'
-import ProjectListPage from '@/pages/ProjectListPage'
-import WorkbenchPage from '@/pages/WorkbenchPage'
-import type { AuthSession } from '@/types'
+import { useState } from 'react'
+import PdfReviewPage from '@/pages/PdfReviewPage'
+import LandscapeAdvisorPage from '@/pages/LandscapeAdvisorPage'
+import DxfReviewPage from '@/pages/DxfReviewPage'
 
-type AppView = 'login' | 'projects' | 'workbench'
+type AppTab = 'pdf' | 'landscape' | 'dxf'
 
 export default function App() {
-  const [view,      setView]      = useState<AppView>('login')
-  const [session,   setSession]   = useState<AuthSession | null>(null)
-  const [projectId, setProjectId] = useState<string | null>(null)
+  const [activeTab, setActiveTab] = useState<AppTab>('landscape')
 
-  // 初始化：檢查現有 session + 植入 mock 資料
-  useEffect(() => {
-    seedMockDataIfEmpty()
-    const existing = authService.getSession()
-    if (existing) {
-      setSession(existing)
-      setView('projects')
-    }
-  }, [])
+  // PDF / DXF 導入的植栽名稱清單，橋接到 LandscapeAdvisorPage
+  const [importedPlantNames, setImportedPlantNames] = useState<string[]>([])
 
-  const handleLogin = (s: AuthSession) => {
-    setSession(s)
-    setView('projects')
+  const handlePdfImport = (plantNames: string[]) => {
+    setImportedPlantNames(plantNames)
+    setActiveTab('landscape')
   }
 
-  const handleLogout = () => {
-    setSession(null)
-    setProjectId(null)
-    setView('login')
+  const handleDxfImport = (plantNames: string[]) => {
+    setImportedPlantNames(plantNames)
+    setActiveTab('landscape')
   }
 
-  const handleOpenProject = (id: string) => {
-    setProjectId(id)
-    setView('workbench')
-  }
-
-  const handleBackToProjects = () => {
-    setProjectId(null)
-    setView('projects')
-  }
-
-  if (view === 'login' || !session) {
-    return <LoginPage onLogin={handleLogin} />
-  }
-
-  if (view === 'projects') {
-    return (
-      <ProjectListPage
-        session={session}
-        onOpenProject={handleOpenProject}
-        onLogout={handleLogout}
-      />
-    )
-  }
-
-  if (view === 'workbench' && projectId) {
-    return (
-      <WorkbenchPage
-        projectId={projectId}
-        session={session}
-        onBack={handleBackToProjects}
-      />
-    )
-  }
-
-  return null
+  return (
+    <>
+      {activeTab === 'pdf' && (
+        <PdfReviewPage
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+          onImport={handlePdfImport}
+        />
+      )}
+      {activeTab === 'landscape' && (
+        <LandscapeAdvisorPage
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+          importedPlantNames={importedPlantNames.length > 0 ? importedPlantNames : undefined}
+          onImportConsumed={() => setImportedPlantNames([])}
+        />
+      )}
+      {activeTab === 'dxf' && (
+        <DxfReviewPage
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+          onImport={handleDxfImport}
+        />
+      )}
+    </>
+  )
 }

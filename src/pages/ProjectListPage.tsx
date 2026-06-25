@@ -251,7 +251,7 @@ function NewProjectModal({ session, onClose, onCreate }: {
 
 // ─── 主頁面 ─────────────────────────────────────────────────
 
-export default function ProjectListPage({ session, onOpenProject, onLogout }: Props) {
+export default function ProjectListPage({ session, onOpenProject, onOpenPlanner, onLogout }: Props & { onOpenPlanner: () => void }) {
   const [projects, setProjects] = useState<Project[]>([])
   const [loading,  setLoading]  = useState(true)
   const [search,   setSearch]   = useState('')
@@ -327,6 +327,13 @@ export default function ProjectListPage({ session, onOpenProject, onLogout }: Pr
               onChange={e => setSearch(e.target.value)}
               className="w-64 px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400 bg-white"
             />
+            <button
+              onClick={onOpenPlanner}
+              className="flex items-center gap-1.5 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-medium rounded-lg transition-colors border border-slate-600"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>
+              前期規劃
+            </button>
             {canCreate && (
               <button
                 onClick={() => setShowNew(true)}
