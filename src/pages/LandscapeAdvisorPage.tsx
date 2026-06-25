@@ -2272,14 +2272,14 @@ export default function LandscapeAdvisorPage({
               ]
               return (
                 <div className="space-y-4">
-                  {/* Tab bar */}
-                  <div className="flex border-b border-stone-200 overflow-x-auto">
+                  {/* Tab bar — 膠囊按鈕風格，字大易讀 */}
+                  <div className="flex items-center gap-2 flex-wrap bg-stone-100 rounded-2xl p-1.5">
                     {TABS.map(t => (
                       <button key={t.id} onClick={() => setActiveReviewTab(t.id)}
-                        className={`px-4 py-2.5 text-sm font-medium border-b-2 whitespace-nowrap transition-colors ${
+                        className={`flex-1 px-4 py-2.5 rounded-xl text-base font-semibold whitespace-nowrap transition-all ${
                           activeReviewTab === t.id
-                            ? 'border-[#1a4731] text-[#1a4731]'
-                            : 'border-transparent text-stone-500 hover:text-stone-700'
+                            ? 'bg-[#1a4731] text-white shadow-sm'
+                            : 'text-stone-500 hover:text-stone-800 hover:bg-white/60'
                         }`}>
                         {t.label}
                       </button>
