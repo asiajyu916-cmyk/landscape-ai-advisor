@@ -273,7 +273,7 @@ export default function PdfReviewPage({
 
   if (stage === 'upload') {
     return (
-      <div className="min-h-screen" style={{ background: 'radial-gradient(circle at 72% 8%, rgba(111,168,120,0.07) 0%, transparent 30%), linear-gradient(155deg, #f7fbf7 0%, #f1f7f3 40%, #eaf4ed 75%, #e4f1e8 100%)' }}>
+      <div className="min-h-screen" style={{ background: 'radial-gradient(circle at 85% 15%, rgba(121,190,140,0.16) 0%, transparent 30%), radial-gradient(circle at 20% 85%, rgba(183,220,190,0.18) 0%, transparent 35%), linear-gradient(135deg, #f7faf5 0%, #eef6ef 48%, #e5f1e8 100%)' }}>
         <header className="bg-[#1a4731] sticky top-0 z-40 shadow-md">
           <div className="max-w-[1536px] mx-auto px-8 h-16 flex items-center justify-between">
             <div>
@@ -340,7 +340,7 @@ export default function PdfReviewPage({
   const excluded  = result?.excluded ?? []
 
   return (
-    <div className="min-h-screen" style={{ background: 'radial-gradient(circle at 72% 8%, rgba(111,168,120,0.07) 0%, transparent 30%), linear-gradient(155deg, #f7fbf7 0%, #f1f7f3 40%, #eaf4ed 75%, #e4f1e8 100%)' }}>
+    <div className="min-h-screen" style={{ background: 'radial-gradient(circle at 85% 15%, rgba(121,190,140,0.16) 0%, transparent 30%), radial-gradient(circle at 20% 85%, rgba(183,220,190,0.18) 0%, transparent 35%), linear-gradient(135deg, #f7faf5 0%, #eef6ef 48%, #e5f1e8 100%)' }}>
       <header className="bg-[#1a4731] sticky top-0 z-40 shadow-md">
         <div className="max-w-[1536px] mx-auto px-8 h-16 flex items-center justify-between gap-4">
           <div>

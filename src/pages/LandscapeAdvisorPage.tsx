@@ -2090,7 +2090,7 @@ export default function LandscapeAdvisorPage({
   const activeIssues = result?.issues.filter(i => i.level !== 'ok') ?? []
 
   return (
-    <div className="min-h-screen" style={{ background: 'radial-gradient(circle at 72% 8%, rgba(111,168,120,0.07) 0%, transparent 30%), linear-gradient(155deg, #f7fbf7 0%, #f1f7f3 40%, #eaf4ed 75%, #e4f1e8 100%)' }}>
+    <div className="min-h-screen" style={{ background: 'radial-gradient(circle at 85% 15%, rgba(121,190,140,0.16) 0%, transparent 30%), radial-gradient(circle at 20% 85%, rgba(183,220,190,0.18) 0%, transparent 35%), linear-gradient(135deg, #f7faf5 0%, #eef6ef 48%, #e5f1e8 100%)' }}>
       {/* Header */}
       <header className="bg-[#1a4731] sticky top-0 z-40 shadow-md">
         <div className="max-w-[1536px] mx-auto px-8 h-16 flex items-center justify-between gap-4">
@@ -2222,7 +2222,7 @@ export default function LandscapeAdvisorPage({
           {/* ── Right ── */}
           <div className="space-y-5">
             {!result ? (
-              <div className="border border-stone-200/80 rounded-2xl flex flex-col items-center justify-center py-28 text-center px-8 shadow-sm" style={{ background: 'linear-gradient(160deg, #ffffff 0%, #f5faf6 60%, #eef6f0 100%)' }}>
+              <div className="border border-stone-200/80 rounded-2xl flex flex-col items-center justify-center py-28 text-center px-8 shadow-sm" style={{ background: 'radial-gradient(circle at top right, rgba(111,168,120,0.10) 0%, transparent 32%), linear-gradient(145deg, #ffffff 0%, #fbfdfb 55%, #f3faf5 100%)' }}>
                 <div className="w-20 h-20 rounded-full bg-[#d8f3dc] flex items-center justify-center mb-6">
                   <Leaf size={36} className="text-[#2d6a4f]" />
                 </div>
