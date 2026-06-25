@@ -537,7 +537,13 @@ function AltCard({ suggestion }: { suggestion: AltSuggestion }) {
   )
 }
 
-function SelectedPlantCard({ plant, onRemove }: { plant: SelectedCsvPlant; onRemove: () => void }) {
+function SelectedPlantCard({ plant, onRemove, imageStore }: {
+  plant: SelectedCsvPlant; onRemove: () => void; imageStore?: ImageStore
+}) {
+  const imgData = imageStore?.[plant.name]
+  const imgSrc = imgData?.uploadedDataUrl ?? imgData?.imageUrl ?? `/plant-images/${encodeURIComponent(plant.name)}.jpg`
+  const [imgErr, setImgErr] = useState(false)
+
   return (
     <div className="bg-white border border-stone-200 rounded-xl p-3.5 relative group hover:border-[#2d6a4f]/40 hover:shadow-sm transition-all">
       <button onClick={onRemove}
@@ -545,8 +551,11 @@ function SelectedPlantCard({ plant, onRemove }: { plant: SelectedCsvPlant; onRem
         <X size={14} />
       </button>
       <div className="flex items-start gap-3 pr-6">
-        <div className="w-8 h-8 rounded-lg bg-[#d8f3dc] flex items-center justify-center flex-shrink-0">
-          <Leaf size={14} className="text-[#2d6a4f]" />
+        <div className="w-10 h-10 rounded-lg overflow-hidden flex-shrink-0 bg-[#d8f3dc] flex items-center justify-center">
+          {!imgErr
+            ? <img src={imgSrc} alt={plant.name} className="w-full h-full object-cover" onError={() => setImgErr(true)} />
+            : <Leaf size={14} className="text-[#2d6a4f]" />
+          }
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5 flex-wrap">
@@ -2204,7 +2213,7 @@ export default function LandscapeAdvisorPage({
                 {selectedPlants.length === 0
                   ? <p className="text-center text-stone-400 text-sm py-3">尚未加入植栽</p>
                   : selectedPlants.map(p => (
-                      <SelectedPlantCard key={p.instanceId} plant={p} onRemove={() => removePlant(p.instanceId)} />
+                      <SelectedPlantCard key={p.instanceId} plant={p} onRemove={() => removePlant(p.instanceId)} imageStore={imageStore} />
                     ))
                 }
               </div>
