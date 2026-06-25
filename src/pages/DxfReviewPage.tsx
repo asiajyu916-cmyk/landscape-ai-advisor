@@ -1654,6 +1654,8 @@ const ISSUE_CLS: Record<string, string> = {
 }
 
 function ZoneReviewTab({ reviews }: { reviews: ZoneReviewResult[] }) {
+  const [activeTab, setActiveTab] = useState<string>('overview')
+
   if (reviews.length === 0) return (
     <div className="flex flex-col items-center justify-center py-20 text-stone-400 gap-3">
       <Layers size={36} className="opacity-30" />
@@ -1666,98 +1668,285 @@ function ZoneReviewTab({ reviews }: { reviews: ZoneReviewResult[] }) {
 
   const reviewable = reviews.filter(r => r.status === '可審查')
   const pending    = reviews.filter(r => r.status !== '可審查')
+  const activeReview = reviews.find(r => r.zoneName === activeTab) ?? null
+
+  // 風險等級 badge 顏色
+  const riskBadgeCls = (r: ZoneReviewResult) => {
+    const dangerCnt = r.evalResult?.issues.filter(i => i.level === 'danger').length ?? 0
+    if (dangerCnt > 0) return 'bg-red-100 text-red-700 border-red-300'
+    const cautionCnt = r.evalResult?.issues.filter(i => i.level === 'caution').length ?? 0
+    if (cautionCnt > 0) return 'bg-amber-100 text-amber-700 border-amber-300'
+    if (r.evalResult) return 'bg-emerald-100 text-emerald-700 border-emerald-300'
+    return 'bg-stone-100 text-stone-500 border-stone-200'
+  }
+  const riskLabel = (r: ZoneReviewResult) => {
+    const dangerCnt = r.evalResult?.issues.filter(i => i.level === 'danger').length ?? 0
+    if (dangerCnt > 0) return '高風險'
+    const cautionCnt = r.evalResult?.issues.filter(i => i.level === 'caution').length ?? 0
+    if (cautionCnt > 0) return '中風險'
+    if (r.evalResult) return '低風險'
+    return r.status === '植物待確認' ? '待確認' : '無資料'
+  }
+  const plantCount = (r: ZoneReviewResult) => r.blockEntries.reduce((s, b) => s + b.count, 0)
 
   return (
-    <div className="space-y-5">
-      {/* ── 總覽摘要 ── */}
-      <div className="flex gap-3 flex-wrap">
-        <div className="px-4 py-2.5 rounded-xl border border-blue-200 bg-blue-50 text-blue-800 text-sm font-medium">
-          共 {reviews.length} 個分區
+    <div className="space-y-4">
+      {/* ── Tab 列 ── */}
+      <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden">
+        <div className="flex overflow-x-auto border-b border-stone-200 scrollbar-none">
+          {/* 總覽 tab */}
+          <button
+            onClick={() => setActiveTab('overview')}
+            className={`flex-shrink-0 px-5 py-3 text-sm font-semibold border-b-2 transition-colors whitespace-nowrap ${
+              activeTab === 'overview'
+                ? 'border-green-600 text-green-700 bg-green-50'
+                : 'border-transparent text-stone-500 hover:text-stone-700 hover:bg-stone-50'
+            }`}>
+            總覽
+          </button>
+          {/* 各分區 tab */}
+          {reviews.map(r => {
+            const cnt = plantCount(r)
+            const dangerCnt = r.evalResult?.issues.filter(i => i.level === 'danger').length ?? 0
+            const cautionCnt = r.evalResult?.issues.filter(i => i.level === 'caution').length ?? 0
+            const isActive = activeTab === r.zoneName
+            return (
+              <button key={r.zoneName}
+                onClick={() => setActiveTab(r.zoneName)}
+                className={`flex-shrink-0 flex items-center gap-2 px-5 py-3 text-sm font-semibold border-b-2 transition-colors whitespace-nowrap ${
+                  isActive
+                    ? 'border-green-600 text-green-700 bg-green-50'
+                    : 'border-transparent text-stone-500 hover:text-stone-700 hover:bg-stone-50'
+                }`}>
+                {r.zoneName}
+                {cnt > 0 && <span className="text-xs font-normal text-stone-400">{cnt}株</span>}
+                {dangerCnt > 0 && (
+                  <span className="inline-block w-2 h-2 rounded-full bg-red-500" title="高風險" />
+                )}
+                {dangerCnt === 0 && cautionCnt > 0 && (
+                  <span className="inline-block w-2 h-2 rounded-full bg-amber-400" title="中風險" />
+                )}
+                {dangerCnt === 0 && cautionCnt === 0 && r.evalResult && (
+                  <span className="inline-block w-2 h-2 rounded-full bg-emerald-500" title="低風險" />
+                )}
+              </button>
+            )
+          })}
         </div>
-        <div className="px-4 py-2.5 rounded-xl border border-emerald-200 bg-emerald-50 text-emerald-800 text-sm font-medium">
-          已完成審查 {reviewable.length} 區
-        </div>
-        {pending.length > 0 && (
-          <div className="px-4 py-2.5 rounded-xl border border-amber-200 bg-amber-50 text-amber-800 text-sm font-medium">
-            待確認 {pending.length} 區
-          </div>
-        )}
-      </div>
 
-      {/* ── 各分區審查卡片 ── */}
-      {reviews.map((r, idx) => {
-        const dbMatchedBlocks = r.blockEntries.filter(b => b.matchStatus === 'db-matched')
-        const nameOnlyBlocks  = r.blockEntries.filter(b => b.matchStatus === 'name-only')
-        const unmatchedBlks   = r.blockEntries.filter(b => b.matchStatus === 'unmatched')
-        const totalCount      = r.blockEntries.reduce((s, b) => s + b.count, 0)
-        const dangerCnt       = r.evalResult?.issues.filter(i => i.level === 'danger').length ?? 0
-        const cautionCnt      = r.evalResult?.issues.filter(i => i.level === 'caution').length ?? 0
-        return (
-          <div key={idx} className={`rounded-2xl border-2 p-5 ${
-            r.status === '可審查'     ? 'border-emerald-200' :
-            r.status === '植物待確認' ? 'border-amber-200'   :
-                                        'border-stone-200'
-          }`}>
-            {/* ── 區名 + 分數 ── */}
-            <div className="flex items-center gap-3 mb-3 flex-wrap">
-              <span className="text-2xl font-bold text-stone-800">{r.zoneName}</span>
-              <span className={`text-xs px-2.5 py-1 rounded-full border font-medium ${
-                r.status === '可審查'     ? 'bg-emerald-50 border-emerald-200 text-emerald-700' :
-                r.status === '植物待確認' ? 'bg-amber-50 border-amber-200 text-amber-700' :
-                                            'bg-stone-50 border-stone-200 text-stone-500'
-              }`}>{r.status}</span>
-              {r.evalResult && (
-                <span className={`text-sm px-3 py-1 rounded-full border font-semibold ${COMPAT_CLS[r.evalResult.compatLevel] ?? ''}`}>
-                  {r.evalResult.score}/100 · {r.evalResult.compatLevel}
-                </span>
+        {/* ── 總覽內容 ── */}
+        {activeTab === 'overview' && (
+          <div className="p-5 space-y-4">
+            {/* 整體摘要列 */}
+            <div className="flex gap-3 flex-wrap">
+              <div className="px-4 py-2 rounded-xl border border-blue-200 bg-blue-50 text-blue-800 text-sm font-medium">
+                共 {reviews.length} 個分區
+              </div>
+              <div className="px-4 py-2 rounded-xl border border-emerald-200 bg-emerald-50 text-emerald-800 text-sm font-medium">
+                已完成審查 {reviewable.length} 區
+              </div>
+              {pending.length > 0 && (
+                <div className="px-4 py-2 rounded-xl border border-amber-200 bg-amber-50 text-amber-800 text-sm font-medium">
+                  待確認 {pending.length} 區
+                </div>
               )}
-              {dangerCnt > 0  && <span className="text-xs px-2 py-0.5 rounded-full bg-red-50 border border-red-200 text-red-700 font-semibold">⚠ 高風險 {dangerCnt} 項</span>}
-              {cautionCnt > 0 && <span className="text-xs px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 font-semibold">注意 {cautionCnt} 項</span>}
             </div>
 
-            {/* ── 圖塊清單（完整版，含未對應）── */}
-            <div className="mb-4">
-              <p className="text-xs font-semibold text-stone-600 mb-2">
-                本區圖塊清單（共 {totalCount} 株 / {r.blockEntries.length} 種）
-              </p>
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs border-collapse">
-                  <thead>
-                    <tr className="bg-stone-50">
-                      <th className="px-3 py-1.5 text-left text-stone-500 border border-stone-100">圖塊名稱</th>
-                      <th className="px-3 py-1.5 text-left text-stone-500 border border-stone-100">植物名稱</th>
-                      <th className="px-3 py-1.5 text-left text-stone-500 border border-stone-100">識別類型</th>
-                      <th className="px-3 py-1.5 text-center text-stone-500 border border-stone-100">數量</th>
-                      <th className="px-3 py-1.5 text-left text-stone-500 border border-stone-100">狀態</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {r.blockEntries.map((b, i) => (
-                      <tr key={i} className={`border border-stone-100 ${
-                        b.matchStatus === 'db-matched' ? 'bg-emerald-50/40' :
-                        b.matchStatus === 'name-only'  ? 'bg-amber-50/40'   : 'bg-red-50/20'
-                      }`}>
-                        <td className="px-3 py-1.5 font-mono text-stone-700">{b.blockName}</td>
-                        <td className="px-3 py-1.5 font-medium text-stone-800">
-                          {b.plantName ?? <span className="text-stone-400 italic">未對應</span>}
-                        </td>
-                        <td className="px-3 py-1.5 text-stone-500">{b.detectedType ?? '—'}</td>
-                        <td className="px-3 py-1.5 text-center font-semibold text-stone-700">{b.count}</td>
-                        <td className="px-3 py-1.5">
-                          {b.matchStatus === 'db-matched' && <span className="text-emerald-600 text-xs">✅ 已比對 DB</span>}
-                          {b.matchStatus === 'name-only'  && <span className="text-amber-600 text-xs">⚠ 索引表名稱，DB 無記錄</span>}
-                          {b.matchStatus === 'unmatched'  && <span className="text-red-500 text-xs">❌ 未對應，請至圖塊對應 tab 指定</span>}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+            {/* 各區卡片（點擊跳至對應 tab）*/}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {reviews.map(r => {
+                const dangerCnt  = r.evalResult?.issues.filter(i => i.level === 'danger').length ?? 0
+                const cautionCnt = r.evalResult?.issues.filter(i => i.level === 'caution').length ?? 0
+                const cnt = plantCount(r)
+                return (
+                  <button key={r.zoneName}
+                    onClick={() => setActiveTab(r.zoneName)}
+                    className="text-left p-4 rounded-xl border border-stone-200 hover:border-green-300 hover:bg-green-50/30 transition-colors group">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-lg font-bold text-stone-800 group-hover:text-green-800">{r.zoneName}</span>
+                      <span className={`text-xs px-2 py-0.5 rounded-full border font-semibold ${riskBadgeCls(r)}`}>
+                        {riskLabel(r)}
+                      </span>
+                    </div>
+                    <div className="text-xs text-stone-500 space-y-1">
+                      <div className="flex justify-between">
+                        <span>植物數量</span>
+                        <span className="font-semibold text-stone-700">{cnt} 株 / {r.blockEntries.length} 種</span>
+                      </div>
+                      {r.evalResult && (
+                        <div className="flex justify-between">
+                          <span>審查評分</span>
+                          <span className="font-semibold text-stone-700">{r.evalResult.score}/100</span>
+                        </div>
+                      )}
+                      {dangerCnt > 0 && (
+                        <div className="flex justify-between text-red-600">
+                          <span>高風險問題</span>
+                          <span className="font-semibold">{dangerCnt} 項</span>
+                        </div>
+                      )}
+                      {cautionCnt > 0 && (
+                        <div className="flex justify-between text-amber-600">
+                          <span>注意事項</span>
+                          <span className="font-semibold">{cautionCnt} 項</span>
+                        </div>
+                      )}
+                      <div className="flex justify-between">
+                        <span>審查狀態</span>
+                        <span className={`font-semibold ${r.status === '可審查' ? 'text-emerald-600' : r.status === '植物待確認' ? 'text-amber-600' : 'text-stone-400'}`}>
+                          {r.status}
+                        </span>
+                      </div>
+                    </div>
+                    {r.evalResult?.aiSuggestion && (
+                      <p className="mt-2 text-xs text-stone-500 line-clamp-2 border-t border-stone-100 pt-2">
+                        {r.evalResult.aiSuggestion}
+                      </p>
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* ── 各分區內容 ── */}
+        {activeReview && (() => {
+          const r = activeReview
+          const nameOnlyBlocks = r.blockEntries.filter(b => b.matchStatus === 'name-only')
+          const unmatchedBlks  = r.blockEntries.filter(b => b.matchStatus === 'unmatched')
+          const totalCount     = plantCount(r)
+          const dangerCnt      = r.evalResult?.issues.filter(i => i.level === 'danger').length ?? 0
+          const cautionCnt     = r.evalResult?.issues.filter(i => i.level === 'caution').length ?? 0
+
+          return (
+            <div className="p-5 space-y-4">
+              {/* 分區標題列 */}
+              <div className="flex items-center gap-3 flex-wrap">
+                <span className="text-2xl font-bold text-stone-800">{r.zoneName}</span>
+                <span className={`text-xs px-2.5 py-1 rounded-full border font-medium ${
+                  r.status === '可審查'     ? 'bg-emerald-50 border-emerald-200 text-emerald-700' :
+                  r.status === '植物待確認' ? 'bg-amber-50 border-amber-200 text-amber-700' :
+                                              'bg-stone-50 border-stone-200 text-stone-500'
+                }`}>{r.status}</span>
+                {r.evalResult && (
+                  <span className={`text-sm px-3 py-1 rounded-full border font-semibold ${COMPAT_CLS[r.evalResult.compatLevel] ?? ''}`}>
+                    {r.evalResult.score}/100 · {r.evalResult.compatLevel}
+                  </span>
+                )}
+                {dangerCnt > 0  && <span className="text-xs px-2 py-0.5 rounded-full bg-red-50 border border-red-200 text-red-700 font-semibold">⚠ 高風險 {dangerCnt} 項</span>}
+                {cautionCnt > 0 && <span className="text-xs px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 font-semibold">注意 {cautionCnt} 項</span>}
               </div>
-              {r.areaTypes.length > 0 && (
-                <p className="mt-1.5 text-xs text-stone-400">面狀範圍：{r.areaTypes.join('、')}</p>
+
+              {/* AI 審查建議（置頂）*/}
+              {r.evalResult && (
+                <div className="p-4 bg-stone-50 border border-stone-200 rounded-xl">
+                  <p className="text-xs font-semibold text-stone-600 mb-1">AI 審查建議</p>
+                  <p className="text-sm text-stone-700">{r.evalResult.aiSuggestion}</p>
+                </div>
               )}
+
+              {/* 植物待確認提示 */}
+              {r.status === '植物待確認' && (
+                <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800">
+                  {r.plants.length === 1
+                    ? `僅找到 1 種已確認植物（${r.plants[0].name}），需 ≥ 2 種才能執行完整評分。`
+                    : `本區有 ${unmatchedBlks.length} 個圖塊尚未對應植物名稱，請至「圖塊對應」tab 完成指定後可產生完整審查報告。`}
+                  {nameOnlyBlocks.length > 0 && (
+                    <span className="block mt-1">
+                      索引表有名稱但 DB 無記錄：{nameOnlyBlocks.map(b => b.plantName).join('、')}（請匯入含這些植物的 CSV 資料庫）
+                    </span>
+                  )}
+                </div>
+              )}
+              {r.status === '無法審查' && (
+                <div className="p-3 bg-stone-50 border border-stone-200 rounded-xl text-xs text-stone-500">
+                  此區尚無任何圖塊或分區邊界未偵測到，無法執行審查。
+                </div>
+              )}
+
+              {/* 問題明細 */}
+              {r.evalResult && r.evalResult.issues.filter(i => i.level !== 'ok').length > 0 && (
+                <details open>
+                  <summary className="text-xs font-semibold text-stone-600 cursor-pointer select-none mb-2">
+                    問題明細（{r.evalResult.issues.filter(i => i.level !== 'ok').length} 項）
+                  </summary>
+                  <div className="space-y-2 mt-2">
+                    {r.evalResult.issues.filter(i => i.level !== 'ok').map((iss, i) => (
+                      <div key={i} className={`rounded-xl p-3 ${ISSUE_CLS[iss.level]}`}>
+                        <div className="flex items-center gap-2 mb-1">
+                          <AlertTriangle size={13} className={iss.level === 'danger' ? 'text-red-500' : 'text-amber-500'} />
+                          <span className="text-xs font-bold text-stone-700">{iss.category}</span>
+                        </div>
+                        <p className="text-xs text-stone-700 mb-1"><strong>原因：</strong>{iss.cause}</p>
+                        <p className="text-xs text-stone-600 mb-1"><strong>影響：</strong>{iss.impact}</p>
+                        <p className="text-xs text-stone-600"><strong>建議：</strong>{iss.suggestion}</p>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
+
+              {/* 配置調整方案 */}
+              {r.evalResult && r.evalResult.adjustmentPlan.length > 0 && (
+                <div className="p-4 bg-blue-50 border border-blue-200 rounded-xl">
+                  <p className="text-xs font-semibold text-blue-800 mb-2">配置調整方案</p>
+                  <ul className="space-y-1">
+                    {r.evalResult.adjustmentPlan.map((p, i) => (
+                      <li key={i} className="text-xs text-blue-700 flex items-start gap-2">
+                        <ArrowRight size={11} className="flex-shrink-0 mt-0.5" />{p}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* 植栽清單（可收合）*/}
+              <details>
+                <summary className="text-xs font-semibold text-stone-600 cursor-pointer select-none">
+                  本區植栽清單（共 {totalCount} 株 / {r.blockEntries.length} 種）
+                </summary>
+                <div className="mt-2 overflow-x-auto">
+                  <table className="w-full text-xs border-collapse">
+                    <thead>
+                      <tr className="bg-stone-50">
+                        <th className="px-3 py-1.5 text-left text-stone-500 border border-stone-100">圖塊名稱</th>
+                        <th className="px-3 py-1.5 text-left text-stone-500 border border-stone-100">植物名稱</th>
+                        <th className="px-3 py-1.5 text-left text-stone-500 border border-stone-100">識別類型</th>
+                        <th className="px-3 py-1.5 text-center text-stone-500 border border-stone-100">數量</th>
+                        <th className="px-3 py-1.5 text-left text-stone-500 border border-stone-100">狀態</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {r.blockEntries.map((b, i) => (
+                        <tr key={i} className={`border border-stone-100 ${
+                          b.matchStatus === 'db-matched' ? 'bg-emerald-50/40' :
+                          b.matchStatus === 'name-only'  ? 'bg-amber-50/40'   : 'bg-red-50/20'
+                        }`}>
+                          <td className="px-3 py-1.5 font-mono text-stone-700">{b.blockName}</td>
+                          <td className="px-3 py-1.5 font-medium text-stone-800">
+                            {b.plantName ?? <span className="text-stone-400 italic">未對應</span>}
+                          </td>
+                          <td className="px-3 py-1.5 text-stone-500">{b.detectedType ?? '—'}</td>
+                          <td className="px-3 py-1.5 text-center font-semibold text-stone-700">{b.count}</td>
+                          <td className="px-3 py-1.5">
+                            {b.matchStatus === 'db-matched' && <span className="text-emerald-600 text-xs">✅ 已比對 DB</span>}
+                            {b.matchStatus === 'name-only'  && <span className="text-amber-600 text-xs">⚠ 索引表名稱，DB 無記錄</span>}
+                            {b.matchStatus === 'unmatched'  && <span className="text-red-500 text-xs">❌ 未對應，請至圖塊對應 tab 指定</span>}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {r.areaTypes.length > 0 && (
+                  <p className="mt-1.5 text-xs text-stone-400">面狀範圍：{r.areaTypes.join('、')}</p>
+                )}
+              </details>
+
+              {/* 面狀植栽待補充 */}
               {r.areaLayerNotes.length > 0 && (
-                <div className="mt-2 p-2.5 bg-blue-50 border border-blue-200 rounded-xl text-xs text-blue-800">
+                <div className="p-2.5 bg-blue-50 border border-blue-200 rounded-xl text-xs text-blue-800">
                   <strong>📐 面狀植栽待補充：</strong>
                   以下 HATCH 有識別到種植範圍，但圖層名稱未含植物名稱，請確認：
                   <ul className="mt-1 space-y-0.5">
@@ -1770,67 +1959,9 @@ function ZoneReviewTab({ reviews }: { reviews: ZoneReviewResult[] }) {
                   </p>
                 </div>
               )}
-            </div>
 
-            {/* ── 植物待確認提示 ── */}
-            {r.status === '植物待確認' && (
-              <div className="mb-3 p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800">
-                {r.plants.length === 1
-                  ? `僅找到 1 種已確認植物（${r.plants[0].name}），需 ≥ 2 種才能執行完整評分。`
-                  : `本區有 ${unmatchedBlks.length} 個圖塊尚未對應植物名稱，請至「圖塊對應」tab 完成指定後可產生完整審查報告。`}
-                {nameOnlyBlocks.length > 0 && (
-                  <span className="block mt-1">
-                    索引表有名稱但 DB 無記錄：{nameOnlyBlocks.map(b => b.plantName).join('、')}（請匯入含這些植物的 CSV 資料庫）
-                  </span>
-                )}
-              </div>
-            )}
-            {r.status === '無法審查' && (
-              <div className="mb-3 p-3 bg-stone-50 border border-stone-200 rounded-xl text-xs text-stone-500">
-                此區尚無任何圖塊或分區邊界未偵測到，無法執行審查。
-              </div>
-            )}
-
-            {/* ── AI 審查結果 ── */}
-            {r.evalResult && (
-              <div className="space-y-3 mt-2">
-                <div className="p-4 bg-stone-50 border border-stone-200 rounded-xl">
-                  <p className="text-xs font-semibold text-stone-600 mb-1">AI 審查建議</p>
-                  <p className="text-sm text-stone-700">{r.evalResult.aiSuggestion}</p>
-                </div>
-
-                {r.evalResult.issues.filter(i => i.level !== 'ok').length > 0 && (
-                  <div>
-                    <p className="text-xs font-semibold text-stone-600 mb-2">問題明細</p>
-                    <div className="space-y-2">
-                      {r.evalResult.issues.filter(i => i.level !== 'ok').map((iss, i) => (
-                        <div key={i} className={`rounded-xl p-3 ${ISSUE_CLS[iss.level]}`}>
-                          <div className="flex items-center gap-2 mb-1">
-                            <AlertTriangle size={13} className={iss.level === 'danger' ? 'text-red-500' : 'text-amber-500'} />
-                            <span className="text-xs font-bold text-stone-700">{iss.category}</span>
-                          </div>
-                          <p className="text-xs text-stone-700 mb-1"><strong>原因：</strong>{iss.cause}</p>
-                          <p className="text-xs text-stone-600 mb-1"><strong>影響：</strong>{iss.impact}</p>
-                          <p className="text-xs text-stone-600"><strong>建議：</strong>{iss.suggestion}</p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {r.evalResult.adjustmentPlan.length > 0 && (
-                  <div className="p-4 bg-blue-50 border border-blue-200 rounded-xl">
-                    <p className="text-xs font-semibold text-blue-800 mb-2">配置調整方案</p>
-                    <ul className="space-y-1">
-                      {r.evalResult.adjustmentPlan.map((p, i) => (
-                        <li key={i} className="text-xs text-blue-700 flex items-start gap-2">
-                          <ArrowRight size={11} className="flex-shrink-0 mt-0.5" />{p}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
+              {/* 審查回覆文字（預設收合）*/}
+              {r.evalResult && (
                 <details className="rounded-xl border border-stone-200 overflow-hidden">
                   <summary className="px-4 py-2.5 bg-stone-50 text-xs font-semibold text-stone-600 cursor-pointer">
                     {r.zoneName} 審查回覆文字（可複製）
@@ -1839,11 +1970,11 @@ function ZoneReviewTab({ reviews }: { reviews: ZoneReviewResult[] }) {
                     {r.evalResult.reviewText}
                   </div>
                 </details>
-              </div>
-            )}
-          </div>
-        )
-      })}
+              )}
+            </div>
+          )
+        })()}
+      </div>
     </div>
   )
 }
