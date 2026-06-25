@@ -451,19 +451,20 @@ function CategoryGrid({ categories, altCount }: { categories: CatSummary[]; altC
 
 function IssueCard({ issue }: { issue: IssueDetail }) {
   const [open, setOpen] = useState(true)
+  // 高風險：淡紅；中風險（caution）：淡橘
   const hdr = issue.level === 'danger'
-    ? 'bg-orange-50 border-orange-100 text-orange-800'
-    : 'bg-amber-50 border-amber-100 text-amber-800'
-  const bdr = issue.level === 'danger' ? 'border-orange-200' : 'border-amber-200'
+    ? 'bg-red-50 border-red-100 text-red-800'
+    : 'bg-orange-50 border-orange-100 text-orange-800'
+  const bdr = issue.level === 'danger' ? 'border-red-200' : 'border-orange-200'
   return (
-    <div className={`border rounded-xl overflow-hidden ${bdr}`}>
+    <div className={`border rounded-xl overflow-hidden shadow-sm ${bdr}`}>
       <button onClick={() => setOpen(o => !o)}
         className={`w-full flex items-center justify-between px-4 py-3 ${hdr}`}>
         <div className="flex items-center gap-2">
-          {issue.level === 'danger' ? <XCircle size={14} className="text-orange-600" /> : <AlertTriangle size={14} className="text-amber-600" />}
+          {issue.level === 'danger' ? <XCircle size={14} className="text-red-600" /> : <AlertTriangle size={14} className="text-orange-600" />}
           <span className="font-semibold text-sm">{issue.category}</span>
           <span className={`text-xs px-2 py-0.5 rounded-full border font-medium ${
-            issue.level === 'danger' ? 'bg-orange-100 border-orange-300 text-orange-700' : 'bg-amber-100 border-amber-300 text-amber-700'
+            issue.level === 'danger' ? 'bg-red-100 border-red-300 text-red-700' : 'bg-orange-100 border-orange-300 text-orange-700'
           }`}>{issue.level === 'danger' ? '高風險' : '需注意'}</span>
         </div>
         {open ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
@@ -474,7 +475,7 @@ function IssueCard({ issue }: { issue: IssueDetail }) {
             .map(row => (
               <div key={row.label}>
                 <p className="text-xs font-semibold text-stone-400 mb-1">{row.label}</p>
-                <p className="text-sm text-stone-600 leading-relaxed">{row.text}</p>
+                <p className="text-sm text-stone-700 leading-relaxed">{row.text}</p>
               </div>
             ))}
         </div>
@@ -538,50 +539,50 @@ function AltCard({ suggestion }: { suggestion: AltSuggestion }) {
 
 function SelectedPlantCard({ plant, onRemove }: { plant: SelectedCsvPlant; onRemove: () => void }) {
   return (
-    <div className="bg-white border border-stone-200 rounded-xl p-4 relative group hover:border-stone-300 hover:shadow-sm transition-all">
+    <div className="bg-white border border-stone-200 rounded-xl p-3.5 relative group hover:border-[#2d6a4f]/40 hover:shadow-sm transition-all">
       <button onClick={onRemove}
-        className="absolute top-3 right-3 text-stone-300 hover:text-stone-500 opacity-0 group-hover:opacity-100 transition-opacity">
-        <X size={15} />
+        className="absolute top-2.5 right-2.5 text-stone-300 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity">
+        <X size={14} />
       </button>
       <div className="flex items-start gap-3 pr-6">
-        <div className="w-9 h-9 rounded-lg bg-green-50 flex items-center justify-center flex-shrink-0">
-          <Leaf size={16} className="text-green-600" />
+        <div className="w-8 h-8 rounded-lg bg-[#d8f3dc] flex items-center justify-center flex-shrink-0">
+          <Leaf size={14} className="text-[#2d6a4f]" />
         </div>
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <p className="font-semibold text-stone-800 text-[15px]">{plant.name}</p>
-            <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${CAT_COLOR[plant.category] ?? 'bg-stone-100 text-stone-600'}`}>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <p className="font-semibold text-stone-800 text-sm">{plant.name}</p>
+            <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium ${CAT_COLOR[plant.category] ?? 'bg-stone-100 text-stone-600'}`}>
               {plant.subCategory || plant.category}
             </span>
-            <span className={`text-xs px-2 py-0.5 rounded-full border font-medium ${STATUS_COLOR[plant.status]}`}>{plant.status}</span>
+            <span className={`text-xs px-1.5 py-0.5 rounded-full border font-medium ${STATUS_COLOR[plant.status]}`}>{plant.status}</span>
             {!plant.dataComplete && (
-              <span className="text-xs px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-600 font-medium">資料初步判定</span>
+              <span className="text-xs px-1.5 py-0.5 rounded-full bg-stone-100 border border-stone-200 text-stone-500 font-medium">資料待補</span>
             )}
           </div>
           {plant.scientificName && <p className="text-xs text-stone-400 italic mt-0.5">{plant.scientificName}</p>}
         </div>
       </div>
-      <div className="mt-3 grid grid-cols-3 gap-2">
+      <div className="mt-2.5 grid grid-cols-3 gap-1.5">
         {[
           { label: '水分', value: plant.waterRequirement },
-          { label: '日照', value: plant.sunRequirement !== '待查' ? plant.sunRequirement : '待查' },
+          { label: '日照', value: plant.sunRequirement !== '待查' ? plant.sunRequirement : '—' },
           { label: '維護', value: plant.maintenanceLevel },
         ].map(item => (
-          <div key={item.label} className="bg-stone-50 rounded-lg px-2.5 py-2">
-            <p className="text-xs text-stone-400">{item.label}</p>
-            <p className="text-sm font-medium text-stone-700 truncate">{item.value}</p>
+          <div key={item.label} className="bg-[#f7f5f0] rounded-lg px-2 py-1.5">
+            <p className="text-[10px] text-stone-400 leading-none mb-0.5">{item.label}</p>
+            <p className="text-xs font-medium text-stone-700 truncate">{item.value}</p>
           </div>
         ))}
       </div>
-      <div className="mt-2 grid grid-cols-3 gap-2">
+      <div className="mt-1.5 grid grid-cols-3 gap-1.5">
         {[
           { label: '耐旱', value: plant.droughtTolerance },
           { label: '耐濕', value: plant.wetTolerance },
           { label: '覆土', value: plant.soilDepth || '—' },
         ].map(item => (
-          <div key={item.label} className="bg-stone-50 rounded-lg px-2.5 py-2">
-            <p className="text-xs text-stone-400">{item.label}</p>
-            <p className="text-sm font-medium text-stone-700 truncate">{item.value}</p>
+          <div key={item.label} className="bg-[#f7f5f0] rounded-lg px-2 py-1.5">
+            <p className="text-[10px] text-stone-400 leading-none mb-0.5">{item.label}</p>
+            <p className="text-xs font-medium text-stone-700 truncate">{item.value}</p>
           </div>
         ))}
       </div>
@@ -591,9 +592,9 @@ function SelectedPlantCard({ plant, onRemove }: { plant: SelectedCsvPlant; onRem
 
 function Section({ title, children, action }: { title: string; children: React.ReactNode; action?: React.ReactNode }) {
   return (
-    <div className="border border-stone-200 rounded-2xl overflow-hidden">
-      <div className="flex items-center justify-between px-5 py-3.5 bg-stone-50 border-b border-stone-100">
-        <p className="text-sm font-semibold text-stone-700 tracking-wide">{title}</p>
+    <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+      <div className="flex items-center justify-between px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
+        <p className="text-sm font-semibold text-stone-800 tracking-wide">{title}</p>
         {action}
       </div>
       <div className="p-5">{children}</div>
@@ -2089,18 +2090,18 @@ export default function LandscapeAdvisorPage({
   const activeIssues = result?.issues.filter(i => i.level !== 'ok') ?? []
 
   return (
-    <div className="min-h-screen bg-stone-50">
+    <div className="min-h-screen bg-[#f7f5f0]">
       {/* Header */}
-      <header className="bg-white border-b border-stone-200 sticky top-0 z-40">
-        <div className="max-w-[1536px] mx-auto px-8 h-16 flex items-center justify-between">
-          <div>
-            <h1 className="text-lg font-bold text-green-900 leading-tight">景觀 AI 設計審查顧問 2.0</h1>
-            <p className="text-xs text-stone-400 leading-tight">植栽配置相容性、養護風險與審查回覆輔助工具</p>
+      <header className="bg-[#1a4731] sticky top-0 z-40 shadow-md">
+        <div className="max-w-[1536px] mx-auto px-8 h-16 flex items-center justify-between gap-4">
+          <div className="flex-shrink-0">
+            <h1 className="text-base font-bold text-white leading-tight tracking-wide">景觀 AI 設計審查顧問 2.0</h1>
+            <p className="text-xs text-green-200/70 leading-tight">植栽配置相容性・養護風險・審查回覆</p>
           </div>
 
           {/* ── Tab navigation (only when hosted inside App) ── */}
           {onTabChange && (
-            <div className="flex items-center bg-stone-100 rounded-xl p-1 gap-0.5">
+            <div className="flex items-center bg-[#0f2d1d] rounded-xl p-1 gap-0.5">
               {([
                 { id: 'pdf'       as const, label: 'PDF 審圖' },
                 { id: 'landscape' as const, label: 'AI 配植評估' },
@@ -2109,8 +2110,8 @@ export default function LandscapeAdvisorPage({
                 <button key={t.id} onClick={() => onTabChange(t.id)}
                   className={`px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
                     activeTab === t.id
-                      ? 'bg-white text-green-900 shadow-sm'
-                      : 'text-stone-500 hover:text-stone-700'
+                      ? 'bg-[#2d6a4f] text-white shadow-sm'
+                      : 'text-green-300/80 hover:text-white hover:bg-[#1a4731]'
                   }`}>
                   {t.label}
                 </button>
@@ -2118,45 +2119,53 @@ export default function LandscapeAdvisorPage({
             </div>
           )}
 
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-2">
             {/* DB status chip */}
-            <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium ${
-              dbStatus === 'loaded' ? 'bg-green-50 text-green-700 border border-green-200'
-              : dbStatus === 'loading' ? 'bg-stone-50 text-stone-500 border border-stone-200'
-              : 'bg-amber-50 text-amber-700 border border-amber-200'
+            <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border ${
+              dbStatus === 'loaded' ? 'bg-green-800/40 text-green-200 border-green-700/50'
+              : dbStatus === 'loading' ? 'bg-white/10 text-white/60 border-white/20'
+              : 'bg-amber-800/40 text-amber-200 border-amber-700/50'
             }`}>
               {dbStatus === 'loaded' ? <><CheckCircle size={11} />{allPlants.length} 筆植栽資料庫</> :
                dbStatus === 'loading' ? <><RefreshCw size={11} className="animate-spin" />載入中…</> :
                <><AlertTriangle size={11} />未載入資料庫</>}
             </div>
-            <button onClick={() => setShowCsvImport(true)}
-              className="flex items-center gap-2 px-3.5 py-2.5 border border-stone-200 rounded-xl text-sm text-stone-700 hover:bg-stone-50 hover:border-stone-300 transition-colors font-medium">
-              <Upload size={14} />匯入 CSV
-            </button>
-            <button onClick={() => setShowDb(true)} disabled={allPlants.length === 0}
-              className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-sm font-medium transition-colors border ${
-                allPlants.length > 0 ? 'border-stone-200 text-stone-700 hover:bg-stone-50 hover:border-stone-300' : 'border-stone-100 text-stone-300 cursor-not-allowed'
-              }`}>
-              <Database size={14} />植栽資料庫
-            </button>
-            <button onClick={handleExportPdf} disabled={!result}
-              className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-sm font-medium transition-colors ${
-                result ? 'bg-green-700 text-white hover:bg-green-800' : 'bg-stone-100 text-stone-400 cursor-not-allowed'
-              }`}>
-              <FileOutput size={14} />匯出 PDF 報告
-            </button>
-            <button onClick={handleExport} disabled={!result}
-              className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-sm font-medium transition-colors border ${
-                result ? 'border-stone-200 text-stone-600 hover:bg-stone-50' : 'border-stone-100 text-stone-300 cursor-not-allowed'
-              }`}>
-              <FileDown size={14} />匯出 txt
-            </button>
+
+            {/* 資料管理群組 */}
+            <div className="flex items-center gap-1.5 border-l border-white/20 pl-2">
+              <button onClick={() => setShowCsvImport(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-white/10 border border-white/20 rounded-lg text-xs text-white hover:bg-white/20 transition-colors font-medium">
+                <Upload size={12} />匯入 CSV
+              </button>
+              <button onClick={() => setShowDb(true)} disabled={allPlants.length === 0}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+                  allPlants.length > 0 ? 'bg-white/10 border-white/20 text-white hover:bg-white/20' : 'border-white/10 text-white/30 cursor-not-allowed'
+                }`}>
+                <Database size={12} />植栽資料庫
+              </button>
+            </div>
+
+            {/* 報告輸出群組 */}
+            <div className="flex items-center gap-1.5 border-l border-white/20 pl-2">
+              <button onClick={handleExportPdf} disabled={!result}
+                className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                  result ? 'bg-[#d8f3dc] text-[#1a4731] hover:bg-white' : 'bg-white/10 text-white/30 cursor-not-allowed'
+                }`}>
+                <FileOutput size={12} />匯出 PDF
+              </button>
+              <button onClick={handleExport} disabled={!result}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+                  result ? 'bg-white/10 border-white/20 text-white hover:bg-white/20' : 'border-white/10 text-white/30 cursor-not-allowed'
+                }`}>
+                <FileDown size={12} />txt
+              </button>
+            </div>
           </div>
         </div>
       </header>
 
       {/* Main */}
-      <main className="max-w-[1536px] mx-auto px-8 py-8">
+      <main className="max-w-[1536px] mx-auto px-8 py-8 bg-[#f7f5f0] min-h-[calc(100vh-64px)]">
         {/* No DB banner */}
         {dbStatus === 'empty' && (
           <div className="mb-6 flex items-center gap-4 p-4 bg-amber-50 border border-amber-200 rounded-2xl">
@@ -2203,8 +2212,8 @@ export default function LandscapeAdvisorPage({
 
             {/* Evaluate */}
             <button onClick={() => setResult(evaluate(selectedPlants, allPlants))} disabled={selectedPlants.length === 0}
-              className={`w-full py-4 rounded-2xl text-base font-semibold transition-colors ${
-                selectedPlants.length > 0 ? 'bg-green-700 text-white hover:bg-green-800 shadow-sm' : 'bg-stone-100 text-stone-400 cursor-not-allowed'
+              className={`w-full py-3.5 rounded-2xl text-sm font-bold transition-all ${
+                selectedPlants.length > 0 ? 'bg-[#1a4731] text-white hover:bg-[#2d6a4f] shadow-md' : 'bg-stone-100 text-stone-400 cursor-not-allowed'
               }`}>
               {result ? '重新執行 AI 配植評估' : 'AI 配植評估'}
             </button>
@@ -2213,14 +2222,22 @@ export default function LandscapeAdvisorPage({
           {/* ── Right ── */}
           <div className="space-y-5">
             {!result ? (
-              <div className="border-2 border-dashed border-stone-200 rounded-2xl flex flex-col items-center justify-center py-28 text-center px-8">
-                <div className="w-16 h-16 rounded-2xl bg-green-50 flex items-center justify-center mb-5">
-                  <Leaf size={28} className="text-green-500" />
+              <div className="bg-white border border-stone-200 rounded-2xl flex flex-col items-center justify-center py-28 text-center px-8 shadow-sm">
+                <div className="w-20 h-20 rounded-full bg-[#d8f3dc] flex items-center justify-center mb-6">
+                  <Leaf size={36} className="text-[#2d6a4f]" />
                 </div>
-                <p className="text-lg font-semibold text-stone-600">尚未執行評估</p>
-                <p className="text-sm text-stone-400 mt-2 max-w-xs leading-relaxed">
-                  請先在左側加入植栽，再點擊「AI 配植評估」，系統將依植栽資料庫資料自動比對相容性。
+                <p className="text-xl font-bold text-stone-800 mb-2">尚未執行評估</p>
+                <p className="text-sm text-stone-500 mt-1 max-w-sm leading-relaxed">
+                  在左側選取植栽組合後，點擊「AI 配植評估」按鈕，系統將自動分析水分、日照、排水與養護相容性，並產生審查回覆文字。
                 </p>
+                <div className="mt-8 flex items-center gap-6 text-xs text-stone-400">
+                  {[['🌿', '相容性分析'], ['⚠️', '風險識別'], ['📋', '審查回覆']].map(([icon, label]) => (
+                    <div key={label} className="flex flex-col items-center gap-1.5">
+                      <span className="text-2xl">{icon}</span>
+                      <span>{label}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
             ) : (
               <>

@@ -163,7 +163,7 @@ function buildReviewNote(p: {
 export function parsePlantCsv(text: string): ImportResult {
   const lines = text.split(/\r?\n/).filter(l => l.trim() !== '')
   if (lines.length < 2) {
-    return { plants: [], totalRows: 0, successRows: 0, missingColumns: ['（檔案無資料）'], skippedRows: 0, columnMap: {} }
+    return { plants: [], totalRows: 0, successRows: 0, missingColumns: ['（檔案無資料）'], skippedRows: 0, columnMap: {}, imageUrls: {} }
   }
 
   const headerLine = lines[0]

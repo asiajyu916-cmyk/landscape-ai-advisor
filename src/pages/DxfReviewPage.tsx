@@ -766,15 +766,15 @@ export default function DxfReviewPage({
 
   if (!parseResult) {
     return (
-      <div className="min-h-screen bg-stone-50 flex flex-col">
-        <header className="bg-white border-b border-stone-200 sticky top-0 z-40">
+      <div className="min-h-screen bg-[#f7f5f0] flex flex-col">
+        <header className="bg-[#1a4731] sticky top-0 z-40 shadow-md">
           <div className="max-w-[1536px] mx-auto px-8 h-16 flex items-center justify-between">
             <div>
-              <h1 className="text-lg font-bold text-green-900 leading-tight">DXF / CAD 讀圖審查</h1>
-              <p className="text-xs text-stone-400 leading-tight">上傳 AutoCAD .dxf 檔案，自動解析圖塊與植栽對應</p>
+              <h1 className="text-base font-bold text-white leading-tight tracking-wide">DXF / CAD 讀圖審查</h1>
+              <p className="text-xs text-green-200/70 leading-tight">上傳 AutoCAD .dxf 檔案，自動解析圖塊與植栽對應</p>
             </div>
             {onTabChange && (
-              <div className="flex items-center bg-stone-100 rounded-xl p-1 gap-0.5">
+              <div className="flex items-center bg-[#0f2d1d] rounded-xl p-1 gap-0.5">
                 {([
                   { id: 'pdf'       as const, label: 'PDF 審圖' },
                   { id: 'landscape' as const, label: 'AI 配植評估' },
@@ -782,7 +782,7 @@ export default function DxfReviewPage({
                 ]).map(t => (
                   <button key={t.id} onClick={() => onTabChange(t.id)}
                     className={`px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
-                      activeTab === t.id ? 'bg-white text-green-900 shadow-sm' : 'text-stone-500 hover:text-stone-700'
+                      activeTab === t.id ? 'bg-[#2d6a4f] text-white shadow-sm' : 'text-green-300/80 hover:text-white hover:bg-[#1a4731]'
                     }`}>
                     {t.label}
                   </button>
@@ -845,22 +845,22 @@ export default function DxfReviewPage({
   const { stats, texts, polygons } = parseResult
 
   return (
-    <div className="min-h-screen bg-stone-50 flex flex-col">
+    <div className="min-h-screen bg-[#f7f5f0] flex flex-col">
 
       {/* ── Header ── */}
-      <header className="bg-white border-b border-stone-200 sticky top-0 z-30">
-        <div className="max-w-[1536px] mx-auto px-8 h-16 flex items-center justify-between">
-          <div>
-            <h1 className="text-lg font-bold text-green-900 leading-tight">DXF / CAD 讀圖審查</h1>
-            <p className="text-xs text-stone-400 leading-tight">
+      <header className="bg-[#1a4731] sticky top-0 z-30 shadow-md">
+        <div className="max-w-[1536px] mx-auto px-8 h-16 flex items-center justify-between gap-4">
+          <div className="flex-shrink-0">
+            <h1 className="text-base font-bold text-white leading-tight tracking-wide">DXF / CAD 讀圖審查</h1>
+            <p className="text-xs text-green-200/70 leading-tight">
               {fileName}
-              {detectedEnc && <span className="ml-2 px-2 py-0.5 rounded-full bg-blue-50 text-blue-600 text-xs border border-blue-100">編碼：{detectedEnc}</span>}
+              {detectedEnc && <span className="ml-2 px-1.5 py-0.5 rounded bg-green-700/50 text-green-200 text-xs">編碼：{detectedEnc}</span>}
               <span className="ml-2">・圖塊 {stats.uniqueBlocks} 種・共 {stats.totalInserts} 個・已排除 {excluded.length} 個非植栽圖層</span>
             </p>
           </div>
           <div className="flex items-center gap-2">
             {onTabChange && (
-              <div className="flex items-center bg-stone-100 rounded-xl p-1 gap-0.5">
+              <div className="flex items-center bg-[#0f2d1d] rounded-xl p-1 gap-0.5">
                 {([
                   { id: 'pdf'       as const, label: 'PDF 審圖' },
                   { id: 'landscape' as const, label: 'AI 配植評估' },
@@ -868,7 +868,7 @@ export default function DxfReviewPage({
                 ]).map(t => (
                   <button key={t.id} onClick={() => onTabChange(t.id)}
                     className={`px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
-                      activeTab === t.id ? 'bg-white text-green-900 shadow-sm' : 'text-stone-500 hover:text-stone-700'
+                      activeTab === t.id ? 'bg-[#2d6a4f] text-white shadow-sm' : 'text-green-300/80 hover:text-white hover:bg-[#1a4731]'
                     }`}>
                     {t.label}
                   </button>
@@ -887,28 +887,28 @@ export default function DxfReviewPage({
                   }))
                   exportZoneReviewPdf(pdfData, fileName)
                 }}
-                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-green-700 text-white text-sm font-semibold hover:bg-green-800">
-                <FileOutput size={14} />匯出分區審查 PDF
+                className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-[#d8f3dc] text-[#1a4731] text-xs font-bold hover:bg-white transition-colors">
+                <FileOutput size={13} />匯出分區審查 PDF
               </button>
             )}
             <button onClick={() => { setParseResult(null); setFileName(''); setMappings([]) }}
-              className="flex items-center gap-2 px-4 py-2 rounded-xl border border-stone-200 text-sm text-stone-600 hover:bg-stone-50">
-              <X size={14} />重新上傳
+              className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-white/10 border border-white/20 text-xs text-white hover:bg-white/20 transition-colors">
+              <X size={13} />重新上傳
             </button>
           </div>
         </div>
 
         {/* Stats bar */}
-        <div className="flex gap-3 mt-3 flex-wrap">
+        <div className="flex gap-2 pb-3 px-8 flex-wrap">
           {[
-            { label: '✅ 已自動對應', count: matched.length,  cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
-            { label: '⚠ 部分符合',   count: partial.length,  cls: 'bg-amber-50 text-amber-700 border-amber-200' },
-            { label: '❌ 未對應',     count: unmatched.length, cls: 'bg-red-50 text-red-700 border-red-200' },
-            { label: '🚫 已排除',     count: excluded.length,  cls: 'bg-stone-50 text-stone-500 border-stone-200' },
-            { label: '🗺 範圍多邊形', count: stats.totalPolygons, cls: 'bg-blue-50 text-blue-700 border-blue-200' },
+            { label: '✅ 已自動對應', count: matched.length,  cls: 'bg-green-800/40 text-green-200 border-green-700/50' },
+            { label: '⚠ 部分符合',   count: partial.length,  cls: 'bg-amber-800/30 text-amber-200 border-amber-700/40' },
+            { label: '❌ 未對應',     count: unmatched.length, cls: 'bg-red-900/40 text-red-200 border-red-700/50' },
+            { label: '🚫 已排除',     count: excluded.length,  cls: 'bg-white/10 text-white/60 border-white/20' },
+            { label: '🗺 範圍多邊形', count: stats.totalPolygons, cls: 'bg-blue-900/30 text-blue-200 border-blue-700/40' },
           ].map(s => (
-            <div key={s.label} className={`flex items-center gap-2 px-4 py-2 rounded-xl border text-sm font-medium ${s.cls}`}>
-              {s.label} <span className="text-base font-bold">{s.count}</span>
+            <div key={s.label} className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-medium ${s.cls}`}>
+              {s.label} <span className="font-bold">{s.count}</span>
             </div>
           ))}
         </div>
@@ -929,7 +929,7 @@ export default function DxfReviewPage({
       )}
 
       {/* ── Tab nav ── */}
-      <div className="bg-white border-b border-stone-200 px-8 flex gap-0 overflow-x-auto">
+      <div className="bg-white border-b border-stone-200 px-6 flex gap-0 overflow-x-auto shadow-sm">
         {([
           { id: 'zonereview', label: `分區審查（${zoneReviews.filter(r => r.evalResult).length}/${zoneReviews.length}）`, highlight: zoneReviews.some(r => r.evalResult) },
           { id: 'zoneplan',   label: `分區配置（${detectedZones.length}）`, highlight: detectedZones.length > 0 },
@@ -943,13 +943,13 @@ export default function DxfReviewPage({
           { id: 'rules',      label: `規則庫（${savedRules.length}）` },
         ] as { id: ViewTab; label: string; urgent?: boolean; highlight?: boolean }[]).map(t => (
           <button key={t.id} onClick={() => setTab(t.id)}
-            className={`px-5 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
+            className={`px-4 py-3 text-xs font-medium border-b-2 transition-colors whitespace-nowrap ${
               tab === t.id
-                ? 'border-green-600 text-green-700'
+                ? 'border-[#1a4731] text-[#1a4731] font-semibold'
                 : t.urgent
                   ? 'border-transparent text-red-600 hover:text-red-700'
                   : t.highlight
-                    ? 'border-transparent text-blue-600 hover:text-blue-700 font-semibold'
+                    ? 'border-transparent text-[#2d6a4f] hover:text-[#1a4731] font-semibold'
                     : 'border-transparent text-stone-500 hover:text-stone-700'
             }`}>
             {t.label}
@@ -2086,9 +2086,12 @@ function ZonePlanTab({
   return (
     <div className="space-y-5">
 
-      {/* ── 0. 原始資料 DEBUG（最優先顯示，不過任何 filter）──────────────── */}
-      <div className="rounded-2xl border-2 border-purple-300 bg-purple-50 p-4">
-        <p className="text-sm font-bold text-purple-800 mb-3">🔍 原始資料 Debug（資料流驗證）</p>
+      {/* ── 0. 原始資料 DEBUG（預設收合）──────────────────────────────── */}
+      <details className="rounded-xl border border-stone-200 bg-stone-50 overflow-hidden">
+        <summary className="px-4 py-2.5 text-xs font-semibold text-stone-500 cursor-pointer select-none hover:bg-stone-100 transition-colors">
+          🔍 原始資料 Debug（資料流驗證）— 點擊展開
+        </summary>
+      <div className="p-4">
         <div className="grid grid-cols-2 gap-3 mb-3 text-sm">
           <div className={`px-3 py-2 rounded-xl border font-medium ${texts.length === 0 ? 'bg-red-50 border-red-300 text-red-700' : 'bg-white border-purple-200 text-purple-800'}`}>
             result.texts 長度：<strong>{texts.length}</strong>
@@ -2107,8 +2110,8 @@ function ZonePlanTab({
 
         {/* 前 20 個文字（不過任何 filter）*/}
         {texts.length > 0 && (
-          <details open>
-            <summary className="text-xs font-semibold text-purple-700 cursor-pointer mb-1">
+          <details>
+            <summary className="text-xs font-semibold text-stone-500 cursor-pointer mb-1">
               前 {Math.min(texts.length, 30)} 個文字原始內容（共 {texts.length} 個，不過任何 filter）
             </summary>
             <div className="max-h-40 overflow-y-auto mt-1">
@@ -2169,6 +2172,7 @@ function ZonePlanTab({
           </div>
         )}
       </div>
+      </details>
 
       {/* ── 1. 分區辨識狀態摘要 ───────────────────────────────────────────── */}
       <div className="rounded-2xl border border-stone-200 bg-white p-5">
@@ -2329,8 +2333,12 @@ function ZonePlanTab({
 
       {/* ── 2b. 植栽歸區 debug 統計 ──────────────────────────────────────── */}
       {zoneDebug && (
-        <div className="rounded-2xl border-2 border-orange-300 bg-orange-50 p-4 space-y-3">
-          <p className="text-sm font-bold text-orange-800">🔎 植栽歸區 Debug（對照 AutoCAD 原圖用）</p>
+        <details className="rounded-xl border border-stone-200 bg-stone-50 overflow-hidden">
+          <summary className="px-4 py-2.5 text-xs font-semibold text-stone-500 cursor-pointer select-none hover:bg-stone-100 transition-colors">
+            🔎 植栽歸區 Debug（對照 AutoCAD 原圖用）— 點擊展開
+          </summary>
+        <div className="p-4 space-y-3">
+          <p className="text-sm font-bold text-stone-700">植栽歸區 Debug（對照 AutoCAD 原圖用）</p>
 
           {/* 總統計 */}
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -2382,8 +2390,8 @@ function ZonePlanTab({
           </div>
 
           {/* 所有植栽圖塊分類清單 */}
-          <details open>
-            <summary className="text-xs font-bold text-orange-700 cursor-pointer">
+          <details>
+            <summary className="text-xs font-bold text-stone-600 cursor-pointer">
               所有圖塊分類清單（植栽 / 非植栽 / 歸區狀況）— {mappings.length + (totalInserts - mappings.length)} 個圖塊種類
             </summary>
             <div className="mt-2 overflow-x-auto">
@@ -2428,8 +2436,8 @@ function ZonePlanTab({
 
           {/* ── 每棵樹 per-instance debug 表格 ── */}
           {zoneDebug.instances.length > 0 && (
-            <details open>
-              <summary className="text-xs font-bold text-orange-700 cursor-pointer">
+            <details>
+              <summary className="text-xs font-bold text-stone-600 cursor-pointer">
                 每棵樹 / 每個 INSERT 實例詳細歸區結果（共 {zoneDebug.instances.length} 個）
               </summary>
               <div className="mt-2 overflow-x-auto max-h-80 overflow-y-auto">
@@ -2515,6 +2523,7 @@ function ZonePlanTab({
             </div>
           )}
         </div>
+        </details>
       )}
 
       {/* ── 3. 各分區 zonePlantList ────────────────────────────────────────── */}

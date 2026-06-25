@@ -191,7 +191,7 @@ type AppTab = 'pdf' | 'landscape' | 'dxf'
 
 function TabNav({ active, onChange }: { active: AppTab; onChange: (t: AppTab) => void }) {
   return (
-    <div className="flex items-center bg-stone-100 rounded-xl p-1 gap-0.5">
+    <div className="flex items-center bg-[#0f2d1d] rounded-xl p-1 gap-0.5">
       {([
         { id: 'pdf'       as const, label: 'PDF 審圖' },
         { id: 'landscape' as const, label: 'AI 配植評估' },
@@ -199,7 +199,7 @@ function TabNav({ active, onChange }: { active: AppTab; onChange: (t: AppTab) =>
       ]).map(t => (
         <button key={t.id} onClick={() => onChange(t.id)}
           className={`px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
-            active === t.id ? 'bg-white text-green-900 shadow-sm' : 'text-stone-500 hover:text-stone-700'
+            active === t.id ? 'bg-[#2d6a4f] text-white shadow-sm' : 'text-green-300/80 hover:text-white hover:bg-[#1a4731]'
           }`}>
           {t.label}
         </button>
@@ -273,12 +273,12 @@ export default function PdfReviewPage({
 
   if (stage === 'upload') {
     return (
-      <div className="min-h-screen bg-stone-50">
-        <header className="bg-white border-b border-stone-200 sticky top-0 z-40">
+      <div className="min-h-screen bg-[#f7f5f0]">
+        <header className="bg-[#1a4731] sticky top-0 z-40 shadow-md">
           <div className="max-w-[1536px] mx-auto px-8 h-16 flex items-center justify-between">
             <div>
-              <h1 className="text-lg font-bold text-green-900 leading-tight">PDF / 圖片審圖</h1>
-              <p className="text-xs text-stone-400 leading-tight">上傳景觀設計圖面，自動擷取植栽資料後進行 AI 審查</p>
+              <h1 className="text-base font-bold text-white leading-tight tracking-wide">PDF / 圖片審圖</h1>
+              <p className="text-xs text-green-200/70 leading-tight">上傳景觀設計圖面，自動擷取植栽資料後進行 AI 審查</p>
             </div>
             {onTabChange && <TabNav active={activeTab} onChange={onTabChange} />}
             <div />
@@ -324,7 +324,7 @@ export default function PdfReviewPage({
 
   if (stage === 'processing') {
     return (
-      <div className="min-h-screen bg-stone-50 flex flex-col items-center justify-center gap-6">
+      <div className="min-h-screen bg-[#f7f5f0] flex flex-col items-center justify-center gap-6">
         <div className="w-12 h-12 border-4 border-green-700 border-t-transparent rounded-full animate-spin" />
         <p className="text-stone-700 font-medium text-lg">{procMsg}</p>
         <p className="text-stone-400 text-sm">{fileName}</p>
@@ -340,17 +340,17 @@ export default function PdfReviewPage({
   const excluded  = result?.excluded ?? []
 
   return (
-    <div className="min-h-screen bg-stone-50">
-      <header className="bg-white border-b border-stone-200 sticky top-0 z-40">
-        <div className="max-w-[1536px] mx-auto px-8 h-16 flex items-center justify-between">
+    <div className="min-h-screen bg-[#f7f5f0]">
+      <header className="bg-[#1a4731] sticky top-0 z-40 shadow-md">
+        <div className="max-w-[1536px] mx-auto px-8 h-16 flex items-center justify-between gap-4">
           <div>
-            <h1 className="text-lg font-bold text-green-900 leading-tight">PDF / 圖片審圖</h1>
-            <p className="text-xs text-stone-400 leading-tight">{fileName}</p>
+            <h1 className="text-base font-bold text-white leading-tight tracking-wide">PDF / 圖片審圖</h1>
+            <p className="text-xs text-green-200/70 leading-tight">{fileName}</p>
           </div>
           {onTabChange && <TabNav active={activeTab} onChange={onTabChange} />}
           <button onClick={() => { setStage('upload'); setFileName(''); setExtractResult(null); setImageSrc('') }}
-            className="flex items-center gap-2 px-4 py-2 rounded-xl border border-stone-200 text-sm text-stone-600 hover:bg-stone-50">
-            <X size={14} />重新上傳
+            className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-white/10 border border-white/20 text-xs text-white hover:bg-white/20 transition-colors">
+            <X size={13} />重新上傳
           </button>
         </div>
       </header>
