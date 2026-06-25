@@ -273,7 +273,7 @@ export default function PdfReviewPage({
 
   if (stage === 'upload') {
     return (
-      <div className="min-h-screen bg-[#f7f5f0]">
+      <div className="min-h-screen" style={{ background: 'radial-gradient(circle at 72% 8%, rgba(111,168,120,0.07) 0%, transparent 30%), linear-gradient(155deg, #f7fbf7 0%, #f1f7f3 40%, #eaf4ed 75%, #e4f1e8 100%)' }}>
         <header className="bg-[#1a4731] sticky top-0 z-40 shadow-md">
           <div className="max-w-[1536px] mx-auto px-8 h-16 flex items-center justify-between">
             <div>
@@ -340,7 +340,7 @@ export default function PdfReviewPage({
   const excluded  = result?.excluded ?? []
 
   return (
-    <div className="min-h-screen bg-[#f7f5f0]">
+    <div className="min-h-screen" style={{ background: 'radial-gradient(circle at 72% 8%, rgba(111,168,120,0.07) 0%, transparent 30%), linear-gradient(155deg, #f7fbf7 0%, #f1f7f3 40%, #eaf4ed 75%, #e4f1e8 100%)' }}>
       <header className="bg-[#1a4731] sticky top-0 z-40 shadow-md">
         <div className="max-w-[1536px] mx-auto px-8 h-16 flex items-center justify-between gap-4">
           <div>
