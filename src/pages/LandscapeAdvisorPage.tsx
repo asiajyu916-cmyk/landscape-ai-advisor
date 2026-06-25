@@ -608,8 +608,15 @@ function Section({ title, children, action }: { title: string; children: React.R
 function PlantImage({ src, alt, fallbackClass, iconColor }: {
   src: string; alt: string; fallbackClass: string; iconColor: string
 }) {
-  const [errored, setErrored] = useState(false)
-  if (errored) {
+  // 若 src 是靜態路徑（/plant-images/名稱.jpg），失敗時依序嘗試 avif → webp → placeholder
+  const isStatic = src.startsWith('/plant-images/')
+  const baseName = isStatic ? src.replace(/\.[^.]+$/, '') : null
+  const [tryIdx, setTryIdx] = useState(0)
+  const exts = ['.jpg', '.avif', '.webp']
+  const currentSrc = baseName ? `${baseName}${exts[tryIdx]}` : src
+  const allFailed = tryIdx >= exts.length
+
+  if (allFailed) {
     return (
       <div className={`absolute inset-0 flex items-center justify-center ${fallbackClass}`}>
         <Leaf size={40} className={`opacity-30 ${iconColor}`} />
@@ -618,9 +625,12 @@ function PlantImage({ src, alt, fallbackClass, iconColor }: {
   }
   return (
     <img
-      src={src} alt={alt}
+      src={currentSrc} alt={alt}
       className="absolute inset-0 w-full h-full object-cover"
-      onError={() => setErrored(true)}
+      onError={() => {
+        if (isStatic && tryIdx < exts.length - 1) setTryIdx(i => i + 1)
+        else setTryIdx(exts.length) // mark all failed
+      }}
     />
   )
 }
@@ -725,6 +735,7 @@ function PlantCardItem({ plant, imageData, added, fresh, isActive, onDetail, onA
 }) {
   const approvedUrl = (!imageData?.imageReviewStatus || imageData.imageReviewStatus === 'approved')
     ? imageData?.imageUrl : undefined
+  // 優先 jpg，fallback 到 avif / webp（由 <img> onError 自動切換）
   const staticUrl = `/plant-images/${encodeURIComponent(plant.name)}.jpg`
   const imgSrc = imageData?.uploadedDataUrl ?? approvedUrl ?? staticUrl
   const bgGrad = CARD_BG[plant.subCategory] ?? CARD_BG[plant.category] ?? 'from-stone-100 to-stone-50'
