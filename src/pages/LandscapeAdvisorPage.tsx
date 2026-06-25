@@ -2278,8 +2278,8 @@ export default function LandscapeAdvisorPage({
                       <button key={t.id} onClick={() => setActiveReviewTab(t.id)}
                         className={`flex-1 px-4 py-2.5 rounded-xl text-base font-semibold whitespace-nowrap transition-all ${
                           activeReviewTab === t.id
-                            ? 'bg-[#1a4731] text-white shadow-sm'
-                            : 'text-stone-500 hover:text-stone-800 hover:bg-white/60'
+                            ? 'bg-[#1a4731] text-white shadow-md ring-2 ring-[#1a4731]/30'
+                            : 'text-stone-500 hover:text-stone-800 hover:bg-white/70'
                         }`}>
                         {t.label}
                       </button>
@@ -2399,7 +2399,7 @@ export default function LandscapeAdvisorPage({
                           <p className="text-sm font-semibold text-stone-800 tracking-wide">審查回覆文字</p>
                         </div>
                         <div className="p-5 space-y-3">
-                          <div className="bg-stone-50 rounded-xl p-4 border border-stone-100">
+                          <div className="bg-stone-50 rounded-xl p-4 border border-stone-100 max-h-64 overflow-y-auto">
                             <p className="text-sm text-stone-700 leading-[1.9] whitespace-pre-line">{result.reviewText}</p>
                           </div>
                           <div className="flex gap-3">
