@@ -1548,6 +1548,7 @@ function PlantDatabaseModal({ plants, onClose, onSelect, selectedIds, imageStore
   const [detail, setDetail] = useState<CsvPlantRecord | null>(null)
   const [justAdded, setJustAdded] = useState<string | null>(null)
   const [showPhotoManager, setShowPhotoManager] = useState(false)
+  const importPhotoRef = useRef<HTMLInputElement>(null)
 
   const missingPhotoCount = plants.filter(p => {
     const img = imageStore[p.name]
@@ -1647,6 +1648,50 @@ function PlantDatabaseModal({ plants, onClose, onSelect, selectedIds, imageStore
               className="flex items-center gap-2 px-4 py-2 rounded-xl border border-stone-200 text-sm text-stone-600 hover:bg-stone-50 font-medium">
               <FileDown size={14} />匯出待補充 CSV
             </button>
+            {/* 匯出照片庫 */}
+            <button
+              onClick={() => {
+                const filled = Object.entries(imageStore).filter(([, v]) => v.uploadedDataUrl || v.imageUrl)
+                if (filled.length === 0) { alert('目前沒有已上傳的照片可以匯出。'); return }
+                const exportData = Object.fromEntries(filled)
+                const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' })
+                const url = URL.createObjectURL(blob)
+                const a = document.createElement('a'); a.href = url
+                a.download = `植栽照片庫_${filled.length}筆.json`
+                a.click(); URL.revokeObjectURL(url)
+              }}
+              title="匯出照片庫 JSON，傳給同事後可匯入共用"
+              className="flex items-center gap-2 px-4 py-2 rounded-xl border border-stone-200 text-sm text-stone-600 hover:bg-stone-50 font-medium">
+              <FileDown size={14} />匯出照片庫
+            </button>
+            {/* 匯入照片庫 */}
+            <button
+              onClick={() => importPhotoRef.current?.click()}
+              title="匯入同事提供的照片庫 JSON 檔"
+              className="flex items-center gap-2 px-4 py-2 rounded-xl border border-stone-200 text-sm text-stone-600 hover:bg-stone-50 font-medium">
+              <Upload size={14} />匯入照片庫
+            </button>
+            <input ref={importPhotoRef} type="file" accept=".json" className="hidden"
+              onChange={e => {
+                const file = e.target.files?.[0]; if (!file) return
+                const reader = new FileReader()
+                reader.onload = ev => {
+                  try {
+                    const incoming = JSON.parse(ev.target?.result as string)
+                    if (typeof incoming !== 'object' || Array.isArray(incoming)) throw new Error()
+                    // 合併：incoming 優先，不覆蓋本機已有的 uploadedDataUrl
+                    const merged = { ...incoming }
+                    for (const [k, v] of Object.entries(imageStore)) {
+                      if ((v as { uploadedDataUrl?: string }).uploadedDataUrl) merged[k] = v
+                    }
+                    saveImageStore(merged as ImageStore)
+                    onSaveImage('__reload__', {})   // 觸發父層 re-render
+                    alert(`照片庫匯入完成！共 ${Object.keys(incoming).length} 筆`)
+                  } catch { alert('檔案格式錯誤，請確認是由本系統匯出的 JSON 檔。') }
+                }
+                reader.readAsText(file)
+                e.target.value = ''
+              }} />
             <button
               onClick={() => { setShowPhotoManager(v => !v); setDetail(null) }}
               className={`flex items-center gap-2 px-4 py-2 rounded-xl border text-sm font-medium transition-colors relative ${
