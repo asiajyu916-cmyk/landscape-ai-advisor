@@ -584,17 +584,11 @@ function SelectedPlantCard({ plant, onRemove, imageStore }: {
             <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-stone-100 border border-stone-200 text-stone-400 font-medium">資料待補</span>
           )}
         </div>
-        {/* 重點數據 */}
-        <div className="grid grid-cols-2 gap-1 mt-auto">
-          {[
-            { label: '日照', value: plant.sunRequirement !== '待查' ? plant.sunRequirement : '—' },
-            { label: '水分', value: plant.waterRequirement !== '待查' ? plant.waterRequirement : '—' },
-          ].map(item => (
-            <div key={item.label} className="bg-[#f4f8f4] rounded px-1.5 py-1">
-              <p className="text-[9px] text-stone-400 leading-none">{item.label}</p>
-              <p className="text-[10px] font-semibold text-stone-700 truncate leading-tight mt-0.5">{item.value}</p>
-            </div>
-          ))}
+        {/* 綠色方格程度顯示 */}
+        <div className="space-y-1 mt-auto">
+          <RatingBar label="日照" score={toSunScore(plant.sunRequirement)} />
+          <RatingBar label="水分" score={toWaterBar(plant.waterRequirement)} />
+          <RatingBar label="耐旱" score={toDroughtBar(plant.droughtTolerance)} />
         </div>
       </div>
     </div>
