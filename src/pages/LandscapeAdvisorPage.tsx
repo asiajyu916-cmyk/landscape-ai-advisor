@@ -1963,6 +1963,7 @@ export default function LandscapeAdvisorPage({
   const [showDb, setShowDb] = useState(false)
   const [showCsvImport, setShowCsvImport] = useState(false)
   const [copyDone, setCopyDone] = useState(false)
+  const [activeReviewTab, setActiveReviewTab] = useState<'overview'|'categories'|'issues'|'alternatives'|'summary'>('overview')
   // Initialize imageStore directly from localStorage (lazy init avoids useEffect delay)
   const [imageStore, setImageStore] = useState<ImageStore>(() => loadImageStore())
 
@@ -2169,11 +2170,10 @@ export default function LandscapeAdvisorPage({
         </div>
       </header>
 
-      {/* Main */}
-      <main className="max-w-[1536px] mx-auto px-8 py-8 bg-[#f7f5f0] min-h-[calc(100vh-64px)]">
-        {/* No DB banner */}
-        {dbStatus === 'empty' && (
-          <div className="mb-6 flex items-center gap-4 p-4 bg-amber-50 border border-amber-200 rounded-2xl">
+      {/* No DB banner (outside main grid so it stays at top) */}
+      {dbStatus === 'empty' && (
+        <div className="mx-auto px-8 pt-3" style={{ maxWidth: '1536px' }}>
+          <div className="flex items-center gap-4 p-4 bg-amber-50 border border-amber-200 rounded-2xl">
             <AlertTriangle size={20} className="text-amber-500 flex-shrink-0" />
             <div className="flex-1">
               <p className="text-sm font-semibold text-stone-800">尚未載入植栽資料庫</p>
@@ -2184,138 +2184,246 @@ export default function LandscapeAdvisorPage({
               立即匯入
             </button>
           </div>
-        )}
+        </div>
+      )}
 
-        <div className="grid gap-6 items-start" style={{ gridTemplateColumns: '420px 1fr' }}>
-          {/* ── Left ── */}
-          <div className="space-y-5">
-            {/* Plants section */}
-            <Section
-              title={`本區植栽組合${selectedPlants.length > 0 ? `　${selectedPlants.length} 種` : ''}`}
-              action={
-                <button onClick={() => setShowDb(true)} disabled={allPlants.length === 0}
-                  className="flex items-center gap-1.5 text-xs text-green-700 font-medium hover:text-green-800 disabled:text-stone-300">
-                  <Plus size={13} />加入植栽
-                </button>
-              }>
-              <div className="space-y-3">
-                <button onClick={() => setShowDb(true)} disabled={allPlants.length === 0}
-                  className={`w-full flex items-center justify-center gap-2 py-3 border-2 border-dashed rounded-xl text-sm font-medium transition-colors ${
-                    allPlants.length > 0 ? 'border-green-200 text-green-700 hover:border-green-400 hover:bg-green-50' : 'border-stone-200 text-stone-400 cursor-not-allowed'
-                  }`}>
-                  <Plus size={15} />
-                  {allPlants.length > 0 ? '從植栽資料庫加入植物' : '請先匯入植栽資料庫'}
-                </button>
-                {selectedPlants.length === 0
-                  ? <p className="text-center text-stone-400 text-sm py-6">尚未加入植栽</p>
-                  : (
-                    <div className="grid grid-cols-2 gap-2 max-h-[520px] overflow-y-auto pr-0.5">
-                      {selectedPlants.map(p => (
-                        <SelectedPlantCard key={p.instanceId} plant={p} onRemove={() => removePlant(p.instanceId)} imageStore={imageStore} />
-                      ))}
-                    </div>
-                  )
-                }
+      {/* Main — fixed two-column, each side scrolls independently */}
+      <div style={{ height: 'calc(100vh - 64px)', display: 'grid', gridTemplateColumns: '400px 1fr', gap: '0', overflow: 'hidden' }}>
+
+        {/* ── Left: 植栽組合 ── */}
+        <div style={{ overflowY: 'auto', borderRight: '1px solid #e7e5e4' }} className="p-5 space-y-4 bg-[#f7f5f0]">
+          {/* Header row */}
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-semibold text-stone-800 tracking-wide">
+              本區植栽組合{selectedPlants.length > 0 ? `　${selectedPlants.length} 種` : ''}
+            </p>
+            <button onClick={() => setShowDb(true)} disabled={allPlants.length === 0}
+              className="flex items-center gap-1.5 text-xs text-green-700 font-medium hover:text-green-800 disabled:text-stone-300">
+              <Plus size={13} />加入植栽
+            </button>
+          </div>
+
+          {/* Add-from-DB button */}
+          <button onClick={() => setShowDb(true)} disabled={allPlants.length === 0}
+            className={`w-full flex items-center justify-center gap-2 py-3 border-2 border-dashed rounded-xl text-sm font-medium transition-colors ${
+              allPlants.length > 0 ? 'border-green-200 text-green-700 hover:border-green-400 hover:bg-green-50' : 'border-stone-200 text-stone-400 cursor-not-allowed'
+            }`}>
+            <Plus size={15} />
+            {allPlants.length > 0 ? '從植栽資料庫加入植物' : '請先匯入植栽資料庫'}
+          </button>
+
+          {/* Plant cards grid */}
+          {selectedPlants.length === 0
+            ? <p className="text-center text-stone-400 text-sm py-6">尚未加入植栽</p>
+            : (
+              <div className="grid grid-cols-2 gap-2">
+                {selectedPlants.map(p => (
+                  <SelectedPlantCard key={p.instanceId} plant={p} onRemove={() => removePlant(p.instanceId)} imageStore={imageStore} />
+                ))}
               </div>
-            </Section>
+            )
+          }
 
-            {/* Evaluate */}
-            <button onClick={() => setResult(evaluate(selectedPlants, allPlants))} disabled={selectedPlants.length === 0}
+          {/* Spacer so button doesn't overlap last card */}
+          <div className="h-2" />
+
+          {/* Evaluate button — stays in left panel */}
+          <div className="sticky bottom-0 pb-2 pt-1 bg-[#f7f5f0]">
+            <button onClick={() => { setResult(evaluate(selectedPlants, allPlants)); setActiveReviewTab('overview') }} disabled={selectedPlants.length === 0}
               className={`w-full py-3.5 rounded-2xl text-sm font-bold transition-all ${
                 selectedPlants.length > 0 ? 'bg-[#1a4731] text-white hover:bg-[#2d6a4f] shadow-md' : 'bg-stone-100 text-stone-400 cursor-not-allowed'
               }`}>
               {result ? '重新執行 AI 配植評估' : 'AI 配植評估'}
             </button>
           </div>
-
-          {/* ── Right ── */}
-          <div className="space-y-5">
-            {!result ? (
-              <div className="border border-stone-200/80 rounded-2xl flex flex-col items-center justify-center py-28 text-center px-8 shadow-sm" style={{ background: 'radial-gradient(circle at top right, rgba(111,168,120,0.10) 0%, transparent 32%), linear-gradient(145deg, #ffffff 0%, #fbfdfb 55%, #f3faf5 100%)' }}>
-                <div className="w-20 h-20 rounded-full bg-[#d8f3dc] flex items-center justify-center mb-6">
-                  <Leaf size={36} className="text-[#2d6a4f]" />
-                </div>
-                <p className="text-xl font-bold text-stone-800 mb-2">尚未執行評估</p>
-                <p className="text-sm text-stone-500 mt-1 max-w-sm leading-relaxed">
-                  在左側選取植栽組合後，點擊「AI 配植評估」按鈕，系統將自動分析水分、日照、排水與養護相容性，並產生審查回覆文字。
-                </p>
-                <div className="mt-8 flex items-center gap-6 text-xs text-stone-400">
-                  {[['🌿', '相容性分析'], ['⚠️', '風險識別'], ['📋', '審查回覆']].map(([icon, label]) => (
-                    <div key={label} className="flex flex-col items-center gap-1.5">
-                      <span className="text-2xl">{icon}</span>
-                      <span>{label}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <>
-                {/* 1. Score */}
-                <div className="bg-white border border-stone-200 rounded-2xl p-6">
-                  <ScoreDial score={result.score} level={result.compatLevel} />
-                </div>
-                {/* 2. Category grid */}
-                <Section title="問題分類總覽">
-                  <CategoryGrid categories={result.categories} altCount={result.alternatives.length} />
-                </Section>
-                {/* 3. Issue details */}
-                {activeIssues.length > 0 && (
-                  <Section title={`審查問題明細　${activeIssues.length} 項`}>
-                    <div className="space-y-3">
-                      {activeIssues.map((issue, i) => <IssueCard key={i} issue={issue} />)}
-                    </div>
-                  </Section>
-                )}
-                {/* 4. Alternatives */}
-                {result.alternatives.length > 0 && (
-                  <Section title={`替代植栽建議　${result.alternatives.length} 種植栽可替換`}>
-                    <div className="space-y-3">
-                      {result.alternatives.map((s, i) => <AltCard key={i} suggestion={s} />)}
-                    </div>
-                  </Section>
-                )}
-                {/* 5. AI suggestion */}
-                <Section title="AI 配置修正建議">
-                  <p className="text-sm text-stone-600 leading-relaxed">{result.aiSuggestion}</p>
-                </Section>
-                {/* 6. Adjustment plan */}
-                <Section title="配置調整方案">
-                  <ul className="space-y-2.5">
-                    {result.adjustmentPlan.map((plan, i) => (
-                      <li key={i} className="flex items-start gap-3">
-                        <div className="w-5 h-5 rounded-full bg-green-100 flex items-center justify-center flex-shrink-0 mt-0.5">
-                          <span className="text-xs font-bold text-green-700">{i + 1}</span>
-                        </div>
-                        <p className="text-sm text-stone-600 leading-relaxed">{plan}</p>
-                      </li>
-                    ))}
-                  </ul>
-                </Section>
-                {/* 7. Review text */}
-                <Section title="審查回覆文字">
-                  <div className="space-y-3">
-                    <div className="bg-stone-50 rounded-xl p-4 border border-stone-100">
-                      <p className="text-sm text-stone-700 leading-[1.9] whitespace-pre-line">{result.reviewText}</p>
-                    </div>
-                    <div className="flex gap-3">
-                      <button onClick={() => {
-                        navigator.clipboard.writeText(result.reviewText).then(() => { setCopyDone(true); setTimeout(() => setCopyDone(false), 2000) })
-                      }} className="flex items-center gap-2 px-4 py-2 rounded-xl border border-stone-200 text-sm text-stone-600 hover:bg-stone-50 transition-colors">
-                        {copyDone ? <CheckCircle size={14} className="text-green-500" /> : <Info size={14} />}
-                        {copyDone ? '已複製' : '複製文字'}
-                      </button>
-                      <button onClick={handleExport}
-                        className="flex items-center gap-2 px-4 py-2 rounded-xl bg-green-700 text-white text-sm font-medium hover:bg-green-800 transition-colors">
-                        <FileDown size={14} />匯出完整報告
-                      </button>
-                    </div>
-                  </div>
-                </Section>
-              </>
-            )}
-          </div>
         </div>
-      </main>
+
+        {/* ── Right: 評估結果 ── */}
+        <div style={{ overflowY: 'auto' }} className="p-5 bg-[#f7f5f0]">
+          {!result ? (
+            /* Empty state */
+            <div className="border border-stone-200/80 rounded-2xl flex flex-col items-center justify-center py-28 text-center px-8 shadow-sm h-full max-h-[600px]" style={{ background: 'radial-gradient(circle at top right, rgba(111,168,120,0.10) 0%, transparent 32%), linear-gradient(145deg, #ffffff 0%, #fbfdfb 55%, #f3faf5 100%)' }}>
+              <div className="w-20 h-20 rounded-full bg-[#d8f3dc] flex items-center justify-center mb-6">
+                <Leaf size={36} className="text-[#2d6a4f]" />
+              </div>
+              <p className="text-xl font-bold text-stone-800 mb-2">尚未執行評估</p>
+              <p className="text-sm text-stone-500 mt-1 max-w-sm leading-relaxed">
+                在左側選取植栽組合後，點擊「AI 配植評估」按鈕，系統將自動分析水分、日照、排水與養護相容性，並產生審查回覆文字。
+              </p>
+              <div className="mt-8 flex items-center gap-6 text-xs text-stone-400">
+                {[['🌿', '相容性分析'], ['⚠️', '風險識別'], ['📋', '審查回覆']].map(([icon, label]) => (
+                  <div key={label} className="flex flex-col items-center gap-1.5">
+                    <span className="text-2xl">{icon}</span>
+                    <span>{label}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            /* Result tabs */
+            (() => {
+              const dangerCount = result.issues.filter(i => i.level === 'danger').length
+              const TABS = [
+                { id: 'overview'     as const, label: '總覽' },
+                { id: 'categories'   as const, label: '問題分析' },
+                { id: 'issues'       as const, label: `問題明細${activeIssues.length > 0 ? ` (${activeIssues.length})` : ''}` },
+                { id: 'alternatives' as const, label: `替代植栽${result.alternatives.length > 0 ? ` (${result.alternatives.length})` : ''}` },
+                { id: 'summary'      as const, label: '總結建議' },
+              ]
+              return (
+                <div className="space-y-4">
+                  {/* Tab bar */}
+                  <div className="flex border-b border-stone-200 overflow-x-auto">
+                    {TABS.map(t => (
+                      <button key={t.id} onClick={() => setActiveReviewTab(t.id)}
+                        className={`px-4 py-2.5 text-sm font-medium border-b-2 whitespace-nowrap transition-colors ${
+                          activeReviewTab === t.id
+                            ? 'border-[#1a4731] text-[#1a4731]'
+                            : 'border-transparent text-stone-500 hover:text-stone-700'
+                        }`}>
+                        {t.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* ── 總覽 ── */}
+                  {activeReviewTab === 'overview' && (
+                    <div className="space-y-4">
+                      <div className="bg-white border border-stone-200 rounded-2xl p-6">
+                        <ScoreDial score={result.score} level={result.compatLevel} />
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="bg-white border border-stone-200 rounded-xl p-3">
+                          <p className="text-xs text-stone-400">已選植物</p>
+                          <p className="text-2xl font-bold text-stone-800">{selectedPlants.length} 種</p>
+                        </div>
+                        <div className="bg-white border border-stone-200 rounded-xl p-3">
+                          <p className="text-xs text-stone-400">主要問題</p>
+                          <p className="text-2xl font-bold text-amber-600">{activeIssues.length} 項</p>
+                        </div>
+                        <div className="bg-white border border-stone-200 rounded-xl p-3">
+                          <p className="text-xs text-stone-400">高風險問題</p>
+                          <p className="text-2xl font-bold text-red-600">{dangerCount} 項</p>
+                        </div>
+                        <div className="bg-white border border-stone-200 rounded-xl p-3">
+                          <p className="text-xs text-stone-400">配置風險等級</p>
+                          <p className="text-sm font-bold text-stone-800">{result.compatLevel}</p>
+                        </div>
+                      </div>
+                      <div className="bg-stone-50 border border-stone-200 rounded-xl p-4">
+                        <p className="text-xs font-semibold text-stone-600 mb-1">AI 核心建議</p>
+                        <p className="text-sm text-stone-700 leading-relaxed">{result.aiSuggestion}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ── 問題分析 ── */}
+                  {activeReviewTab === 'categories' && (
+                    <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+                      <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
+                        <p className="text-sm font-semibold text-stone-800 tracking-wide">問題分類總覽</p>
+                      </div>
+                      <div className="p-5">
+                        <CategoryGrid categories={result.categories} altCount={result.alternatives.length} />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ── 問題明細 ── */}
+                  {activeReviewTab === 'issues' && (
+                    activeIssues.length > 0 ? (
+                      <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+                        <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
+                          <p className="text-sm font-semibold text-stone-800 tracking-wide">審查問題明細　{activeIssues.length} 項</p>
+                        </div>
+                        <div className="p-5 space-y-3">
+                          {activeIssues.map((issue, i) => <IssueCard key={i} issue={issue} />)}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center justify-center py-16 text-stone-400">
+                        <CheckCircle size={36} className="text-green-400 mb-3" />
+                        <p className="text-sm font-medium">無審查問題</p>
+                      </div>
+                    )
+                  )}
+
+                  {/* ── 替代植栽 ── */}
+                  {activeReviewTab === 'alternatives' && (
+                    result.alternatives.length > 0 ? (
+                      <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+                        <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
+                          <p className="text-sm font-semibold text-stone-800 tracking-wide">替代植栽建議　{result.alternatives.length} 種植栽可替換</p>
+                        </div>
+                        <div className="p-5 space-y-3">
+                          {result.alternatives.map((s, i) => <AltCard key={i} suggestion={s} />)}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center justify-center py-16 text-stone-400">
+                        <p className="text-sm font-medium">無替代建議</p>
+                      </div>
+                    )
+                  )}
+
+                  {/* ── 總結建議 ── */}
+                  {activeReviewTab === 'summary' && (
+                    <div className="space-y-4">
+                      <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+                        <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
+                          <p className="text-sm font-semibold text-stone-800 tracking-wide">AI 配置修正建議</p>
+                        </div>
+                        <div className="p-5">
+                          <p className="text-sm text-stone-600 leading-relaxed">{result.aiSuggestion}</p>
+                        </div>
+                      </div>
+                      <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+                        <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
+                          <p className="text-sm font-semibold text-stone-800 tracking-wide">配置調整方案</p>
+                        </div>
+                        <div className="p-5">
+                          <ul className="space-y-2.5">
+                            {result.adjustmentPlan.map((plan, i) => (
+                              <li key={i} className="flex items-start gap-3">
+                                <div className="w-5 h-5 rounded-full bg-green-100 flex items-center justify-center flex-shrink-0 mt-0.5">
+                                  <span className="text-xs font-bold text-green-700">{i + 1}</span>
+                                </div>
+                                <p className="text-sm text-stone-600 leading-relaxed">{plan}</p>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      </div>
+                      <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+                        <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
+                          <p className="text-sm font-semibold text-stone-800 tracking-wide">審查回覆文字</p>
+                        </div>
+                        <div className="p-5 space-y-3">
+                          <div className="bg-stone-50 rounded-xl p-4 border border-stone-100">
+                            <p className="text-sm text-stone-700 leading-[1.9] whitespace-pre-line">{result.reviewText}</p>
+                          </div>
+                          <div className="flex gap-3">
+                            <button onClick={() => {
+                              navigator.clipboard.writeText(result.reviewText).then(() => { setCopyDone(true); setTimeout(() => setCopyDone(false), 2000) })
+                            }} className="flex items-center gap-2 px-4 py-2 rounded-xl border border-stone-200 text-sm text-stone-600 hover:bg-stone-50 transition-colors">
+                              {copyDone ? <CheckCircle size={14} className="text-green-500" /> : <Info size={14} />}
+                              {copyDone ? '已複製' : '複製文字'}
+                            </button>
+                            <button onClick={handleExport}
+                              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-green-700 text-white text-sm font-medium hover:bg-green-800 transition-colors">
+                              <FileDown size={14} />匯出完整報告
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )
+            })()
+          )}
+        </div>
+      </div>
 
       {showDb && (
         <PlantDatabaseModal
