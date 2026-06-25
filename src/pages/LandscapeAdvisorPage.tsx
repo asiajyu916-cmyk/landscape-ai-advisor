@@ -1608,6 +1608,46 @@ function PlantDatabaseModal({ plants, onClose, onSelect, selectedIds, imageStore
           </div>
           <div className="flex items-center gap-2">
             <button
+              onClick={() => {
+                // 判斷哪些欄位算「缺漏」：空字串 或 '待查'
+                const isEmpty = (v: string) => !v || v.trim() === '' || v === '待查'
+                const missing = plants.filter(p =>
+                  isEmpty(p.sunRequirement) || isEmpty(p.droughtTolerance) ||
+                  isEmpty(p.waterRequirement) || isEmpty(p.maintenanceLevel) ||
+                  isEmpty(p.height) || isEmpty(p.crownWidth) ||
+                  isEmpty(p.nativeStatus) || isEmpty(p.flowerColor) || isEmpty(p.flowerMonth)
+                )
+                if (missing.length === 0) { alert('所有植物資料均已完整，無需補充！'); return }
+                const headers = [
+                  '植物名稱', '學名', '類型', '子類型',
+                  '樹高（待填）', '冠幅（待填）',
+                  '日照需求（待填）', '需水量（待填）', '耐旱性（待填）',
+                  '花色（待填）', '花期月份（待填）',
+                  '原生狀態（待填）', '維護等級（待填）',
+                  '備注',
+                ]
+                const rows = missing.map(p => [
+                  p.name, p.scientificName, p.category, p.subCategory,
+                  p.height || '', p.crownWidth || '',
+                  p.sunRequirement || '', p.waterRequirement || '', p.droughtTolerance || '',
+                  p.flowerColor || '', p.flowerMonth || '',
+                  p.nativeStatus || '', p.maintenanceLevel || '',
+                  p.remarks || '',
+                ])
+                const csv = [headers, ...rows]
+                  .map(row => row.map(v => `"${String(v).replace(/"/g, '""')}"`).join(','))
+                  .join('\n')
+                const bom = '﻿'
+                const blob = new Blob([bom + csv], { type: 'text/csv;charset=utf-8' })
+                const url = URL.createObjectURL(blob)
+                const a = document.createElement('a'); a.href = url
+                a.download = `植栽待補充資料_${missing.length}筆.csv`
+                a.click(); URL.revokeObjectURL(url)
+              }}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl border border-stone-200 text-sm text-stone-600 hover:bg-stone-50 font-medium">
+              <FileDown size={14} />匯出待補充 CSV
+            </button>
+            <button
               onClick={() => { setShowPhotoManager(v => !v); setDetail(null) }}
               className={`flex items-center gap-2 px-4 py-2 rounded-xl border text-sm font-medium transition-colors relative ${
                 showPhotoManager
