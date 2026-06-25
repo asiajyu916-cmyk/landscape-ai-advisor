@@ -866,8 +866,9 @@ function PlantDetailDrawer({ plant, onClose, onAdd, added, imageData, onSaveImag
   const [showImgEdit, setShowImgEdit] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
 
+  const staticImgUrl = `/plant-images/${encodeURIComponent(plant.name)}.jpg`
   const effectiveImg = !imgError
-    ? (imageData?.uploadedDataUrl ?? imageData?.imageUrl ?? (urlInput.trim() || undefined))
+    ? (imageData?.uploadedDataUrl ?? imageData?.imageUrl ?? (urlInput.trim() || undefined) ?? staticImgUrl)
     : undefined
 
   const handleSaveUrl = () => {
