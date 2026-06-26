@@ -587,7 +587,7 @@ function AltCard({ suggestion }: { suggestion: AltSuggestion }) {
               <div key={alt.plant.id}
                 className="border border-green-100 rounded-xl overflow-hidden bg-green-50/30 hover:border-green-300 hover:shadow-sm transition-all flex flex-col">
                 {/* 照片 */}
-                <div className="h-24 relative overflow-hidden flex-shrink-0 bg-[#d8f3dc]">
+                <div className="h-[90px] relative overflow-hidden flex-shrink-0 bg-[#d8f3dc]">
                   <AltPlantPhoto name={alt.plant.name} />
                   {/* 序號 badge */}
                   <div className="absolute top-1.5 left-1.5 w-5 h-5 rounded-full bg-[#1a4731] flex items-center justify-center">
@@ -623,10 +623,15 @@ function AltCard({ suggestion }: { suggestion: AltSuggestion }) {
                       </div>
                     ))}
                   </div>
-                  {/* 替代理由 */}
-                  <p className="text-[10px] text-stone-600 leading-relaxed line-clamp-2 mt-auto">
-                    <span className="font-semibold text-green-700">↑ </span>{alt.riskReduction}
-                  </p>
+                  {/* 替代理由 bullets */}
+                  <div className="mt-auto space-y-0.5">
+                    {alt.riskReduction.split('、').slice(0, 2).map((r, ri) => (
+                      <p key={ri} className="text-[10px] text-green-700 leading-tight flex items-start gap-1">
+                        <span className="flex-shrink-0 font-bold">✓</span>
+                        <span>{r.trim()}</span>
+                      </p>
+                    ))}
+                  </div>
                   {!alt.plant.dataComplete && (
                     <span className="text-[9px] text-amber-600">⚠ 資料初步判定</span>
                   )}
@@ -703,7 +708,7 @@ function SelectedPlantCard({ plant, onRemove, imageStore }: {
           )}
         </div>
         {/* 綠色方格程度顯示 */}
-        <div className="space-y-1 mt-auto">
+        <div className="space-y-1.5 mt-auto">
           <RatingBar label="日照" score={toSunScore(plant.sunRequirement)} />
           <RatingBar label="水分" score={toWaterBar(plant.waterRequirement)} />
           <RatingBar label="耐旱" score={toDroughtBar(plant.droughtTolerance)} />
@@ -814,19 +819,70 @@ function toWetRiskBar(val: string): number {
 
 // ── RatingBar ─────────────────────────────────────────────────────────────────
 
+// 格條 tooltip 說明對照表
+const RATING_TOOLTIP: Record<string, string[]> = {
+  '日照': ['不適用日照', '耐陰/遮蔭', '半日照', '半至全日照', '全日照'],
+  '水分': ['極低需水', '低需水', '中等需水', '中高需水', '高需水'],
+  '耐旱': ['不耐旱', '稍耐旱', '中等耐旱', '耐旱', '極耐旱'],
+  '排水': ['積水敏感', '排水要求高', '中等', '耐濕', '耐積水'],
+  '維護': ['極低維護', '低維護', '中等維護', '高維護', '極高維護'],
+}
+
 function RatingBar({ label, score, max = 5 }: { label: string; score: number; max?: number }) {
+  const tips = RATING_TOOLTIP[label] ?? []
   return (
-    <div className="flex items-center gap-1.5">
-      <span className="text-xs text-stone-500 font-medium w-5 flex-shrink-0 leading-none">{label}</span>
-      <div className="flex gap-0.5">
-        {Array.from({ length: max }, (_, i) => (
-          <div key={i} className={`w-3.5 h-3.5 rounded-sm transition-colors ${
-            score === 0 ? 'bg-stone-100' :
-            i < score ? 'bg-green-400' : 'bg-stone-200'
-          }`} />
+    <div className="flex items-center gap-2">
+      <span className="text-[11px] text-stone-500 font-semibold w-6 flex-shrink-0 leading-none">{label}</span>
+      <div className="flex gap-[3px]">
+        {Array.from({ length: max }, (_, i) => {
+          const tipText = score > 0 && i === score - 1 && tips[i] ? `${label}：${tips[i]}` : undefined
+          return (
+            <div key={i}
+              title={tipText}
+              className={`w-4 h-4 rounded-[3px] transition-colors cursor-default ${
+                score === 0 ? 'bg-stone-100' :
+                i < score ? 'bg-green-400 hover:bg-green-500' : 'bg-stone-200'
+              }`}
+            />
+          )
+        })}
+      </div>
+      {score === 0 && <span className="text-[10px] text-stone-300">待補</span>}
+    </div>
+  )
+}
+
+// ── Rating Legend ─────────────────────────────────────────────────────────────
+
+function RatingLegend() {
+  const items = [
+    { icon: '☀', label: '日照', min: '全陰', max: '全日照' },
+    { icon: '💧', label: '水分', min: '極低', max: '高需水' },
+    { icon: '🔥', label: '耐旱', min: '不耐旱', max: '極耐旱' },
+    { icon: '🌱', label: '排水', min: '積水敏感', max: '耐積水' },
+    { icon: '🛠', label: '維護', min: '低維護', max: '高維護' },
+  ]
+  return (
+    <div className="rounded-xl border border-stone-200 bg-stone-50 px-3 py-2.5">
+      <p className="text-[10px] font-bold text-stone-500 mb-2 tracking-wide uppercase">格條圖例</p>
+      <div className="space-y-1.5">
+        {items.map(it => (
+          <div key={it.label} className="flex items-center gap-2">
+            <span className="text-xs w-4 flex-shrink-0">{it.icon}</span>
+            <span className="text-[10px] text-stone-500 font-semibold w-6 flex-shrink-0">{it.label}</span>
+            <div className="flex items-center gap-1">
+              <span className="text-[9px] text-stone-400">{it.min}</span>
+              <div className="flex gap-[2px] mx-1">
+                {[1,2,3,4,5].map(n => (
+                  <div key={n} className={`w-3 h-3 rounded-sm ${n <= 3 ? 'bg-green-300' : 'bg-stone-200'}`} />
+                ))}
+              </div>
+              <span className="text-[9px] text-stone-400">{it.max}</span>
+            </div>
+          </div>
         ))}
       </div>
-      {score === 0 && <span className="text-[10px] text-stone-300 ml-0.5">待補</span>}
+      <p className="text-[9px] text-stone-400 mt-2">格越多 = 程度越強；灰色格 = 未達該程度。滑鼠移到格條可查看說明。</p>
     </div>
   )
 }
@@ -1139,13 +1195,14 @@ function PlantDetailDrawer({ plant, onClose, onAdd, added, imageData, onSaveImag
             </span>
             <span className="text-sm text-stone-600">{plant.maintenanceLevel !== '待查' ? `維護需求${plant.maintenanceLevel}` : '維護資料待補'}</span>
           </div>
-          <div className="grid grid-cols-2 gap-1.5">
+          <div className="grid grid-cols-2 gap-2">
             <RatingBar label="日照" score={toSunScore(plant.sunRequirement)} />
             <RatingBar label="水分" score={toWaterBar(plant.waterRequirement)} />
             <RatingBar label="耐旱" score={toDroughtBar(plant.droughtTolerance)} />
             <RatingBar label="維護" score={toMainBar(plant.maintenanceLevel)} />
             <RatingBar label="排水" score={toWetRiskBar(plant.wetTolerance)} />
           </div>
+          <RatingLegend />
           {plant.riskTags.length > 0 && (
             <div className="flex flex-wrap gap-1.5 pt-1">
               {plant.riskTags.map(t => (
