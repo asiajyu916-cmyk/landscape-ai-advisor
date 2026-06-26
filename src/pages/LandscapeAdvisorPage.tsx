@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import {
   Upload, Database, FileDown, Plus, X, Search, Leaf,
   AlertTriangle, CheckCircle, XCircle, Info, ChevronDown, ChevronUp,
-  ArrowRight, FileText, ExternalLink, RefreshCw, FileOutput,
+  ArrowRight, FileText, ExternalLink, RefreshCw, FileOutput, Layers,
 } from 'lucide-react'
 import { exportReviewReportPdf } from '@/utils/exportReviewPdf'
 import {
@@ -2492,7 +2492,22 @@ export default function LandscapeAdvisorPage({
                           <p className="text-sm font-bold text-stone-800">{result.compatLevel}</p>
                         </div>
                       </div>
-                      {/* ── DXF 分區審查結果（若有）── */}
+                      {/* ── DXF 分區審查結果（若有），或提示引導 ── */}
+                      {storedZones.length === 0 && onTabChange && (
+                        <div className="rounded-xl border border-stone-200 bg-stone-50 p-4 flex items-start gap-3">
+                          <Layers size={16} className="text-stone-400 flex-shrink-0 mt-0.5" />
+                          <div>
+                            <p className="text-xs font-semibold text-stone-600 mb-0.5">尚無 DXF 分區審查資料</p>
+                            <p className="text-xs text-stone-400 leading-relaxed">
+                              請先至「DXF 審查」上傳 CAD 圖面，完成 A/B/C 分區審查後，分區結果會自動出現在這裡。
+                            </p>
+                            <button onClick={() => onTabChange('dxf')}
+                              className="mt-2 flex items-center gap-1.5 text-xs text-green-700 font-semibold hover:text-green-900">
+                              <ArrowRight size={11} />前往 DXF 審查
+                            </button>
+                          </div>
+                        </div>
+                      )}
                       {storedZones.length > 0 && (
                         <div className="rounded-xl border border-green-200 overflow-hidden">
                           <div className="px-4 py-2.5 bg-green-50 border-b border-green-100 flex items-center justify-between">
