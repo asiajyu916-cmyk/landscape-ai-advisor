@@ -48,6 +48,12 @@ export interface CsvPlantRecord {
   waterToleranceTag: string
   drainageSensitivity: DrainageSensitivity
 
+  // ── soil ─────────────────────────────────────────────────────────────────
+  soilPh: string            // 土壤酸鹼性：酸性/微酸性/中性/微鹼性/鹼性
+  soilPhRange: string       // 建議 pH 範圍，如 5.5~6.5
+  soilTexture: string       // 土壤質地：砂質土/壤土/黏質土
+  soilAmendment: string     // 客土改良需求：是/否/建議
+
   // ── risk & tags ───────────────────────────────────────────────────────────
   riskTags: string[]
 

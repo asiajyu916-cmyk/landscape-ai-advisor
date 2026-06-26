@@ -39,6 +39,10 @@ const COL = {
   verifiedAt:         30,
   verificationSummary:31,
   imageUrl:           32,   // 圖片網址（選用欄，匯出時自動附加）
+  soilPh:             33,   // 土壤酸鹼性（選用欄）
+  soilPhRange:        34,   // 建議 pH 範圍（選用欄）
+  soilTexture:        35,   // 土壤質地（選用欄）
+  soilAmendment:      36,   // 客土改良需求（選用欄）
 } as const
 
 const REQUIRED_COLUMNS = ['植物名稱', '喬木.灌木.草本', '日照需求', '水分需求']
@@ -248,6 +252,10 @@ export function parsePlantCsv(text: string): ImportResult {
       verificationStatus: verStatus,
       verifiedAt: get(COL.verifiedAt),
       verificationSummary: get(COL.verificationSummary),
+      soilPh:        get(COL.soilPh),
+      soilPhRange:   get(COL.soilPhRange),
+      soilTexture:   get(COL.soilTexture),
+      soilAmendment: get(COL.soilAmendment),
       reviewNote: buildReviewNote({
         name, category: categoryRaw, subCategory: subCat,
         sun, water, drought, wet,

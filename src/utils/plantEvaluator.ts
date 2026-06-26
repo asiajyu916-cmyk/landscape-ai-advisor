@@ -140,7 +140,53 @@ export function evaluate(plants: SelectedCsvPlant[], allPlants: CsvPlantRecord[]
       '建議由景觀設計團隊提供完整的分植物養護手冊，納入物業管理合約並定期確認執行狀況。'))
   }
 
-  // 7. 審查疑義風險
+  // 7. 土壤相容性檢查
+  const phOrder: Record<string, number> = {
+    '酸性': 1, '微酸性': 2, '中性': 3, '微鹼性': 4, '鹼性': 5,
+  }
+  const plantsWithPh = plants.filter(p => p.soilPh && phOrder[p.soilPh] !== undefined)
+  if (plantsWithPh.length >= 2) {
+    const phValues = plantsWithPh.map(p => phOrder[p.soilPh])
+    const phGap = Math.max(...phValues) - Math.min(...phValues)
+    if (phGap >= 3) {
+      deductions += 15
+      const acidPlants  = plantsWithPh.filter(p => phOrder[p.soilPh] <= 2).map(p => `${p.name}（${p.soilPh}）`)
+      const alkaliPlants = plantsWithPh.filter(p => phOrder[p.soilPh] >= 4).map(p => `${p.name}（${p.soilPh}）`)
+      issues.push(makeIssue('土壤酸鹼衝突', 'danger',
+        `本區植栽土壤 pH 需求差異懸殊：酸性偏好植物（${acidPlants.join('、')}）與鹼性偏好植物（${alkaliPlants.join('、')}）無法共存於同一土壤環境。`,
+        '統一土壤 pH 將造成部分植物出現缺素症（如酸性土壤中鹼性植物缺鐵、缺錳）或生長停滯，長期影響植物存活率。',
+        '建議依 pH 需求進行分區種植，各區土壤分別調整至適合 pH 範圍，或替換為相近 pH 需求的替代植栽。'))
+    } else if (phGap >= 2) {
+      deductions += 8
+      const phList = [...new Set(plantsWithPh.map(p => `${p.name}（${p.soilPh}）`))]
+      issues.push(makeIssue('土壤酸鹼衝突', 'caution',
+        `本區植栽土壤 pH 需求略有差異（${phList.join('、')}），需確認土壤酸鹼性可兼容各植栽需求。`,
+        '不同 pH 偏好的植物在同一土壤中可能出現生長差異，影響景觀均一性。',
+        '建議於施工前進行土壤 pH 檢測，必要時以硫磺粉（降 pH）或石灰（升 pH）調整，並於後續養護中定期監測。'))
+    }
+  }
+
+  const plantsNeedAmend = plants.filter(p => p.soilAmendment === '是' || p.soilAmendment === '建議')
+  if (plantsNeedAmend.length > 0) {
+    deductions += 5
+    issues.push(makeIssue('土壤改良需求', 'caution',
+      `本區有 ${plantsNeedAmend.length} 種植栽需要或建議進行客土改良（${plantsNeedAmend.map(p => p.name).join('、')}）。`,
+      '若未進行適當土壤改良即行種植，此類植栽之根系適應性與長期存活率將受到影響。',
+      '建議於景觀施工說明書中明列客土改良規格（如有機質添加量、土壤質地改善措施），並於竣工前確認執行。'))
+  }
+
+  const textures = [...new Set(plants.map(p => p.soilTexture).filter(Boolean))]
+  if (textures.length >= 2 && (textures.includes('砂質土') && textures.includes('黏質土'))) {
+    deductions += 6
+    const sandPlants = plants.filter(p => p.soilTexture === '砂質土').map(p => p.name)
+    const clayPlants = plants.filter(p => p.soilTexture === '黏質土').map(p => p.name)
+    issues.push(makeIssue('土壤質地衝突', 'caution',
+      `本區植栽土壤質地需求相反：偏好砂質土（${sandPlants.join('、')}）與偏好黏質土（${clayPlants.join('、')}）的植物混植，難以提供理想土壤環境。`,
+      '統一土壤質地將使部分植物因排水過快或積水而生長不良。',
+      '建議採用壤土作為基底，並針對特定植栽進行局部土壤質地改良，或分區配置以配合不同土壤質地需求。'))
+  }
+
+  // 8. 審查疑義風險
   const dangerCnt = issues.filter(i => i.level === 'danger').length
   const cautionCnt = issues.filter(i => i.level === 'caution').length
   const incompleteData = plants.filter(p => !p.dataComplete)
@@ -175,6 +221,9 @@ export function evaluate(plants: SelectedCsvPlant[], allPlants: CsvPlantRecord[]
     { key: '維護風險',    okSummary: '維護頻率相近，養護管理負擔低。' },
     { key: '根系風險',    okSummary: '根系尺度相近，生長競爭風險低。' },
     { key: '養護管理風險', okSummary: '整體養護管理負擔低。' },
+    { key: '土壤酸鹼衝突', okSummary: '土壤 pH 需求相容，無酸鹼衝突。' },
+    { key: '土壤改良需求', okSummary: '無需特殊客土改良。' },
+    { key: '土壤質地衝突', okSummary: '土壤質地需求相容。' },
     { key: '審查疑義風險', okSummary: '配置說明完整，審查疑義低。' },
   ]
   const categories: CatSummary[] = catDefs.map(c => {
@@ -208,6 +257,9 @@ export function evaluate(plants: SelectedCsvPlant[], allPlants: CsvPlantRecord[]
   if (hasHighM && hasLowM) adjustmentPlan.push('建立分植物養護時間表，標示各植栽修剪頻率與施肥計畫')
   if (tallTrees.length > 0 && groundcovers.length > 0) adjustmentPlan.push('規劃喬木與地被之種植間距，選用耐陰地被配置於冠幅範圍內')
   if (incompleteData.length > 0) adjustmentPlan.push(`補查 ${incompleteData.map(p => p.name).join('、')} 的官方日照水分資料`)
+  if (plantsWithPh.length >= 2 && (Math.max(...plantsWithPh.map(p => phOrder[p.soilPh])) - Math.min(...plantsWithPh.map(p => phOrder[p.soilPh]))) >= 2)
+    adjustmentPlan.push('施工前進行土壤 pH 檢測，依各植栽需求調整酸鹼度，並分區管理')
+  if (plantsNeedAmend.length > 0) adjustmentPlan.push('於景觀施工說明書中列明客土改良規格，竣工前確認執行')
   if (adjustmentPlan.length === 0) adjustmentPlan.push('維持現有配置，施工前確認種植間距與覆土深度符合各植栽需求')
 
   const plantNames = plants.map(p => p.name).join('、')
