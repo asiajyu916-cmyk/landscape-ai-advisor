@@ -1190,24 +1190,47 @@ export default function DxfReviewPage({
             <div className="px-6 pb-6 flex flex-col gap-3">
               <button
                 onClick={() => {
-                  const win = window.open('', '_blank', 'width=900,height=700')
-                  if (!win) { alert('請允許彈出視窗（瀏覽器右上角）'); return }
-                  win.document.write(pdfHtml)
-                  win.document.close()
-                  setTimeout(() => win.print(), 800)
-                  setPdfHtml(null)
+                  try {
+                    console.log('[DXF-PDF-Preview] pdfHtml 長度:', pdfHtml?.length)
+                    const win = window.open('', '_blank', 'width=900,height=700')
+                    console.log('[DXF-PDF-Preview] window.open 結果:', win)
+                    if (!win) {
+                      console.error('[DXF-PDF-Preview] window.open 回傳 null')
+                      alert('彈出視窗被封鎖，請改用「下載 HTML 報告」。')
+                      return
+                    }
+                    win.document.open()
+                    win.document.write(pdfHtml!)
+                    win.document.close()
+                    console.log('[DXF-PDF-Preview] document.write 完成')
+                    setTimeout(() => {
+                      try { win.print() }
+                      catch (e) { console.error('[DXF-PDF-Preview] win.print() 例外：', e) }
+                    }, 800)
+                    setPdfHtml(null)
+                  } catch (err) {
+                    console.error('[DXF-PDF-Preview] 例外：', err)
+                    alert(`預覽失敗：${err instanceof Error ? err.message : String(err)}`)
+                  }
                 }}
                 className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-[#1a4731] text-white font-semibold text-sm hover:bg-[#2d6a4f] transition-colors">
                 <FileOutput size={16} />預覽 PDF（可列印）
               </button>
               <button
                 onClick={() => {
-                  const blob = new Blob([pdfHtml], { type: 'text/html;charset=utf-8' })
-                  const url = URL.createObjectURL(blob)
-                  const a = document.createElement('a')
-                  a.href = url; a.download = `DXF分區審查報告_${fileName || 'report'}.html`; a.click()
-                  URL.revokeObjectURL(url)
-                  setPdfHtml(null)
+                  try {
+                    console.log('[DXF-PDF-Download] 建立 Blob...')
+                    const blob = new Blob([pdfHtml!], { type: 'text/html;charset=utf-8' })
+                    const url = URL.createObjectURL(blob)
+                    console.log('[DXF-PDF-Download] Blob URL:', url)
+                    const a = document.createElement('a')
+                    a.href = url; a.download = `DXF分區審查報告_${fileName || 'report'}.html`; a.click()
+                    URL.revokeObjectURL(url)
+                    setPdfHtml(null)
+                  } catch (err) {
+                    console.error('[DXF-PDF-Download] 例外：', err)
+                    alert(`下載失敗：${err instanceof Error ? err.message : String(err)}`)
+                  }
                 }}
                 className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border border-stone-200 text-stone-700 font-medium text-sm hover:bg-stone-50 transition-colors">
                 <FileDown size={16} />下載 HTML 報告

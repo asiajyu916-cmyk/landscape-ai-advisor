@@ -2348,8 +2348,19 @@ export default function LandscapeAdvisorPage({
 
   const handleExportPdf = () => {
     if (!result) return
-    const html = exportReviewReportPdf(selectedPlants, result, { reviewType: 'AI 配植評估' }, { returnHtml: true })
-    if (typeof html === 'string') setPdfHtml(html)
+    try {
+      console.log('[PDF] 開始產生 HTML...')
+      const html = exportReviewReportPdf(selectedPlants, result, { reviewType: 'AI 配植評估' }, { returnHtml: true })
+      console.log('[PDF] exportReviewReportPdf 回傳型別:', typeof html, '長度:', typeof html === 'string' ? html.length : 'N/A')
+      if (typeof html === 'string' && html.length > 0) {
+        setPdfHtml(html)
+        console.log('[PDF] HTML 已存入 state，Modal 應顯示')
+      } else {
+        console.error('[PDF] 錯誤：html 回傳值非字串或為空', html)
+      }
+    } catch (err) {
+      console.error('[PDF] handleExportPdf 例外：', err)
+    }
   }
 
   const activeIssues = result?.issues.filter(i => i.level !== 'ok') ?? []
@@ -2953,24 +2964,53 @@ export default function LandscapeAdvisorPage({
             <div className="px-6 pb-6 flex flex-col gap-3">
               <button
                 onClick={() => {
-                  const win = window.open('', '_blank', 'width=900,height=700')
-                  if (!win) { alert('請允許彈出視窗（瀏覽器右上角）'); return }
-                  win.document.write(pdfHtml)
-                  win.document.close()
-                  setTimeout(() => win.print(), 800)
-                  setPdfHtml(null)
+                  try {
+                    console.log('[PDF-Preview] pdfHtml 長度:', pdfHtml?.length)
+                    const win = window.open('', '_blank', 'width=900,height=700')
+                    console.log('[PDF-Preview] window.open 結果:', win)
+                    if (!win) {
+                      console.error('[PDF-Preview] window.open 回傳 null，Popup 被封鎖')
+                      alert('彈出視窗被封鎖，請改用「下載 HTML 報告」，在本機開啟後列印。')
+                      return
+                    }
+                    console.log('[PDF-Preview] 開始寫入 document...')
+                    win.document.open()
+                    win.document.write(pdfHtml!)
+                    win.document.close()
+                    console.log('[PDF-Preview] document.write 完成，等待 print...')
+                    setTimeout(() => {
+                      try {
+                        win.print()
+                        console.log('[PDF-Preview] win.print() 呼叫完成')
+                      } catch (printErr) {
+                        console.error('[PDF-Preview] win.print() 例外：', printErr)
+                      }
+                    }, 800)
+                    setPdfHtml(null)
+                  } catch (err) {
+                    console.error('[PDF-Preview] 預覽例外：', err)
+                    alert(`預覽失敗，請查看 Console 取得詳細錯誤。\n${err instanceof Error ? err.message : String(err)}`)
+                  }
                 }}
                 className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-[#1a4731] text-white font-semibold text-sm hover:bg-[#2d6a4f] transition-colors">
                 <FileOutput size={16} />預覽 PDF（可列印）
               </button>
               <button
                 onClick={() => {
-                  const blob = new Blob([pdfHtml], { type: 'text/html;charset=utf-8' })
-                  const url = URL.createObjectURL(blob)
-                  const a = document.createElement('a')
-                  a.href = url; a.download = '景觀審查報告.html'; a.click()
-                  URL.revokeObjectURL(url)
-                  setPdfHtml(null)
+                  try {
+                    console.log('[PDF-Download] 開始建立 Blob...')
+                    const blob = new Blob([pdfHtml!], { type: 'text/html;charset=utf-8' })
+                    const url = URL.createObjectURL(blob)
+                    console.log('[PDF-Download] Blob URL:', url)
+                    const a = document.createElement('a')
+                    a.href = url; a.download = '景觀審查報告.html'; a.click()
+                    URL.revokeObjectURL(url)
+                    setPdfHtml(null)
+                    console.log('[PDF-Download] 下載觸發完成')
+                  } catch (err) {
+                    console.error('[PDF-Download] 下載例外：', err)
+                    alert(`下載失敗：${err instanceof Error ? err.message : String(err)}`)
+                  }
                 }}
                 className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border border-stone-200 text-stone-700 font-medium text-sm hover:bg-stone-50 transition-colors">
                 <FileDown size={16} />下載 HTML 報告
