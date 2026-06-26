@@ -2982,18 +2982,21 @@ export default function LandscapeAdvisorPage({
               <button
                 onClick={() => {
                   try {
-                    const win = window.open('', '_blank', 'width=900,height=700')
+                    const blob = new Blob([pdfHtml!], { type: 'text/html;charset=utf-8' })
+                    const url = URL.createObjectURL(blob)
+                    const win = window.open(url, '_blank')
                     if (!win) {
+                      URL.revokeObjectURL(url)
                       console.error('[PDF-Preview] window.open 回傳 null，Popup 被封鎖')
                       setPdfError('彈出視窗被封鎖，請允許此網站彈出視窗，或改用「下載 HTML 報告」後在本機開啟列印。')
                       return
                     }
-                    win.document.open()
-                    win.document.write(pdfHtml!)
-                    win.document.close()
-                    setTimeout(() => {
-                      try { win.print() } catch (printErr) { console.error('[PDF-Preview] win.print() 例外：', printErr) }
-                    }, 800)
+                    win.onload = () => {
+                      setTimeout(() => {
+                        try { win.print() } catch (printErr) { console.error('[PDF-Preview] win.print() 例外：', printErr) }
+                      }, 100)
+                    }
+                    setTimeout(() => URL.revokeObjectURL(url), 120_000)
                     setPdfHtml(null)
                     setPdfError(null)
                   } catch (err) {
