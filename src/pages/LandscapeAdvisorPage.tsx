@@ -2372,9 +2372,19 @@ export default function LandscapeAdvisorPage({
       <header className="bg-[#1a4731] sticky top-0 z-40 shadow-md">
         <div className="max-w-[1536px] mx-auto px-4 md:px-8 h-14 md:h-16 flex items-center justify-between gap-2 md:gap-4">
           {/* 標題 */}
-          <div className="flex-shrink-0 min-w-0">
-            <h1 className="text-sm md:text-base font-bold text-white leading-tight tracking-wide truncate">景觀 AI 設計審查顧問 2.0</h1>
-            <p className="text-[10px] md:text-xs text-green-200/70 leading-tight hidden sm:block">植栽配置相容性・養護風險・審查回覆</p>
+          <div className="flex items-center gap-2.5 flex-shrink-0 min-w-0">
+            <svg viewBox="0 0 32 32" className="h-8 w-8 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <path d="M16 1L28 5V18C28 26 22.5 30.5 16 32C9.5 30.5 4 26 4 18V5Z"
+                    fill="white" fillOpacity="0.1" stroke="white" strokeWidth="1.5" strokeOpacity="0.5" strokeLinejoin="round"/>
+              <polygon points="16,8 20.5,14.5 11.5,14.5" fill="white"/>
+              <polygon points="16,12 22,21.5 10,21.5" fill="white" opacity="0.9"/>
+              <rect x="14.5" y="21.5" width="3" height="3.5" rx="0.5" fill="white" opacity="0.75"/>
+              <polyline points="20,23 22,26 26.5,21" fill="none" stroke="#86efac" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+            <div className="min-w-0">
+              <h1 className="text-sm md:text-base font-bold text-white leading-tight tracking-wide truncate">景觀 AI 設計審查顧問 2.0</h1>
+              <p className="text-[10px] md:text-xs text-green-200/70 leading-tight hidden sm:block">植栽配置相容性・養護風險・審查回覆</p>
+            </div>
           </div>
 
           {/* Tab navigation — 桌機顯示 */}
