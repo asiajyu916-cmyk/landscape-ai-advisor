@@ -2202,10 +2202,16 @@ export default function LandscapeAdvisorPage({
     issues?: Array<{ category:string; level:string; cause:string; impact:string; suggestion:string }>
     aiSuggestion?: string; adjustmentPlan?: string[]; reviewText?: string
   }
-  const [storedZones] = useState<StoredZone[]>(() => {
-    try { const r = sessionStorage.getItem('dxf-zone-review-full'); return r ? JSON.parse(r) : [] }
-    catch { return [] }
-  })
+  const [storedZones, setStoredZones] = useState<StoredZone[]>([])
+  // 每次切回 AI 配植評估 tab 時重新讀取 sessionStorage（DXF 審查後寫入的資料）
+  useEffect(() => {
+    if (activeTab === 'landscape') {
+      try {
+        const r = sessionStorage.getItem('dxf-zone-review-full')
+        setStoredZones(r ? JSON.parse(r) : [])
+      } catch { setStoredZones([]) }
+    }
+  }, [activeTab])
   const [activeZoneId, setActiveZoneId] = useState<string | null>(null)
   const activeZone = storedZones.find(z => z.zoneName === activeZoneId) ?? null
 
