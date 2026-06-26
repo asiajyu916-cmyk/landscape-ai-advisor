@@ -634,12 +634,15 @@ export default function DxfReviewPage({
         adjustmentPlan: r.evalResult?.adjustmentPlan,
         reviewText:     r.evalResult?.reviewText,
       }))
-      localStorage.setItem('dxf-zone-review-full', JSON.stringify(full))
-      // 保留精簡版相容舊 key
-      localStorage.setItem('dxf-zone-review-summary', JSON.stringify(
+      // sessionStorage：同一 tab 有效，關閉 tab 或新開 session 自動清除
+      sessionStorage.setItem('dxf-zone-review-full', JSON.stringify(full))
+      sessionStorage.setItem('dxf-zone-review-summary', JSON.stringify(
         full.map(({ zoneName, status, plantCount, score, compatLevel, issueCount, dangerCount, mainIssues }) =>
           ({ zoneName, status, plantCount, score, compatLevel, issueCount, dangerCount, mainIssues }))
       ))
+      // 清除舊版 localStorage（避免殘留舊資料被其他邏輯讀取）
+      localStorage.removeItem('dxf-zone-review-full')
+      localStorage.removeItem('dxf-zone-review-summary')
     } catch { /* quota exceeded */ }
   }
   const [zoneDebug, setZoneDebug] = useState<ZoneAssignDebug | null>(null)
@@ -878,7 +881,7 @@ export default function DxfReviewPage({
                 <FileOutput size={13} />匯出分區審查 PDF
               </button>
             )}
-            <button onClick={() => { setParseResult(null); setFileName(''); setMappings([]) }}
+            <button onClick={() => { setParseResult(null); setFileName(''); setMappings([]); sessionStorage.removeItem('dxf-zone-review-full'); sessionStorage.removeItem('dxf-zone-review-summary') }}
               className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-stone-300 text-xs text-stone-600 hover:bg-stone-100 transition-colors">
               <X size={12} />重新上傳
             </button>

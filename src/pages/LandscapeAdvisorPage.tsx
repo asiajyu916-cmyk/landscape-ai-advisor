@@ -2203,7 +2203,7 @@ export default function LandscapeAdvisorPage({
     aiSuggestion?: string; adjustmentPlan?: string[]; reviewText?: string
   }
   const [storedZones] = useState<StoredZone[]>(() => {
-    try { const r = localStorage.getItem('dxf-zone-review-full'); return r ? JSON.parse(r) : [] }
+    try { const r = sessionStorage.getItem('dxf-zone-review-full'); return r ? JSON.parse(r) : [] }
     catch { return [] }
   })
   const [activeZoneId, setActiveZoneId] = useState<string | null>(null)
