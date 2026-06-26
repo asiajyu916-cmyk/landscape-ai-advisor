@@ -613,21 +613,32 @@ export default function DxfReviewPage({
   const [detectedZones, setDetectedZones] = useState<DetectedZone[]>([])
   const [zoneReviews, setZoneReviews] = useState<ZoneReviewResult[]>([])
 
-  // 每次 zoneReviews 更新就持久化精簡版到 localStorage，供 PDF 匯出及其他頁讀取
+  // 每次 zoneReviews 更新就持久化到 localStorage，供 AI配植頁與 PDF 讀取
   const saveZoneReviews = (reviews: ZoneReviewResult[]) => {
     setZoneReviews(reviews)
     try {
-      const summary = reviews.map(r => ({
-        zoneName: r.zoneName,
-        status:   r.status,
-        score:    r.evalResult?.score,
+      const full = reviews.map(r => ({
+        zoneName:    r.zoneName,
+        status:      r.status,
+        plantCount:  r.blockEntries.reduce((s, b) => s + b.count, 0),
+        score:       r.evalResult?.score,
         compatLevel: r.evalResult?.compatLevel,
         issueCount:  r.evalResult?.issues.filter(i => i.level !== 'ok').length ?? 0,
         dangerCount: r.evalResult?.issues.filter(i => i.level === 'danger').length ?? 0,
         mainIssues:  r.evalResult?.issues.filter(i => i.level !== 'ok').map(i => i.category) ?? [],
-        plantCount:  r.blockEntries.reduce((s, b) => s + b.count, 0),
+        // 完整評估資料（供 AI配植頁顯示分區詳細）
+        categories:     r.evalResult?.categories,
+        issues:         r.evalResult?.issues.filter(i => i.level !== 'ok'),
+        aiSuggestion:   r.evalResult?.aiSuggestion,
+        adjustmentPlan: r.evalResult?.adjustmentPlan,
+        reviewText:     r.evalResult?.reviewText,
       }))
-      localStorage.setItem('dxf-zone-review-summary', JSON.stringify(summary))
+      localStorage.setItem('dxf-zone-review-full', JSON.stringify(full))
+      // 保留精簡版相容舊 key
+      localStorage.setItem('dxf-zone-review-summary', JSON.stringify(
+        full.map(({ zoneName, status, plantCount, score, compatLevel, issueCount, dangerCount, mainIssues }) =>
+          ({ zoneName, status, plantCount, score, compatLevel, issueCount, dangerCount, mainIssues }))
+      ))
     } catch { /* quota exceeded */ }
   }
   const [zoneDebug, setZoneDebug] = useState<ZoneAssignDebug | null>(null)

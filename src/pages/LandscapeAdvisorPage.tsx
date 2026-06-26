@@ -2024,6 +2024,22 @@ export default function LandscapeAdvisorPage({
   const [showMobileTools, setShowMobileTools] = useState(false)
   const [aiSuggestionExpanded, setAiSuggestionExpanded] = useState(false)
 
+  // ── DXF 分區審查資料（從 localStorage 讀取）──────────────────────────────────
+  type StoredZone = {
+    zoneName: string; status: string; plantCount: number
+    score?: number; compatLevel?: string
+    issueCount: number; dangerCount: number; mainIssues: string[]
+    categories?: Array<{ key:string; label:string; count:number; level:string; statusLabel:string; summary:string }>
+    issues?: Array<{ category:string; level:string; cause:string; impact:string; suggestion:string }>
+    aiSuggestion?: string; adjustmentPlan?: string[]; reviewText?: string
+  }
+  const [storedZones] = useState<StoredZone[]>(() => {
+    try { const r = localStorage.getItem('dxf-zone-review-full'); return r ? JSON.parse(r) : [] }
+    catch { return [] }
+  })
+  const [activeZoneId, setActiveZoneId] = useState<string | null>(null)
+  const activeZone = storedZones.find(z => z.zoneName === activeZoneId) ?? null
+
   // ── Split pane ──────────────────────────────────────────────────────────────
   const SPLIT_MIN_LEFT  = 320
   const SPLIT_MIN_RIGHT = 480
@@ -2476,122 +2492,238 @@ export default function LandscapeAdvisorPage({
                           <p className="text-sm font-bold text-stone-800">{result.compatLevel}</p>
                         </div>
                       </div>
+                      {/* ── DXF 分區審查結果（若有）── */}
+                      {storedZones.length > 0 && (
+                        <div className="rounded-xl border border-green-200 overflow-hidden">
+                          <div className="px-4 py-2.5 bg-green-50 border-b border-green-100 flex items-center justify-between">
+                            <p className="text-xs font-bold text-green-800 tracking-wide">DXF 分區審查結果（{storedZones.length} 區）</p>
+                            <span className="text-[10px] text-green-600">點擊分區可查看詳細審查</span>
+                          </div>
+                          <div className="divide-y divide-stone-100 bg-white">
+                            {storedZones.map(z => {
+                              const riskCls = z.dangerCount > 0 ? 'bg-red-50 border-red-200 text-red-700'
+                                : z.issueCount > 0 ? 'bg-amber-50 border-amber-200 text-amber-700'
+                                : z.score !== undefined ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                                : 'bg-stone-50 border-stone-200 text-stone-500'
+                              const riskLabel = z.dangerCount > 0 ? '高風險' : z.issueCount > 0 ? '中風險' : z.score !== undefined ? '低風險' : '待審查'
+                              const scoreClr = !z.score ? 'text-stone-400' : z.score >= 80 ? 'text-emerald-700' : z.score >= 60 ? 'text-amber-700' : 'text-red-700'
+                              const isActive = activeZoneId === z.zoneName
+                              return (
+                                <button key={z.zoneName}
+                                  onClick={() => { setActiveZoneId(isActive ? null : z.zoneName); setActiveReviewTab('overview') }}
+                                  className={`w-full text-left px-4 py-3 hover:bg-stone-50 transition-colors ${isActive ? 'bg-green-50 border-l-4 border-green-500' : ''}`}>
+                                  <div className="flex items-center justify-between mb-1">
+                                    <span className="font-bold text-stone-800 text-sm">{z.zoneName}</span>
+                                    <div className="flex items-center gap-2">
+                                      <span className={`text-xs font-bold px-2 py-0.5 rounded-full border ${riskCls}`}>{riskLabel}</span>
+                                      {z.score !== undefined && (
+                                        <span className={`text-sm font-bold ${scoreClr}`}>{z.score}<span className="text-xs font-normal text-stone-400">/100</span></span>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <div className="flex gap-4 text-xs text-stone-500">
+                                    <span>植物 {z.plantCount} 株</span>
+                                    {z.issueCount > 0 && <span className="text-amber-600">問題 {z.issueCount} 項</span>}
+                                    {z.dangerCount > 0 && <span className="text-red-600">高風險 {z.dangerCount} 項</span>}
+                                    {z.mainIssues.length > 0 && <span className="text-stone-400 truncate">{z.mainIssues.slice(0,2).join('、')}</span>}
+                                  </div>
+                                  {isActive && <p className="text-[10px] text-green-600 mt-1">↓ 切換上方分頁查看本區詳細審查</p>}
+                                </button>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      )}
+
                       {/* AI 核心建議 — 手機預設收合，桌機展開 */}
                       <div className="bg-stone-50 border border-stone-200 rounded-xl overflow-hidden">
                         <button
                           onClick={() => setAiSuggestionExpanded(v => !v)}
                           className="w-full flex items-center justify-between px-4 py-3 text-left md:cursor-default min-h-[44px]">
-                          <p className="text-xs font-semibold text-stone-600">AI 核心建議</p>
+                          <p className="text-xs font-semibold text-stone-600">
+                            AI 核心建議{activeZone ? `（${activeZone.zoneName}）` : '（全案）'}
+                          </p>
                           <ChevronDown size={15} className={`text-stone-400 transition-transform md:hidden ${aiSuggestionExpanded ? 'rotate-180' : ''}`} />
                         </button>
                         <div className={`px-4 pb-4 ${aiSuggestionExpanded ? 'block' : 'hidden md:block'}`}>
-                          <p className="text-sm text-stone-700 leading-relaxed">{result.aiSuggestion}</p>
+                          <p className="text-sm text-stone-700 leading-relaxed">
+                            {activeZone ? (activeZone.aiSuggestion ?? '此區尚無 AI 建議') : result.aiSuggestion}
+                          </p>
                         </div>
                       </div>
+                    </div>
+                  )}
+
+                  {/* ── 分區指示列（有選中分區時顯示）── */}
+                  {activeZone && (
+                    <div className="flex items-center gap-3 px-4 py-2.5 bg-green-50 border border-green-200 rounded-xl">
+                      <button onClick={() => setActiveZoneId(null)}
+                        className="flex items-center gap-1.5 text-xs text-green-700 font-semibold hover:text-green-900">
+                        <ArrowRight size={12} className="rotate-180" />回到全案總覽
+                      </button>
+                      <span className="text-stone-300">|</span>
+                      <span className="text-sm font-bold text-green-800">目前查看：{activeZone.zoneName}</span>
+                      {activeZone.score !== undefined && (
+                        <span className={`text-sm font-bold ml-auto ${activeZone.score >= 80 ? 'text-emerald-700' : activeZone.score >= 60 ? 'text-amber-700' : 'text-red-700'}`}>
+                          {activeZone.score}/100
+                        </span>
+                      )}
                     </div>
                   )}
 
                   {/* ── 問題分析 ── */}
                   {activeReviewTab === 'categories' && (
-                    <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
-                      <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
-                        <p className="text-sm font-semibold text-stone-800 tracking-wide">問題分類總覽</p>
+                    activeZone ? (
+                      /* 分區問題分析 */
+                      <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+                        <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
+                          <p className="text-sm font-semibold text-stone-800 tracking-wide">{activeZone.zoneName} 問題分類總覽</p>
+                        </div>
+                        <div className="p-5">
+                          {activeZone.categories && activeZone.categories.length > 0
+                            ? <CategoryGrid categories={activeZone.categories as never} altCount={0} />
+                            : <p className="text-sm text-stone-400 text-center py-8">此區無問題分析資料</p>
+                          }
+                        </div>
                       </div>
-                      <div className="p-5">
-                        <CategoryGrid categories={result.categories} altCount={result.alternatives.length} />
+                    ) : (
+                      /* 全案問題分析 */
+                      <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+                        <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
+                          <p className="text-sm font-semibold text-stone-800 tracking-wide">問題分類總覽</p>
+                        </div>
+                        <div className="p-5">
+                          <CategoryGrid categories={result.categories} altCount={result.alternatives.length} />
+                        </div>
                       </div>
-                    </div>
+                    )
                   )}
 
                   {/* ── 問題明細 ── */}
                   {activeReviewTab === 'issues' && (
-                    activeIssues.length > 0 ? (
-                      <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
-                        <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
-                          <p className="text-sm font-semibold text-stone-800 tracking-wide">審查問題明細　{activeIssues.length} 項</p>
+                    activeZone ? (
+                      /* 分區問題明細 */
+                      activeZone.issues && activeZone.issues.length > 0 ? (
+                        <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+                          <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
+                            <p className="text-sm font-semibold text-stone-800 tracking-wide">{activeZone.zoneName} 問題明細　{activeZone.issues.length} 項</p>
+                          </div>
+                          <div className="p-5 space-y-3">
+                            {activeZone.issues.map((issue, i) => <IssueCard key={i} issue={issue as never} />)}
+                          </div>
                         </div>
-                        <div className="p-5 space-y-3">
-                          {activeIssues.map((issue, i) => <IssueCard key={i} issue={issue} />)}
+                      ) : (
+                        <div className="flex flex-col items-center justify-center py-16 text-stone-400">
+                          <CheckCircle size={36} className="text-green-400 mb-3" />
+                          <p className="text-sm font-medium">{activeZone.zoneName} 無審查問題</p>
                         </div>
-                      </div>
+                      )
                     ) : (
-                      <div className="flex flex-col items-center justify-center py-16 text-stone-400">
-                        <CheckCircle size={36} className="text-green-400 mb-3" />
-                        <p className="text-sm font-medium">無審查問題</p>
-                      </div>
+                      /* 全案問題明細 */
+                      activeIssues.length > 0 ? (
+                        <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+                          <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
+                            <p className="text-sm font-semibold text-stone-800 tracking-wide">審查問題明細　{activeIssues.length} 項</p>
+                          </div>
+                          <div className="p-5 space-y-3">
+                            {activeIssues.map((issue, i) => <IssueCard key={i} issue={issue} />)}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex flex-col items-center justify-center py-16 text-stone-400">
+                          <CheckCircle size={36} className="text-green-400 mb-3" />
+                          <p className="text-sm font-medium">無審查問題</p>
+                        </div>
+                      )
                     )
                   )}
 
                   {/* ── 替代植栽 ── */}
                   {activeReviewTab === 'alternatives' && (
-                    result.alternatives.length > 0 ? (
-                      <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
-                        <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
-                          <p className="text-sm font-semibold text-stone-800 tracking-wide">替代植栽建議　{result.alternatives.length} 種植栽可替換</p>
-                        </div>
-                        <div className="p-5 space-y-3">
-                          {result.alternatives.map((s, i) => <AltCard key={i} suggestion={s} />)}
-                        </div>
+                    activeZone ? (
+                      <div className="flex flex-col items-center justify-center py-16 text-stone-400">
+                        <p className="text-sm font-medium">DXF 分區審查不含替代植栽建議</p>
+                        <p className="text-xs mt-1">如需替代植栽，請至 AI 配植評估（全案）查看</p>
                       </div>
                     ) : (
-                      <div className="flex flex-col items-center justify-center py-16 text-stone-400">
-                        <p className="text-sm font-medium">無替代建議</p>
-                      </div>
+                      result.alternatives.length > 0 ? (
+                        <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+                          <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
+                            <p className="text-sm font-semibold text-stone-800 tracking-wide">替代植栽建議　{result.alternatives.length} 種植栽可替換</p>
+                          </div>
+                          <div className="p-5 space-y-3">
+                            {result.alternatives.map((s, i) => <AltCard key={i} suggestion={s} />)}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex flex-col items-center justify-center py-16 text-stone-400">
+                          <p className="text-sm font-medium">無替代建議</p>
+                        </div>
+                      )
                     )
                   )}
 
                   {/* ── 總結建議 ── */}
-                  {activeReviewTab === 'summary' && (
+                  {activeReviewTab === 'summary' && (() => {
+                    const ai   = activeZone ? (activeZone.aiSuggestion   ?? '') : result.aiSuggestion
+                    const plan = activeZone ? (activeZone.adjustmentPlan  ?? []) : result.adjustmentPlan
+                    const rev  = activeZone ? (activeZone.reviewText      ?? '') : result.reviewText
+                    const title = activeZone ? `${activeZone.zoneName} 審查建議` : 'AI 配置修正建議'
+                    return (
                     <div className="space-y-4">
                       <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
                         <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
-                          <p className="text-sm font-semibold text-stone-800 tracking-wide">AI 配置修正建議</p>
+                          <p className="text-sm font-semibold text-stone-800 tracking-wide">{title}</p>
                         </div>
                         <div className="p-5">
-                          <p className="text-sm text-stone-600 leading-relaxed">{result.aiSuggestion}</p>
+                          <p className="text-sm text-stone-600 leading-relaxed">{ai || '（無建議）'}</p>
                         </div>
                       </div>
-                      <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
-                        <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
-                          <p className="text-sm font-semibold text-stone-800 tracking-wide">配置調整方案</p>
+                      {plan.length > 0 && (
+                        <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+                          <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
+                            <p className="text-sm font-semibold text-stone-800 tracking-wide">配置調整方案</p>
+                          </div>
+                          <div className="p-5">
+                            <ul className="space-y-2.5">
+                              {plan.map((p, i) => (
+                                <li key={i} className="flex items-start gap-3">
+                                  <div className="w-5 h-5 rounded-full bg-green-100 flex items-center justify-center flex-shrink-0 mt-0.5">
+                                    <span className="text-xs font-bold text-green-700">{i + 1}</span>
+                                  </div>
+                                  <p className="text-sm text-stone-600 leading-relaxed">{p}</p>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
                         </div>
-                        <div className="p-5">
-                          <ul className="space-y-2.5">
-                            {result.adjustmentPlan.map((plan, i) => (
-                              <li key={i} className="flex items-start gap-3">
-                                <div className="w-5 h-5 rounded-full bg-green-100 flex items-center justify-center flex-shrink-0 mt-0.5">
-                                  <span className="text-xs font-bold text-green-700">{i + 1}</span>
-                                </div>
-                                <p className="text-sm text-stone-600 leading-relaxed">{plan}</p>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      </div>
+                      )}
                       <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
                         <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
                           <p className="text-sm font-semibold text-stone-800 tracking-wide">審查回覆文字</p>
                         </div>
                         <div className="p-5 space-y-3">
                           <div className="bg-stone-50 rounded-xl p-4 border border-stone-100 max-h-64 overflow-y-auto">
-                            <p className="text-sm text-stone-700 leading-[1.9] whitespace-pre-line">{result.reviewText}</p>
+                            <p className="text-sm text-stone-700 leading-[1.9] whitespace-pre-line">{rev || '（無審查回覆）'}</p>
                           </div>
-                          <div className="flex gap-3">
-                            <button onClick={() => {
-                              navigator.clipboard.writeText(result.reviewText).then(() => { setCopyDone(true); setTimeout(() => setCopyDone(false), 2000) })
-                            }} className="flex items-center gap-2 px-4 py-2 rounded-xl border border-stone-200 text-sm text-stone-600 hover:bg-stone-50 transition-colors">
-                              {copyDone ? <CheckCircle size={14} className="text-green-500" /> : <Info size={14} />}
-                              {copyDone ? '已複製' : '複製文字'}
-                            </button>
-                            <button onClick={handleExport}
-                              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-green-700 text-white text-sm font-medium hover:bg-green-800 transition-colors">
-                              <FileDown size={14} />匯出完整報告
-                            </button>
-                          </div>
+                          {!activeZone && (
+                            <div className="flex gap-3">
+                              <button onClick={() => { navigator.clipboard.writeText(result.reviewText).then(() => { setCopyDone(true); setTimeout(() => setCopyDone(false), 2000) }) }}
+                                className="flex items-center gap-2 px-4 py-2 rounded-xl border border-stone-200 text-sm text-stone-600 hover:bg-stone-50 transition-colors">
+                                {copyDone ? <CheckCircle size={14} className="text-green-500" /> : <Info size={14} />}
+                                {copyDone ? '已複製' : '複製文字'}
+                              </button>
+                              <button onClick={handleExport}
+                                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-green-700 text-white text-sm font-medium hover:bg-green-800 transition-colors">
+                                <FileDown size={14} />匯出完整報告
+                              </button>
+                            </div>
+                          )}
                         </div>
                       </div>
                     </div>
-                  )}
+                    )
+                  })()}
                 </div>
               )
             })()
