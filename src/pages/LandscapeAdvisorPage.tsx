@@ -2981,43 +2981,34 @@ export default function LandscapeAdvisorPage({
               )}
               <button
                 onClick={() => {
+                  // 第一行同步開窗，確保 Chrome 視為使用者直接點擊
+                  const previewWindow = window.open('about:blank', '_blank')
+                  console.log('[PDF-Preview] window.open 回傳:', previewWindow)
+                  if (!previewWindow) {
+                    console.error('[PDF-Preview] window.open 回傳 null，Popup 被封鎖')
+                    setPdfError('彈出視窗被封鎖，請允許此網站彈出視窗，或改用「下載 HTML 報告」後在本機開啟列印。')
+                    return
+                  }
                   try {
                     const htmlContent = pdfHtml
                     console.log('[PDF-Preview] pdfHtml 存在:', !!htmlContent, '長度:', htmlContent?.length ?? 0)
                     if (!htmlContent) {
+                      previewWindow.close()
                       setPdfError('HTML 內容為空，請重新產生報告。')
                       return
                     }
                     const htmlBlob = new Blob([htmlContent], { type: 'text/html' })
                     const htmlUrl = URL.createObjectURL(htmlBlob)
                     console.log('[PDF-Preview] htmlUrl 建立:', htmlUrl)
-                    const win = window.open(htmlUrl, '_blank')
-                    console.log('[PDF-Preview] window.open 回傳:', win)
-                    if (!win) {
-                      URL.revokeObjectURL(htmlUrl)
-                      console.error('[PDF-Preview] window.open 回傳 null，Popup 被封鎖')
-                      setPdfError('彈出視窗被封鎖，請允許此網站彈出視窗，或改用「下載 HTML 報告」後在本機開啟列印。')
-                      return
-                    }
-                    // 用 polling 確認 readyState，避免 onload race condition
-                    const tryPrint = (attempts = 0) => {
-                      if (attempts > 30) { console.error('[PDF-Preview] 等待逾時，放棄 print()'); return }
-                      try {
-                        if (win.document.readyState === 'complete') {
-                          console.log('[PDF-Preview] document.readyState complete，呼叫 print()')
-                          win.print()
-                        } else {
-                          setTimeout(() => tryPrint(attempts + 1), 200)
-                        }
-                      } catch (e) {
-                        console.error('[PDF-Preview] tryPrint 例外：', e)
-                      }
-                    }
-                    setTimeout(() => tryPrint(), 300)
+                    previewWindow.location.href = htmlUrl
+                    setTimeout(() => {
+                      try { previewWindow.print() } catch (e) { console.error('[PDF-Preview] print() 例外：', e) }
+                    }, 1000)
                     setTimeout(() => URL.revokeObjectURL(htmlUrl), 120_000)
                     setPdfHtml(null)
                     setPdfError(null)
                   } catch (err) {
+                    previewWindow.close()
                     console.error('[PDF-Preview] 例外：', err)
                     setPdfError(`預覽失敗：${err instanceof Error ? err.message : String(err)}`)
                   }
