@@ -2536,21 +2536,29 @@ tfoot{display:table-footer-group}
   <div class="footer">景觀 AI 設計審查顧問 2.0　｜　植栽配置評估報告　｜　${esc(now)}</div>
 </div>`
 
+      // ── DEBUG: 確認 reportHtml 內容 ──
+      console.log('[PDF] reportHtml length =', reportHtml.length)
+      console.log('[PDF] reportHtml 前 1000 字元:', reportHtml.substring(0, 1000))
+
       // ── Step 2: 注入報告容器（opacity:1，用全屏白色遮罩蓋住 App） ──
-      // 注意：opacity 必須是 1，html2canvas 會完全依照 CSS opacity 渲染，0.003 → 全白 canvas
       const overlay = document.createElement('div')
       overlay.setAttribute('data-pdf-overlay', '1')
       overlay.style.cssText = 'position:fixed;inset:0;background:#fff;z-index:99998;pointer-events:none;'
       document.body.appendChild(overlay)
 
       reportEl = document.createElement('div')
+      reportEl.id = 'printRoot'
       reportEl.style.cssText = 'position:fixed;top:0;left:0;width:794px;z-index:99999;pointer-events:none;opacity:1;background:#fff;overflow:visible;'
       reportEl.innerHTML = reportHtml
       document.body.appendChild(reportEl)
 
-      console.log('[PDF] printRoot (reportEl):', reportEl)
-      console.log('[PDF] printRoot.innerHTML.length:', reportEl.innerHTML.length)
-      if (reportEl.innerHTML.length === 0) throw new Error('printRoot.innerHTML 為空，抓錯 DOM')
+      // ── DEBUG: 確認 printRoot DOM ──
+      const printRoot = document.getElementById('printRoot')
+      console.log('[PDF] printRoot element:', printRoot)
+      console.log('[PDF] printRoot.innerHTML.length:', printRoot?.innerHTML.length)
+      console.log('[PDF] printRoot.innerHTML 前 1000 字元:', printRoot?.innerHTML.substring(0, 1000))
+
+      if (!printRoot || printRoot.innerHTML.length === 0) throw new Error('printRoot 為空或不存在')
 
       // ── Step 3: 等待字型與圖片渲染 ──
       await new Promise(r => setTimeout(r, 900))
