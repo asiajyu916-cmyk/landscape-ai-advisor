@@ -2528,29 +2528,37 @@ tr:nth-child(even) td{background:#f7faf5}
   <div class="footer">景觀 AI 設計審查顧問 2.0　｜　植栽配置評估報告　｜　${esc(now)}</div>
 </div>`
 
-      // ── Step 2: 注入隱藏容器（放在 viewport 內，opacity 極低） ──
+      // ── Step 2: 注入報告容器（opacity:1，用全屏白色遮罩蓋住 App） ──
+      // 注意：opacity 必須是 1，html2canvas 會完全依照 CSS opacity 渲染，0.003 → 全白 canvas
+      const overlay = document.createElement('div')
+      overlay.setAttribute('data-pdf-overlay', '1')
+      overlay.style.cssText = 'position:fixed;inset:0;background:#fff;z-index:99998;pointer-events:none;'
+      document.body.appendChild(overlay)
+
       reportEl = document.createElement('div')
-      reportEl.style.cssText = 'position:fixed;top:0;left:0;width:794px;z-index:99999;pointer-events:none;opacity:0.003;background:#fff;overflow:visible;'
+      reportEl.style.cssText = 'position:fixed;top:0;left:0;width:794px;z-index:99999;pointer-events:none;opacity:1;background:#fff;overflow:visible;'
       reportEl.innerHTML = reportHtml
       document.body.appendChild(reportEl)
-      console.log('[PDF] reportEl 已附加到 body:', reportEl)
+
+      console.log('[PDF] printRoot (reportEl):', reportEl)
+      console.log('[PDF] printRoot.innerHTML.length:', reportEl.innerHTML.length)
+      if (reportEl.innerHTML.length === 0) throw new Error('printRoot.innerHTML 為空，抓錯 DOM')
 
       // ── Step 3: 等待字型與圖片渲染 ──
-      await new Promise(r => setTimeout(r, 1200))
+      await new Promise(r => setTimeout(r, 900))
       const elH = reportEl.scrollHeight
-      console.log('[PDF] reportEl 尺寸:', reportEl.offsetWidth, 'x', elH)
-
+      console.log('[PDF] reportEl offsetWidth x scrollHeight:', reportEl.offsetWidth, 'x', elH)
       if (elH === 0) throw new Error('reportEl 高度為 0，內容未渲染')
 
       // ── Step 4: html2canvas 截圖 ──
       const html2canvas = (await import('html2canvas')).default
-      console.log('[PDF] 開始 html2canvas...')
+      console.log('[PDF] 開始 html2canvas，截取 reportEl...')
       const canvas = await html2canvas(reportEl, {
         scale: 1.5,
         useCORS: true,
         allowTaint: false,
         backgroundColor: '#ffffff',
-        logging: true,
+        logging: false,
         width: 794,
         height: elH,
         windowWidth: 794,
@@ -2558,11 +2566,14 @@ tr:nth-child(even) td{background:#f7faf5}
         scrollX: 0,
         scrollY: 0,
       })
-      console.log('[PDF] canvas 尺寸:', canvas.width, 'x', canvas.height)
 
+      // 截完立即移除
       document.body.removeChild(reportEl)
+      document.body.removeChild(overlay)
       reportEl = null
 
+      console.log('[PDF] canvas.width:', canvas.width)
+      console.log('[PDF] canvas.height:', canvas.height)
       if (canvas.width === 0 || canvas.height === 0) {
         throw new Error(`canvas 尺寸為 0 (${canvas.width}×${canvas.height})`)
       }
@@ -2596,6 +2607,7 @@ tr:nth-child(even) td{background:#f7faf5}
       console.error('[PDF] 產生失敗：', err)
       setPdfGenError(`PDF 產生失敗：${err instanceof Error ? err.message : String(err)}`)
       if (reportEl && document.body.contains(reportEl)) document.body.removeChild(reportEl)
+      document.querySelectorAll('[data-pdf-overlay]').forEach(n => n.remove())
     } finally {
       setPdfGenerating(false)
     }
