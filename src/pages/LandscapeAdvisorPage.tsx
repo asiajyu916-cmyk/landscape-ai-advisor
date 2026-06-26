@@ -2900,147 +2900,113 @@ tr:nth-child(even) td{background:#f7faf5}
                     ))}
                   </div>
 
-                  {/* ── 總覽 ── */}
-                  {activeReviewTab === 'overview' && (
-                    <div className="space-y-5">
-                      {/* ── 全案 KPI ── */}
-                      <div className="bg-white border border-stone-200 rounded-2xl p-5">
-                        <p className="text-xs font-bold text-stone-400 tracking-widest uppercase mb-4">全案評估總覽</p>
-                        <div className="flex items-center gap-5 mb-5">
+                  {/* ── 總覽 Dashboard ── */}
+                  {activeReviewTab === 'overview' && (() => {
+                    const ovScoreClr = result.score >= 80 ? '#15803d' : result.score >= 60 ? '#d97706' : '#dc2626'
+                    return (
+                    <div className="space-y-4">
+
+                      {/* ① 全案評估總覽 — 橫向大卡 */}
+                      <p className="text-[21px] font-bold text-stone-800 leading-tight">全案評估總覽</p>
+                      <div className="bg-white border border-stone-200 rounded-2xl p-5 flex items-stretch gap-5">
+                        {/* 左：分數圓 + 等級 + 摘要 */}
+                        <div className="flex items-center gap-4 flex-shrink-0">
                           <ScoreDial score={result.score} level={result.compatLevel} />
                           <div>
-                            <p className="text-[13px] text-stone-500 font-medium">配置相容性分數</p>
-                            <p className="text-[15px] font-bold mt-0.5" style={{ color: result.score >= 80 ? '#15803d' : result.score >= 60 ? '#d97706' : '#dc2626' }}>
-                              {result.compatLevel}
-                            </p>
+                            <p className="text-[13px] text-stone-400 font-medium">配置相容性</p>
+                            <p className="text-[18px] font-black mt-0.5 leading-tight" style={{ color: ovScoreClr }}>{result.compatLevel}</p>
+                            {result.aiSuggestion && (
+                              <p className="text-[12px] text-stone-500 mt-1.5 leading-snug max-w-[180px] line-clamp-2">{result.aiSuggestion.slice(0, 55)}</p>
+                            )}
                           </div>
                         </div>
-                        <div className="grid grid-cols-3 gap-3">
-                          <div className="bg-[#f7faf5] border border-stone-200 rounded-xl px-4 py-3">
-                            <p className="text-[12px] text-stone-400 font-medium mb-1">主要問題</p>
-                            <p className="text-[26px] font-black text-amber-600 leading-none">{activeIssues.length}</p>
-                            <p className="text-[11px] text-stone-400 mt-1">項</p>
-                          </div>
-                          <div className="bg-[#f7faf5] border border-stone-200 rounded-xl px-4 py-3">
-                            <p className="text-[12px] text-stone-400 font-medium mb-1">高風險問題</p>
-                            <p className={`text-[26px] font-black leading-none ${dangerCount > 0 ? 'text-red-600' : 'text-stone-400'}`}>{dangerCount}</p>
-                            <p className="text-[11px] text-stone-400 mt-1">項</p>
-                          </div>
-                          <div className="bg-[#f7faf5] border border-stone-200 rounded-xl px-4 py-3">
-                            <p className="text-[12px] text-stone-400 font-medium mb-1">已選植物</p>
-                            <p className="text-[26px] font-black text-stone-700 leading-none">{selectedPlants.length}</p>
-                            <p className="text-[11px] text-stone-400 mt-1">種</p>
-                          </div>
+                        {/* 分隔線 */}
+                        <div className="w-px bg-stone-100 flex-shrink-0" />
+                        {/* 右：3 個小型 KPI */}
+                        <div className="flex-1 grid grid-cols-3 gap-3">
+                          {[
+                            { label: '主要問題', value: activeIssues.length, unit: '項', clr: activeIssues.length > 0 ? '#d97706' : '#78716c' },
+                            { label: '高風險問題', value: dangerCount, unit: '項', clr: dangerCount > 0 ? '#dc2626' : '#78716c' },
+                            { label: '已選植物', value: selectedPlants.length, unit: '種', clr: '#1a4731' },
+                          ].map(k => (
+                            <div key={k.label} className="bg-[#f7faf5] border border-stone-100 rounded-xl px-4 py-3">
+                              <p className="text-[12px] text-stone-400 font-semibold mb-1">{k.label}</p>
+                              <p className="text-[30px] font-black leading-none" style={{ color: k.clr }}>{k.value}</p>
+                              <p className="text-[13px] text-stone-400 mt-1">{k.unit}</p>
+                            </div>
+                          ))}
                         </div>
                       </div>
-                      {/* ── DXF 分區審查結果（若有），或提示引導 ── */}
+
+                      {/* ② 分區審查摘要 */}
+                      {storedZones.length > 0 && (
+                        <>
+                          <p className="text-[21px] font-bold text-stone-800 leading-tight pt-1">分區審查摘要</p>
+                          <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${Math.min(storedZones.length, 4)}, 1fr)` }}>
+                            {storedZones.map(z => {
+                              const isAct = activeZoneId === z.zoneName
+                              const zRiskLabel = z.dangerCount > 0 ? '高風險' : z.issueCount > 0 ? '中風險' : z.score !== undefined ? '低風險' : '待審查'
+                              const zScoreClr = !z.score ? '#9ca3af' : z.score >= 80 ? '#15803d' : z.score >= 60 ? '#d97706' : '#dc2626'
+                              const zRiskClr  = z.dangerCount > 0 ? '#dc2626' : z.issueCount > 0 ? '#d97706' : '#15803d'
+                              const zBorder   = z.dangerCount > 0 ? 'border-red-300' : z.issueCount > 0 ? 'border-amber-300' : 'border-emerald-200'
+                              return (
+                                <button key={z.zoneName}
+                                  onClick={() => { setActiveZoneId(isAct ? null : z.zoneName); setActiveReviewTab('overview') }}
+                                  className={`text-left rounded-xl border-2 px-5 py-4 transition-all ${
+                                    isAct ? 'bg-[#1a4731] border-[#1a4731] shadow-md' : `bg-white ${zBorder} hover:shadow-sm hover:border-[#2d6a4f]`
+                                  }`}>
+                                  <p className={`text-[20px] font-bold mb-1 ${isAct ? 'text-white' : 'text-stone-800'}`}>{z.zoneName}</p>
+                                  <p className="font-black leading-none mb-1.5" style={{ fontSize: 28, color: isAct ? 'white' : zScoreClr }}>
+                                    {z.score ?? '—'}
+                                    <span className="text-[14px] font-normal" style={{ color: isAct ? 'rgba(255,255,255,0.65)' : '#9ca3af' }}> /100</span>
+                                  </p>
+                                  <p className="text-[16px] font-bold mb-2" style={{ color: isAct ? (z.dangerCount > 0 ? '#fca5a5' : '#86efac') : zRiskClr }}>{zRiskLabel}</p>
+                                  <p className={`text-[15px] leading-snug mb-1 ${isAct ? 'text-green-100' : 'text-stone-600'}`}>
+                                    問題 {z.issueCount} 項｜高風險 {z.dangerCount} 項
+                                  </p>
+                                  {z.mainIssues.length > 0 && (
+                                    <p className={`text-[14px] leading-snug ${isAct ? 'text-green-200' : 'text-stone-400'}`}>
+                                      {z.mainIssues.slice(0, 2).join('、')}
+                                    </p>
+                                  )}
+                                </button>
+                              )
+                            })}
+                          </div>
+                        </>
+                      )}
                       {storedZones.length === 0 && onTabChange && (
                         <div className="rounded-xl border border-stone-200 bg-stone-50 p-4 flex items-start gap-3">
                           <Layers size={16} className="text-stone-400 flex-shrink-0 mt-0.5" />
                           <div>
-                            <p className="text-xs font-semibold text-stone-600 mb-0.5">尚無 DXF 分區審查資料</p>
-                            <p className="text-xs text-stone-400 leading-relaxed">
-                              請先至「DXF 審查」上傳 CAD 圖面，完成 A/B/C 分區審查後，分區結果會自動出現在這裡。
-                            </p>
+                            <p className="text-[13px] font-semibold text-stone-600 mb-0.5">尚無 DXF 分區審查資料</p>
+                            <p className="text-[13px] text-stone-400 leading-relaxed">上傳 CAD 圖面，完成 A/B/C 分區審查後，分區結果會自動出現在這裡。</p>
                             <button onClick={() => onTabChange('dxf')}
-                              className="mt-2 flex items-center gap-1.5 text-xs text-green-700 font-semibold hover:text-green-900">
-                              <ArrowRight size={11} />前往 DXF 審查
+                              className="mt-2 flex items-center gap-1.5 text-[13px] text-green-700 font-semibold hover:text-green-900">
+                              <ArrowRight size={12} />前往 DXF 審查
                             </button>
-                          </div>
-                        </div>
-                      )}
-                      {storedZones.length > 0 && (
-                        <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden">
-                          <div className="px-5 py-3 border-b border-stone-100 flex items-center justify-between">
-                            <p className="text-[13px] font-bold text-stone-700 tracking-wide">分區審查摘要</p>
-                            {activeZoneId && (
-                              <button onClick={() => setActiveZoneId(null)}
-                                className="text-xs text-stone-400 hover:text-green-700 font-medium flex items-center gap-1">
-                                <ArrowRight size={11} className="rotate-180" />全部總覽
-                              </button>
-                            )}
-                          </div>
-                          {/* 分區選擇列 — Revit Layout 風格 */}
-                          <div className="flex border-b border-stone-100 overflow-x-auto">
-                            <button
-                              onClick={() => setActiveZoneId(null)}
-                              className={`flex-shrink-0 px-5 py-2.5 text-[13px] font-bold border-b-2 transition-all ${
-                                !activeZoneId ? 'border-[#1a4731] text-[#1a4731] bg-green-50' : 'border-transparent text-stone-400 hover:text-stone-600'
-                              }`}>
-                              全部
-                            </button>
-                            {storedZones.map(z => {
-                              const isActive = activeZoneId === z.zoneName
-                              const dotCls = z.dangerCount > 0 ? 'bg-red-500' : z.issueCount > 0 ? 'bg-amber-400' : 'bg-emerald-500'
-                              return (
-                                <button key={z.zoneName}
-                                  onClick={() => { setActiveZoneId(isActive ? null : z.zoneName); setActiveReviewTab('overview') }}
-                                  className={`flex-shrink-0 flex items-center gap-2 px-5 py-2.5 text-[13px] font-bold border-b-2 transition-all whitespace-nowrap ${
-                                    isActive
-                                      ? 'border-[#1a4731] text-[#1a4731] bg-green-50'
-                                      : 'border-transparent text-stone-500 hover:text-stone-700'
-                                  }`}>
-                                  <span className={`w-2 h-2 rounded-full flex-shrink-0 ${dotCls}`} />
-                                  {z.zoneName}
-                                </button>
-                              )
-                            })}
-                          </div>
-                          {/* 分區卡片 grid */}
-                          <div className="p-4 grid gap-3" style={{ gridTemplateColumns: `repeat(${storedZones.length}, 1fr)` }}>
-                            {storedZones.map(z => {
-                              const isActive = activeZoneId === z.zoneName
-                              const riskLabel = z.dangerCount > 0 ? '高風險' : z.issueCount > 0 ? '中風險' : z.score !== undefined ? '低風險' : '待審查'
-                              const scoreClr = !z.score ? '#9ca3af' : z.score >= 80 ? '#15803d' : z.score >= 60 ? '#d97706' : '#dc2626'
-                              const borderCls = z.dangerCount > 0 ? 'border-red-300' : z.issueCount > 0 ? 'border-amber-300' : 'border-emerald-200'
-                              return (
-                                <button key={z.zoneName}
-                                  onClick={() => { setActiveZoneId(isActive ? null : z.zoneName); setActiveReviewTab('overview') }}
-                                  className={`text-left rounded-xl border-2 p-4 transition-all ${
-                                    isActive
-                                      ? 'bg-[#1a4731] border-[#1a4731] text-white shadow-md'
-                                      : `bg-white ${borderCls} hover:shadow-sm hover:border-[#2d6a4f]`
-                                  }`}>
-                                  <p className={`text-[15px] font-black mb-2 ${isActive ? 'text-white' : 'text-stone-800'}`}>{z.zoneName}</p>
-                                  <p className="font-black leading-none mb-1" style={{ fontSize: 26, color: isActive ? 'white' : scoreClr }}>
-                                    {z.score ?? '—'}
-                                    <span className="text-[12px] font-normal" style={{ color: isActive ? 'rgba(255,255,255,0.7)' : '#9ca3af' }}>/100</span>
-                                  </p>
-                                  <p className={`text-[12px] font-bold mb-2 ${isActive ? 'text-green-200' : z.dangerCount > 0 ? 'text-red-600' : z.issueCount > 0 ? 'text-amber-600' : 'text-emerald-600'}`}>
-                                    {riskLabel}
-                                  </p>
-                                  <div className={`text-[11px] space-y-0.5 ${isActive ? 'text-green-200' : 'text-stone-500'}`}>
-                                    {z.issueCount > 0 && <p>問題 {z.issueCount} 項</p>}
-                                    {z.dangerCount > 0 && <p style={{ color: isActive ? '#fca5a5' : '#dc2626' }}>高風險 {z.dangerCount} 項</p>}
-                                    {z.mainIssues.length > 0 && (
-                                      <p className="truncate">{z.mainIssues.slice(0, 2).join('、')}</p>
-                                    )}
-                                  </div>
-                                </button>
-                              )
-                            })}
                           </div>
                         </div>
                       )}
 
-                      {/* AI 核心建議 — 單句摘要，詳細內容在「問題分析」tab */}
+                      {/* ③ 全案核心建議 — 一句摘要 */}
+                      <p className="text-[21px] font-bold text-stone-800 leading-tight pt-1">全案核心建議</p>
                       <div className="bg-[#f0fdf4] border border-green-200 rounded-xl px-5 py-4 flex items-start gap-3">
-                        <span className="text-xl flex-shrink-0 mt-0.5">💡</span>
+                        <span className="text-[20px] flex-shrink-0 mt-0.5">💡</span>
                         <div className="min-w-0">
-                          <p className="text-[12px] font-bold text-green-800 mb-1 tracking-wide">
-                            {activeZone ? `${activeZone.zoneName} 核心建議` : '全案核心建議'}
-                          </p>
-                          <p className="text-[15px] text-stone-700 leading-relaxed line-clamp-2">
+                          <p className="text-[15px] text-stone-700 leading-relaxed line-clamp-3">
                             {activeZone ? (activeZone.aiSuggestion ?? '此區尚無 AI 建議') : result.aiSuggestion}
                           </p>
                           <button onClick={() => setActiveReviewTab('summary')}
-                            className="mt-2 text-[12px] text-green-700 font-semibold hover:text-green-900 flex items-center gap-1">
-                            查看詳細建議 <ArrowRight size={11} />
+                            className="mt-2 text-[13px] text-green-700 font-semibold hover:text-green-900 flex items-center gap-1">
+                            查看詳細建議 <ArrowRight size={12} />
                           </button>
                         </div>
                       </div>
+
                     </div>
-                  )}
+                    )
+                  })()}
 
                   {/* ── 分區指示列（有選中分區時顯示）── */}
                   {activeZone && (
