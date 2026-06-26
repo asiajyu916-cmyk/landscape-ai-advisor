@@ -797,32 +797,7 @@ export default function DxfReviewPage({
   if (!parseResult) {
     return (
       <div className="min-h-screen flex flex-col" style={{ background: 'radial-gradient(circle at 85% 15%, rgba(121,190,140,0.16) 0%, transparent 30%), radial-gradient(circle at 20% 85%, rgba(183,220,190,0.18) 0%, transparent 35%), linear-gradient(135deg, #f7faf5 0%, #eef6ef 48%, #e5f1e8 100%)' }}>
-        <header className="bg-[#1a4731] sticky top-0 z-40 shadow-md">
-          <div className="max-w-[1536px] mx-auto px-8 h-16 flex items-center justify-between">
-            <div>
-              <h1 className="text-base font-bold text-white leading-tight tracking-wide">DXF / CAD 讀圖審查</h1>
-              <p className="text-xs text-green-200/70 leading-tight">上傳 AutoCAD .dxf 檔案，自動解析圖塊與植栽對應</p>
-            </div>
-            {onTabChange && (
-              <div className="flex items-center bg-[#0f2d1d] rounded-xl p-1 gap-0.5">
-                {([
-                  { id: 'pdf'       as const, label: 'PDF 審圖' },
-                  { id: 'landscape' as const, label: 'AI 配植評估' },
-                  { id: 'dxf'       as const, label: 'DXF 審查' },
-                ]).map(t => (
-                  <button key={t.id} onClick={() => onTabChange(t.id)}
-                    className={`px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
-                      activeTab === t.id ? 'bg-[#2d6a4f] text-white shadow-sm' : 'text-green-300/80 hover:text-white hover:bg-[#1a4731]'
-                    }`}>
-                    {t.label}
-                  </button>
-                ))}
-              </div>
-            )}
-            <div />
-          </div>
-        </header>
-        <main className="flex-1 flex flex-col items-center justify-center px-8 py-12">
+        <main className="flex-1 flex flex-col items-center justify-center px-8 py-8">
           {/* Step guide */}
           <div className="flex items-center gap-3 mb-10 text-sm text-stone-500 flex-wrap justify-center">
             {['① 上傳 .dxf 檔案', '② 系統解析圖塊', '③ 對應植栽資料庫', '④ 確認並匯入審查'].map((s, i) => (
@@ -877,34 +852,15 @@ export default function DxfReviewPage({
   return (
     <div className="min-h-screen flex flex-col" style={{ background: 'radial-gradient(circle at 85% 15%, rgba(121,190,140,0.16) 0%, transparent 30%), radial-gradient(circle at 20% 85%, rgba(183,220,190,0.18) 0%, transparent 35%), linear-gradient(135deg, #f7faf5 0%, #eef6ef 48%, #e5f1e8 100%)' }}>
 
-      {/* ── Header ── */}
-      <header className="bg-[#1a4731] sticky top-0 z-30 shadow-md">
-        <div className="max-w-[1536px] mx-auto px-8 h-16 flex items-center justify-between gap-4">
-          <div className="flex-shrink-0">
-            <h1 className="text-base font-bold text-white leading-tight tracking-wide">DXF / CAD 讀圖審查</h1>
-            <p className="text-xs text-green-200/70 leading-tight">
-              {fileName}
-              {detectedEnc && <span className="ml-2 px-1.5 py-0.5 rounded bg-green-700/50 text-green-200 text-xs">編碼：{detectedEnc}</span>}
-              <span className="ml-2">・圖塊 {stats.uniqueBlocks} 種・共 {stats.totalInserts} 個・已排除 {excluded.length} 個非植栽圖層</span>
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            {onTabChange && (
-              <div className="flex items-center bg-[#0f2d1d] rounded-xl p-1 gap-0.5">
-                {([
-                  { id: 'pdf'       as const, label: 'PDF 審圖' },
-                  { id: 'landscape' as const, label: 'AI 配植評估' },
-                  { id: 'dxf'       as const, label: 'DXF 審查' },
-                ]).map(t => (
-                  <button key={t.id} onClick={() => onTabChange(t.id)}
-                    className={`px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
-                      activeTab === t.id ? 'bg-[#2d6a4f] text-white shadow-sm' : 'text-green-300/80 hover:text-white hover:bg-[#1a4731]'
-                    }`}>
-                    {t.label}
-                  </button>
-                ))}
-              </div>
-            )}
+      {/* ── 工具列（原 Header 內容，移至內容區） ── */}
+      <div className="border-b border-stone-200 bg-white/80 backdrop-blur-sm">
+        <div className="max-w-[1536px] mx-auto px-8 py-2 flex items-center justify-between gap-4 flex-wrap">
+          <p className="text-xs text-stone-500 truncate">
+            {fileName}
+            {detectedEnc && <span className="ml-2 px-1.5 py-0.5 rounded bg-stone-100 text-stone-500 text-xs">編碼：{detectedEnc}</span>}
+            <span className="ml-2 text-stone-400">・圖塊 {stats.uniqueBlocks} 種・共 {stats.totalInserts} 個・已排除 {excluded.length} 個非植栽圖層</span>
+          </p>
+          <div className="flex items-center gap-2 flex-shrink-0">
             {zoneReviews.length > 0 && (
               <button
                 onClick={() => {
@@ -918,32 +874,31 @@ export default function DxfReviewPage({
                   const html = exportZoneReviewPdf(pdfData, fileName, { returnHtml: true })
                   if (typeof html === 'string') setPdfHtml(html)
                 }}
-                className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-[#d8f3dc] text-[#1a4731] text-xs font-bold hover:bg-white transition-colors">
+                className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-[#1a4731] text-white text-xs font-bold hover:bg-[#2d6a4f] transition-colors">
                 <FileOutput size={13} />匯出分區審查 PDF
               </button>
             )}
             <button onClick={() => { setParseResult(null); setFileName(''); setMappings([]) }}
-              className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-white/10 border border-white/20 text-xs text-white hover:bg-white/20 transition-colors">
-              <X size={13} />重新上傳
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-stone-300 text-xs text-stone-600 hover:bg-stone-100 transition-colors">
+              <X size={12} />重新上傳
             </button>
           </div>
         </div>
-
         {/* Stats bar */}
-        <div className="flex gap-2 pb-3 px-8 flex-wrap">
+        <div className="flex gap-2 pb-2 px-8 flex-wrap">
           {[
-            { label: '✅ 已自動對應', count: matched.length,  cls: 'bg-green-800/40 text-green-200 border-green-700/50' },
-            { label: '⚠ 部分符合',   count: partial.length,  cls: 'bg-amber-800/30 text-amber-200 border-amber-700/40' },
-            { label: '❌ 未對應',     count: unmatched.length, cls: 'bg-red-900/40 text-red-200 border-red-700/50' },
-            { label: '🚫 已排除',     count: excluded.length,  cls: 'bg-white/10 text-white/60 border-white/20' },
-            { label: '🗺 範圍多邊形', count: stats.totalPolygons, cls: 'bg-blue-900/30 text-blue-200 border-blue-700/40' },
+            { label: '✅ 已自動對應', count: matched.length,  cls: 'bg-green-50 text-green-700 border-green-200' },
+            { label: '⚠ 部分符合',   count: partial.length,  cls: 'bg-amber-50 text-amber-700 border-amber-200' },
+            { label: '❌ 未對應',     count: unmatched.length, cls: 'bg-red-50 text-red-700 border-red-200' },
+            { label: '🚫 已排除',     count: excluded.length,  cls: 'bg-stone-50 text-stone-500 border-stone-200' },
+            { label: '🗺 範圍多邊形', count: stats.totalPolygons, cls: 'bg-blue-50 text-blue-700 border-blue-200' },
           ].map(s => (
-            <div key={s.label} className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-medium ${s.cls}`}>
+            <div key={s.label} className={`flex items-center gap-2 px-3 py-1 rounded-lg border text-xs font-medium ${s.cls}`}>
               {s.label} <span className="font-bold">{s.count}</span>
             </div>
           ))}
         </div>
-      </header>
+      </div>
 
       {/* Unmatched warning */}
       {unmatched.length > 0 && (

@@ -32,22 +32,18 @@ export default function App() {
       />
       {/* PDF / DXF 頁面的內容渲染在共用 Header 下方 */}
       {activeTab === 'pdf' && (
-        <div className="pt-14 md:pt-[68px]">
-          <PdfReviewPage
-            activeTab={activeTab}
-            onTabChange={setActiveTab}
-            onImport={handlePdfImport}
-          />
-        </div>
+        <PdfReviewPage
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+          onImport={handlePdfImport}
+        />
       )}
       {activeTab === 'dxf' && (
-        <div className="pt-14 md:pt-[68px]">
-          <DxfReviewPage
-            activeTab={activeTab}
-            onTabChange={setActiveTab}
-            onImport={handleDxfImport}
-          />
-        </div>
+        <DxfReviewPage
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+          onImport={handleDxfImport}
+        />
       )}
     </>
   )

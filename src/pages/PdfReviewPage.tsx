@@ -274,18 +274,7 @@ export default function PdfReviewPage({
   if (stage === 'upload') {
     return (
       <div className="min-h-screen" style={{ background: 'radial-gradient(circle at 85% 15%, rgba(121,190,140,0.16) 0%, transparent 30%), radial-gradient(circle at 20% 85%, rgba(183,220,190,0.18) 0%, transparent 35%), linear-gradient(135deg, #f7faf5 0%, #eef6ef 48%, #e5f1e8 100%)' }}>
-        <header className="bg-[#1a4731] sticky top-0 z-40 shadow-md">
-          <div className="max-w-[1536px] mx-auto px-8 h-16 flex items-center justify-between">
-            <div>
-              <h1 className="text-base font-bold text-white leading-tight tracking-wide">PDF / 圖片審圖</h1>
-              <p className="text-xs text-green-200/70 leading-tight">上傳景觀設計圖面，自動擷取植栽資料後進行 AI 審查</p>
-            </div>
-            {onTabChange && <TabNav active={activeTab} onChange={onTabChange} />}
-            <div />
-          </div>
-        </header>
-
-        <main className="max-w-[1536px] mx-auto px-8 py-16 flex flex-col items-center">
+        <main className="max-w-[1536px] mx-auto px-8 py-8 flex flex-col items-center">
           <div
             onDragOver={e => { e.preventDefault(); setDragOver(true) }}
             onDragLeave={() => setDragOver(false)}
@@ -341,21 +330,14 @@ export default function PdfReviewPage({
 
   return (
     <div className="min-h-screen" style={{ background: 'radial-gradient(circle at 85% 15%, rgba(121,190,140,0.16) 0%, transparent 30%), radial-gradient(circle at 20% 85%, rgba(183,220,190,0.18) 0%, transparent 35%), linear-gradient(135deg, #f7faf5 0%, #eef6ef 48%, #e5f1e8 100%)' }}>
-      <header className="bg-[#1a4731] sticky top-0 z-40 shadow-md">
-        <div className="max-w-[1536px] mx-auto px-8 h-16 flex items-center justify-between gap-4">
-          <div>
-            <h1 className="text-base font-bold text-white leading-tight tracking-wide">PDF / 圖片審圖</h1>
-            <p className="text-xs text-green-200/70 leading-tight">{fileName}</p>
-          </div>
-          {onTabChange && <TabNav active={activeTab} onChange={onTabChange} />}
-          <button onClick={() => { setStage('upload'); setFileName(''); setExtractResult(null); setImageSrc('') }}
-            className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-white/10 border border-white/20 text-xs text-white hover:bg-white/20 transition-colors">
-            <X size={13} />重新上傳
-          </button>
-        </div>
-      </header>
-
-      <main className="max-w-[1536px] mx-auto px-8 py-8">
+      <div className="max-w-[1536px] mx-auto px-8 pt-3 pb-1 flex items-center justify-between">
+        <p className="text-xs text-stone-500 truncate">{fileName}</p>
+        <button onClick={() => { setStage('upload'); setFileName(''); setExtractResult(null); setImageSrc('') }}
+          className="flex items-center gap-2 px-3 py-1 rounded-lg border border-stone-300 text-xs text-stone-600 hover:bg-stone-100 transition-colors flex-shrink-0 ml-4">
+          <X size={12} />重新上傳
+        </button>
+      </div>
+      <main className="max-w-[1536px] mx-auto px-8 py-4">
         <div className="grid gap-6 items-start" style={{ gridTemplateColumns: imageSrc ? '1fr 1fr' : '480px 1fr' }}>
 
           {/* 左側：圖面預覽 或 植栽清單 */}
