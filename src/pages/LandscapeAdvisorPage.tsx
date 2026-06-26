@@ -458,26 +458,36 @@ function IssueCard({ issue }: { issue: IssueDetail }) {
   const bdr = issue.level === 'danger' ? 'border-red-200' : 'border-orange-200'
   return (
     <div className={`border rounded-xl overflow-hidden shadow-sm ${bdr}`}>
+      {/* 標題列 */}
       <button onClick={() => setOpen(o => !o)}
-        className={`w-full flex items-center justify-between px-4 py-3 ${hdr}`}>
-        <div className="flex items-center gap-2">
-          {issue.level === 'danger' ? <XCircle size={14} className="text-red-600" /> : <AlertTriangle size={14} className="text-orange-600" />}
-          <span className="font-semibold text-sm">{issue.category}</span>
-          <span className={`text-xs px-2 py-0.5 rounded-full border font-medium ${
-            issue.level === 'danger' ? 'bg-red-100 border-red-300 text-red-700' : 'bg-orange-100 border-orange-300 text-orange-700'
+        className={`w-full flex items-center justify-between px-6 py-4 ${hdr} min-h-[52px]`}>
+        <div className="flex items-center gap-3">
+          {issue.level === 'danger'
+            ? <XCircle size={18} className="text-red-600 flex-shrink-0" />
+            : <AlertTriangle size={18} className="text-orange-600 flex-shrink-0" />}
+          <span className="font-bold text-[18px] leading-snug">{issue.category}</span>
+          <span className={`text-[13px] px-3 py-1 rounded-full border font-bold ${
+            issue.level === 'danger'
+              ? 'bg-red-100 border-red-300 text-red-700'
+              : 'bg-orange-100 border-orange-300 text-orange-700'
           }`}>{issue.level === 'danger' ? '高風險' : '需注意'}</span>
         </div>
-        {open ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+        {open ? <ChevronUp size={16} className="flex-shrink-0" /> : <ChevronDown size={16} className="flex-shrink-0" />}
       </button>
+
+      {/* 展開內容 */}
       {open && (
-        <div className="px-4 py-4 space-y-3 bg-white">
-          {[{ label: '問題原因', text: issue.cause }, { label: '實務影響', text: issue.impact }, { label: '修正建議', text: issue.suggestion }]
-            .map(row => (
-              <div key={row.label}>
-                <p className="text-xs font-semibold text-stone-400 mb-1">{row.label}</p>
-                <p className="text-sm text-stone-700 leading-relaxed">{row.text}</p>
-              </div>
-            ))}
+        <div className="px-6 py-5 space-y-5 bg-white">
+          {[
+            { label: '■ 問題原因', text: issue.cause },
+            { label: '■ 實務影響', text: issue.impact },
+            { label: '■ AI 修正建議', text: issue.suggestion },
+          ].map(row => (
+            <div key={row.label}>
+              <p className="text-[15px] font-semibold text-stone-600 mb-2 tracking-wide">{row.label}</p>
+              <p className="text-[15px] text-stone-800 leading-[1.85]">{row.text}</p>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -1966,6 +1976,42 @@ export default function LandscapeAdvisorPage({
   const [activeReviewTab, setActiveReviewTab] = useState<'overview'|'categories'|'issues'|'alternatives'|'summary'>('overview')
   const [showMobileTools, setShowMobileTools] = useState(false)
   const [aiSuggestionExpanded, setAiSuggestionExpanded] = useState(false)
+
+  // ── Split pane ──────────────────────────────────────────────────────────────
+  const SPLIT_MIN_LEFT  = 320
+  const SPLIT_MIN_RIGHT = 480
+  const SPLIT_DEFAULT   = 400
+  const [leftWidth, setLeftWidth] = useState<number>(() => {
+    const saved = localStorage.getItem('landscape-split-width')
+    return saved ? parseInt(saved, 10) : SPLIT_DEFAULT
+  })
+  const splitContainerRef = useRef<HTMLDivElement>(null)
+  const isDragging = useRef(false)
+
+  const onSplitMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault()
+    isDragging.current = true
+    const startX = e.clientX
+    const startW = leftWidth
+    let lastW = startW
+    const onMove = (ev: MouseEvent) => {
+      if (!isDragging.current) return
+      const containerW = splitContainerRef.current?.getBoundingClientRect().width ?? window.innerWidth
+      lastW = Math.min(
+        containerW - SPLIT_MIN_RIGHT,
+        Math.max(SPLIT_MIN_LEFT, startW + ev.clientX - startX)
+      )
+      setLeftWidth(lastW)
+    }
+    const onUp = () => {
+      isDragging.current = false
+      localStorage.setItem('landscape-split-width', String(lastW))
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
   // Initialize imageStore directly from localStorage (lazy init avoids useEffect delay)
   const [imageStore, setImageStore] = useState<ImageStore>(() => loadImageStore())
 
@@ -2249,11 +2295,14 @@ export default function LandscapeAdvisorPage({
         </div>
       )}
 
-      {/* Main — 手機單欄；桌機雙欄固定高度各自滾動 */}
-      <div className="flex flex-col md:flex-row md:h-[calc(100vh-64px)] md:overflow-hidden">
+      {/* Main — 手機單欄；桌機 Split Pane 可拖曳 */}
+      <div ref={splitContainerRef} className="flex flex-col md:flex-row md:h-[calc(100vh-56px)] md:overflow-hidden">
 
         {/* ── Left: 植栽組合 ── */}
-        <div className="md:w-[400px] md:flex-shrink-0 md:overflow-y-auto border-b md:border-b-0 md:border-r border-stone-200 p-5 space-y-4 bg-[#f7f5f0]">
+        <div
+          className="md:flex-shrink-0 md:overflow-y-auto border-b md:border-b-0 border-stone-200 p-5 space-y-4 bg-[#f7f5f0]"
+          style={{ width: typeof window !== 'undefined' && window.innerWidth >= 768 ? leftWidth : undefined }}
+        >
           {/* Header row */}
           <div className="flex items-center justify-between">
             <p className="text-sm font-semibold text-stone-800 tracking-wide">
@@ -2300,8 +2349,16 @@ export default function LandscapeAdvisorPage({
           </div>
         </div>
 
+        {/* ── Splitter (桌機可見) ── */}
+        <div
+          onMouseDown={onSplitMouseDown}
+          className="hidden md:flex flex-shrink-0 w-2 items-center justify-center group cursor-col-resize bg-stone-200 hover:bg-[#2d6a4f] transition-colors z-10 select-none"
+          title="拖曳調整版面寬度">
+          <div className="w-0.5 h-8 rounded-full bg-stone-400 group-hover:bg-white transition-colors" />
+        </div>
+
         {/* ── Right: 評估結果 ── */}
-        <div className="flex-1 md:overflow-y-auto p-5 bg-[#f7f5f0]">
+        <div className="flex-1 md:overflow-y-auto p-5 bg-[#f7f5f0] min-w-0">
           {!result ? (
             /* Empty state */
             <div className="border border-stone-200/80 rounded-2xl flex flex-col items-center justify-center py-28 text-center px-8 shadow-sm h-full max-h-[600px]" style={{ background: 'radial-gradient(circle at top right, rgba(111,168,120,0.10) 0%, transparent 32%), linear-gradient(145deg, #ffffff 0%, #fbfdfb 55%, #f3faf5 100%)' }}>
