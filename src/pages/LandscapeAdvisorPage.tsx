@@ -2982,21 +2982,39 @@ export default function LandscapeAdvisorPage({
               <button
                 onClick={() => {
                   try {
-                    const blob = new Blob([pdfHtml!], { type: 'text/html;charset=utf-8' })
-                    const url = URL.createObjectURL(blob)
-                    const win = window.open(url, '_blank')
+                    const htmlContent = pdfHtml
+                    console.log('[PDF-Preview] pdfHtml 存在:', !!htmlContent, '長度:', htmlContent?.length ?? 0)
+                    if (!htmlContent) {
+                      setPdfError('HTML 內容為空，請重新產生報告。')
+                      return
+                    }
+                    const htmlBlob = new Blob([htmlContent], { type: 'text/html' })
+                    const htmlUrl = URL.createObjectURL(htmlBlob)
+                    console.log('[PDF-Preview] htmlUrl 建立:', htmlUrl)
+                    const win = window.open(htmlUrl, '_blank')
+                    console.log('[PDF-Preview] window.open 回傳:', win)
                     if (!win) {
-                      URL.revokeObjectURL(url)
+                      URL.revokeObjectURL(htmlUrl)
                       console.error('[PDF-Preview] window.open 回傳 null，Popup 被封鎖')
                       setPdfError('彈出視窗被封鎖，請允許此網站彈出視窗，或改用「下載 HTML 報告」後在本機開啟列印。')
                       return
                     }
-                    win.onload = () => {
-                      setTimeout(() => {
-                        try { win.print() } catch (printErr) { console.error('[PDF-Preview] win.print() 例外：', printErr) }
-                      }, 100)
+                    // 用 polling 確認 readyState，避免 onload race condition
+                    const tryPrint = (attempts = 0) => {
+                      if (attempts > 30) { console.error('[PDF-Preview] 等待逾時，放棄 print()'); return }
+                      try {
+                        if (win.document.readyState === 'complete') {
+                          console.log('[PDF-Preview] document.readyState complete，呼叫 print()')
+                          win.print()
+                        } else {
+                          setTimeout(() => tryPrint(attempts + 1), 200)
+                        }
+                      } catch (e) {
+                        console.error('[PDF-Preview] tryPrint 例外：', e)
+                      }
                     }
-                    setTimeout(() => URL.revokeObjectURL(url), 120_000)
+                    setTimeout(() => tryPrint(), 300)
+                    setTimeout(() => URL.revokeObjectURL(htmlUrl), 120_000)
                     setPdfHtml(null)
                     setPdfError(null)
                   } catch (err) {
