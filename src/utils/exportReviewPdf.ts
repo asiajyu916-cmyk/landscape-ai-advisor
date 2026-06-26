@@ -758,6 +758,42 @@ table.issue-detail td { padding:1.5mm 2mm;color:#374151;line-height:1.6; }
   </table>
 </div>
 
+<!-- 第 2 頁：各區審查比較 -->
+${reviewed.length >= 2 ? `<div class="section page-break">
+  <div class="section-title">§2　各區審查比較</div>
+  <table class="data-table">
+    <thead><tr>
+      <th>分區</th>
+      <th style="text-align:center">分數</th>
+      <th style="text-align:center">風險等級</th>
+      <th style="text-align:center">問題數</th>
+      <th style="text-align:center">高風險數</th>
+      <th>主要問題類型</th>
+    </tr></thead>
+    <tbody>
+      ${zones.map(z => {
+        const dangerN  = z.evalResult?.issues.filter(i=>i.level==='danger').length ?? 0
+        const cautionN = z.evalResult?.issues.filter(i=>i.level==='caution').length ?? 0
+        const mainIss  = z.evalResult?.issues.filter(i=>i.level!=='ok').slice(0,3).map(i=>i.category).join('、') ?? '—'
+        const riskTxt  = dangerN > 0 ? '高風險' : cautionN > 0 ? '中風險' : z.evalResult ? '低風險' : '待審查'
+        const riskClr  = dangerN > 0 ? '#dc2626' : cautionN > 0 ? '#d97706' : '#16a34a'
+        return `<tr>
+          <td style="font-weight:800;font-size:12pt">${esc(z.zoneName)}</td>
+          <td style="text-align:center;font-weight:800;color:${z.evalResult?scoreColor(z.evalResult.score):'#9ca3af'};font-size:13pt">
+            ${z.evalResult ? z.evalResult.score + '/100' : '—'}
+          </td>
+          <td style="text-align:center">
+            <span style="color:${riskClr};font-weight:700;font-size:10pt">${riskTxt}</span>
+          </td>
+          <td style="text-align:center;font-weight:700">${z.evalResult ? dangerN + cautionN : '—'}</td>
+          <td style="text-align:center;color:#dc2626;font-weight:700">${z.evalResult ? dangerN : '—'}</td>
+          <td style="font-size:9.5pt">${z.evalResult ? esc(mainIss || '無問題') : '<span style="color:#9ca3af">待審查</span>'}</td>
+        </tr>`
+      }).join('')}
+    </tbody>
+  </table>
+</div>` : ''}
+
 <!-- 各分區詳細 -->
 ${zones.map((z, i) => zoneCard(z, i)).join('')}
 

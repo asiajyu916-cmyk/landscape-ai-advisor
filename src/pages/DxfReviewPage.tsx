@@ -612,6 +612,24 @@ export default function DxfReviewPage({
   const [zonePlantLists, setZonePlantLists] = useState<ZonePlantList[]>([])
   const [detectedZones, setDetectedZones] = useState<DetectedZone[]>([])
   const [zoneReviews, setZoneReviews] = useState<ZoneReviewResult[]>([])
+
+  // 每次 zoneReviews 更新就持久化精簡版到 localStorage，供 PDF 匯出及其他頁讀取
+  const saveZoneReviews = (reviews: ZoneReviewResult[]) => {
+    setZoneReviews(reviews)
+    try {
+      const summary = reviews.map(r => ({
+        zoneName: r.zoneName,
+        status:   r.status,
+        score:    r.evalResult?.score,
+        compatLevel: r.evalResult?.compatLevel,
+        issueCount:  r.evalResult?.issues.filter(i => i.level !== 'ok').length ?? 0,
+        dangerCount: r.evalResult?.issues.filter(i => i.level === 'danger').length ?? 0,
+        mainIssues:  r.evalResult?.issues.filter(i => i.level !== 'ok').map(i => i.category) ?? [],
+        plantCount:  r.blockEntries.reduce((s, b) => s + b.count, 0),
+      }))
+      localStorage.setItem('dxf-zone-review-summary', JSON.stringify(summary))
+    } catch { /* quota exceeded */ }
+  }
   const [zoneDebug, setZoneDebug] = useState<ZoneAssignDebug | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
@@ -621,7 +639,7 @@ export default function DxfReviewPage({
   // 解決「DXF 上傳時 DB 尚未載入 → 分數為空」的問題
   useEffect(() => {
     if (zonePlantLists.length === 0 || plants.length === 0) return
-    setZoneReviews(buildZoneReviews(zonePlantLists, plants, plantSchedule.entries, parseResult?.texts ?? [], drawingRadius))
+    saveZoneReviews(buildZoneReviews(zonePlantLists, plants, plantSchedule.entries, parseResult?.texts ?? [], drawingRadius))
   }, [plants, zonePlantLists, plantSchedule.entries])
 
   const multiLayerResults = useMemo<MultiLayerResult[]>(() => {
@@ -670,7 +688,7 @@ export default function DxfReviewPage({
       setDetectedZones(zones)
       const zpl = buildZonePlantList(zones, active, result.polygons, result.inserts, result.blockExtents)
       setZonePlantLists(zpl)
-      setZoneReviews(buildZoneReviews(zpl, loaded, sched.entries, result.texts, radius))
+      saveZoneReviews(buildZoneReviews(zpl, loaded, sched.entries, result.texts, radius))
       setZoneDebug(buildZoneAssignDebug(zones, zpl, active, result.inserts, result.blockExtents))
 
       // ── Debug：直接印出 raw 資料讓瀏覽器 console 可以看 ──────────────────
@@ -700,7 +718,7 @@ export default function DxfReviewPage({
     setExcluded(exc)
     const zpl2 = buildZonePlantList(detectedZones, active, parseResult.polygons, parseResult.inserts, parseResult.blockExtents)
     setZonePlantLists(zpl2)
-    setZoneReviews(buildZoneReviews(zpl2, plantList, plantSchedule.entries, parseResult.texts, drawingRadius))
+    saveZoneReviews(buildZoneReviews(zpl2, plantList, plantSchedule.entries, parseResult.texts, drawingRadius))
     setZoneDebug(buildZoneAssignDebug(detectedZones, zpl2, active, parseResult.inserts, parseResult.blockExtents))
   }
 
@@ -1807,6 +1825,79 @@ function ZoneReviewTab({ reviews }: { reviews: ZoneReviewResult[] }) {
                 )
               })}
             </div>
+
+            {/* ── 各區比較表 ── */}
+            {reviews.some(r => r.evalResult) && (
+              <div className="rounded-xl border border-stone-200 overflow-hidden">
+                <div className="px-4 py-2.5 bg-stone-50 border-b border-stone-200">
+                  <p className="text-xs font-bold text-stone-700 tracking-wide">各區審查比較</p>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm border-collapse">
+                    <thead>
+                      <tr className="bg-[#f7faf5]">
+                        <th className="px-4 py-2.5 text-left text-stone-600 font-semibold border-b border-stone-200 w-24">分區</th>
+                        <th className="px-4 py-2.5 text-center text-stone-600 font-semibold border-b border-stone-200">分數</th>
+                        <th className="px-4 py-2.5 text-center text-stone-600 font-semibold border-b border-stone-200">風險等級</th>
+                        <th className="px-4 py-2.5 text-center text-stone-600 font-semibold border-b border-stone-200">問題數</th>
+                        <th className="px-4 py-2.5 text-center text-stone-600 font-semibold border-b border-stone-200">高風險</th>
+                        <th className="px-4 py-2.5 text-left text-stone-600 font-semibold border-b border-stone-200">主要問題</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {reviews.map((r, i) => {
+                        const dangerCnt  = r.evalResult?.issues.filter(i => i.level === 'danger').length ?? 0
+                        const cautionCnt = r.evalResult?.issues.filter(i => i.level === 'caution').length ?? 0
+                        const totalIssues = dangerCnt + cautionCnt
+                        const mainIssues  = r.evalResult?.issues
+                          .filter(i => i.level === 'danger' || i.level === 'caution')
+                          .slice(0, 2).map(i => i.category).join('、') ?? '—'
+                        const scoreColor = !r.evalResult ? 'text-stone-400'
+                          : r.evalResult.score >= 80 ? 'text-emerald-700'
+                          : r.evalResult.score >= 60 ? 'text-amber-700'
+                          : 'text-red-700'
+                        return (
+                          <tr key={r.zoneName}
+                            className={`border-b border-stone-100 cursor-pointer hover:bg-green-50/40 transition-colors ${i % 2 === 0 ? 'bg-white' : 'bg-stone-50/40'}`}
+                            onClick={() => setActiveTab(r.zoneName)}>
+                            <td className="px-4 py-3">
+                              <span className="font-bold text-stone-800">{r.zoneName}</span>
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              {r.evalResult
+                                ? <span className={`text-base font-bold ${scoreColor}`}>{r.evalResult.score}<span className="text-xs font-normal text-stone-400">/100</span></span>
+                                : <span className="text-stone-400 text-xs">—</span>
+                              }
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              <span className={`text-xs px-2 py-0.5 rounded-full border font-semibold ${riskBadgeCls(r)}`}>
+                                {riskLabel(r)}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              <span className={`font-semibold ${totalIssues > 0 ? 'text-amber-700' : 'text-stone-400'}`}>
+                                {r.evalResult ? `${totalIssues} 項` : '—'}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              <span className={`font-semibold ${dangerCnt > 0 ? 'text-red-600' : 'text-stone-400'}`}>
+                                {r.evalResult ? (dangerCnt > 0 ? `${dangerCnt} 項` : '0') : '—'}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-stone-600 text-xs">
+                              {r.evalResult ? (mainIssues || '無問題') : <span className="text-stone-400">待審查</span>}
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="px-4 py-2 bg-stone-50 border-t border-stone-100 text-xs text-stone-400">
+                  點擊任一列可切換查看該分區完整審查內容
+                </div>
+              </div>
+            )}
           </div>
         )}
 
