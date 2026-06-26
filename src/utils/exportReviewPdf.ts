@@ -115,7 +115,8 @@ export function exportReviewReportPdf(
   plants: SelectedCsvPlant[],
   result: EvalResult,
   meta: ReportMeta = {},
-): void {
+  options: { returnHtml?: boolean } = {},
+): void | string {
   const now       = new Date()
   const dateStr   = now.toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })
   const scoreCol  = scoreColor(result.score)
@@ -537,6 +538,8 @@ export function exportReviewReportPdf(
 </body>
 </html>`
 
+  if (options.returnHtml) return html
+
   const win = window.open('', '_blank', 'width=900,height=700')
   if (!win) {
     alert('請允許彈出視窗以開啟 PDF 報告。\n（瀏覽器設定 → 允許此網站的彈出視窗）')
@@ -544,7 +547,6 @@ export function exportReviewReportPdf(
   }
   win.document.write(html)
   win.document.close()
-  // 稍候再自動彈出列印（讓字體載入）
   setTimeout(() => { win.print() }, 800)
 }
 
@@ -655,7 +657,8 @@ function zoneCard(z: ZoneReviewPdfData, idx: number): string {
 export function exportZoneReviewPdf(
   zones: ZoneReviewPdfData[],
   sourceFile = '',
-): void {
+  options: { returnHtml?: boolean } = {},
+): void | string {
   const now     = new Date()
   const dateStr = now.toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })
   const reviewed    = zones.filter(z => z.evalResult)
@@ -803,6 +806,8 @@ ${zones.map((z, i) => zoneCard(z, i)).join('')}
 </div>
 </body>
 </html>`
+
+  if (options.returnHtml) return html
 
   const win = window.open('', '_blank', 'width=900,height=700')
   if (!win) { alert('請允許彈出視窗以開啟 PDF 報告。'); return }

@@ -2167,6 +2167,7 @@ export default function LandscapeAdvisorPage({
   const [showCsvImport, setShowCsvImport] = useState(false)
   const [copyDone, setCopyDone] = useState(false)
   const [activeReviewTab, setActiveReviewTab] = useState<'overview'|'categories'|'issues'|'alternatives'|'summary'>('overview')
+  const [pdfHtml, setPdfHtml] = useState<string | null>(null)
   const [showMobileTools, setShowMobileTools] = useState(false)
   const [aiSuggestionExpanded, setAiSuggestionExpanded] = useState(false)
 
@@ -2347,7 +2348,8 @@ export default function LandscapeAdvisorPage({
 
   const handleExportPdf = () => {
     if (!result) return
-    exportReviewReportPdf(selectedPlants, result, { reviewType: 'AI 配植評估' })
+    const html = exportReviewReportPdf(selectedPlants, result, { reviewType: 'AI 配植評估' }, { returnHtml: true })
+    if (typeof html === 'string') setPdfHtml(html)
   }
 
   const activeIssues = result?.issues.filter(i => i.level !== 'ok') ?? []
@@ -2932,6 +2934,55 @@ export default function LandscapeAdvisorPage({
           )}
         </div>
       </div>
+
+      {/* PDF 已產生 Modal */}
+      {pdfHtml && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm mx-4 overflow-hidden">
+            <div className="px-6 pt-6 pb-4">
+              <div className="flex items-center gap-3 mb-2">
+                <div className="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center">
+                  <FileOutput size={20} className="text-green-700" />
+                </div>
+                <div>
+                  <p className="text-base font-bold text-stone-800">PDF 已產生完成</p>
+                  <p className="text-xs text-stone-400">請選擇預覽或下載</p>
+                </div>
+              </div>
+            </div>
+            <div className="px-6 pb-6 flex flex-col gap-3">
+              <button
+                onClick={() => {
+                  const win = window.open('', '_blank', 'width=900,height=700')
+                  if (!win) { alert('請允許彈出視窗（瀏覽器右上角）'); return }
+                  win.document.write(pdfHtml)
+                  win.document.close()
+                  setTimeout(() => win.print(), 800)
+                  setPdfHtml(null)
+                }}
+                className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-[#1a4731] text-white font-semibold text-sm hover:bg-[#2d6a4f] transition-colors">
+                <FileOutput size={16} />預覽 PDF（可列印）
+              </button>
+              <button
+                onClick={() => {
+                  const blob = new Blob([pdfHtml], { type: 'text/html;charset=utf-8' })
+                  const url = URL.createObjectURL(blob)
+                  const a = document.createElement('a')
+                  a.href = url; a.download = '景觀審查報告.html'; a.click()
+                  URL.revokeObjectURL(url)
+                  setPdfHtml(null)
+                }}
+                className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border border-stone-200 text-stone-700 font-medium text-sm hover:bg-stone-50 transition-colors">
+                <FileDown size={16} />下載 HTML 報告
+              </button>
+              <button onClick={() => setPdfHtml(null)}
+                className="text-xs text-stone-400 hover:text-stone-600 text-center py-1">
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showDb && (
         <PlantDatabaseModal

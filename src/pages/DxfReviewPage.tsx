@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useMemo, useEffect } from 'react'
 import {
   Upload, FileText, AlertTriangle, CheckCircle, HelpCircle,
-  ChevronDown, X, ArrowRight, Layers, Trash2, BookOpen, Table2, FileOutput,
+  ChevronDown, X, ArrowRight, Layers, Trash2, BookOpen, Table2, FileOutput, FileDown,
 } from 'lucide-react'
 import { parseDxf, detectPlantSchedule, findNearbyTexts } from '@/utils/dxfParser'
 import { analyzeMultiLayer, zoneLabel, detectZonesFromText, buildZonePlantList, buildZoneAssignDebug, polygonBBox } from '@/utils/spatialAnalysis'
@@ -612,6 +612,7 @@ export default function DxfReviewPage({
   const [zonePlantLists, setZonePlantLists] = useState<ZonePlantList[]>([])
   const [detectedZones, setDetectedZones] = useState<DetectedZone[]>([])
   const [zoneReviews, setZoneReviews] = useState<ZoneReviewResult[]>([])
+  const [pdfHtml, setPdfHtml] = useState<string | null>(null)
 
   // 每次 zoneReviews 更新就持久化到 localStorage，供 AI配植頁與 PDF 讀取
   const saveZoneReviews = (reviews: ZoneReviewResult[]) => {
@@ -914,7 +915,8 @@ export default function DxfReviewPage({
                     plants: r.plants,
                     evalResult: r.evalResult,
                   }))
-                  exportZoneReviewPdf(pdfData, fileName)
+                  const html = exportZoneReviewPdf(pdfData, fileName, { returnHtml: true })
+                  if (typeof html === 'string') setPdfHtml(html)
                 }}
                 className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-[#d8f3dc] text-[#1a4731] text-xs font-bold hover:bg-white transition-colors">
                 <FileOutput size={13} />匯出分區審查 PDF
@@ -1171,6 +1173,53 @@ export default function DxfReviewPage({
 
       {/* Close dropdown overlay */}
       {dropdown && <div className="fixed inset-0 z-40" onClick={() => setDropdown(null)} />}
+
+      {/* PDF 已產生 Modal */}
+      {pdfHtml && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm mx-4 overflow-hidden">
+            <div className="px-6 pt-6 pb-4 flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center">
+                <FileOutput size={20} className="text-green-700" />
+              </div>
+              <div>
+                <p className="text-base font-bold text-stone-800">PDF 已產生完成</p>
+                <p className="text-xs text-stone-400">請選擇預覽或下載</p>
+              </div>
+            </div>
+            <div className="px-6 pb-6 flex flex-col gap-3">
+              <button
+                onClick={() => {
+                  const win = window.open('', '_blank', 'width=900,height=700')
+                  if (!win) { alert('請允許彈出視窗（瀏覽器右上角）'); return }
+                  win.document.write(pdfHtml)
+                  win.document.close()
+                  setTimeout(() => win.print(), 800)
+                  setPdfHtml(null)
+                }}
+                className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-[#1a4731] text-white font-semibold text-sm hover:bg-[#2d6a4f] transition-colors">
+                <FileOutput size={16} />預覽 PDF（可列印）
+              </button>
+              <button
+                onClick={() => {
+                  const blob = new Blob([pdfHtml], { type: 'text/html;charset=utf-8' })
+                  const url = URL.createObjectURL(blob)
+                  const a = document.createElement('a')
+                  a.href = url; a.download = `DXF分區審查報告_${fileName || 'report'}.html`; a.click()
+                  URL.revokeObjectURL(url)
+                  setPdfHtml(null)
+                }}
+                className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border border-stone-200 text-stone-700 font-medium text-sm hover:bg-stone-50 transition-colors">
+                <FileDown size={16} />下載 HTML 報告
+              </button>
+              <button onClick={() => setPdfHtml(null)}
+                className="text-xs text-stone-400 hover:text-stone-600 text-center py-1">
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
