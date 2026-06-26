@@ -2168,6 +2168,7 @@ export default function LandscapeAdvisorPage({
   const [copyDone, setCopyDone] = useState(false)
   const [activeReviewTab, setActiveReviewTab] = useState<'overview'|'categories'|'issues'|'alternatives'|'summary'>('overview')
   const [pdfHtml, setPdfHtml] = useState<string | null>(null)
+  const [pdfError, setPdfError] = useState<string | null>(null)
   const [showMobileTools, setShowMobileTools] = useState(false)
   const [aiSuggestionExpanded, setAiSuggestionExpanded] = useState(false)
 
@@ -2962,34 +2963,32 @@ export default function LandscapeAdvisorPage({
               </div>
             </div>
             <div className="px-6 pb-6 flex flex-col gap-3">
+              {pdfError && (
+                <div className="flex items-start gap-2 rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">
+                  <span className="mt-0.5 shrink-0">⚠️</span>
+                  <span>{pdfError}</span>
+                </div>
+              )}
               <button
                 onClick={() => {
                   try {
-                    console.log('[PDF-Preview] pdfHtml 長度:', pdfHtml?.length)
-                    const win = window.open('', '_blank', 'width=900,height=700')
-                    console.log('[PDF-Preview] window.open 結果:', win)
+                    // 用 Blob URL 開啟，Chrome 不會封鎖此方式
+                    const blob = new Blob([pdfHtml!], { type: 'text/html;charset=utf-8' })
+                    const url = URL.createObjectURL(blob)
+                    const win = window.open(url, '_blank')
                     if (!win) {
-                      console.error('[PDF-Preview] window.open 回傳 null，Popup 被封鎖')
-                      alert('彈出視窗被封鎖，請改用「下載 HTML 報告」，在本機開啟後列印。')
+                      // 真的被封鎖才提示
+                      URL.revokeObjectURL(url)
+                      setPdfError('無法開啟預覽視窗，請改用「下載 HTML 報告」後在本機開啟列印。')
                       return
                     }
-                    console.log('[PDF-Preview] 開始寫入 document...')
-                    win.document.open()
-                    win.document.write(pdfHtml!)
-                    win.document.close()
-                    console.log('[PDF-Preview] document.write 完成，等待 print...')
-                    setTimeout(() => {
-                      try {
-                        win.print()
-                        console.log('[PDF-Preview] win.print() 呼叫完成')
-                      } catch (printErr) {
-                        console.error('[PDF-Preview] win.print() 例外：', printErr)
-                      }
-                    }, 800)
+                    // 60 秒後釋放 Blob URL
+                    setTimeout(() => URL.revokeObjectURL(url), 60_000)
                     setPdfHtml(null)
+                    setPdfError(null)
                   } catch (err) {
-                    console.error('[PDF-Preview] 預覽例外：', err)
-                    alert(`預覽失敗，請查看 Console 取得詳細錯誤。\n${err instanceof Error ? err.message : String(err)}`)
+                    console.error('[PDF-Preview] 例外：', err)
+                    setPdfError(`預覽失敗：${err instanceof Error ? err.message : String(err)}`)
                   }
                 }}
                 className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-[#1a4731] text-white font-semibold text-sm hover:bg-[#2d6a4f] transition-colors">
@@ -3006,16 +3005,17 @@ export default function LandscapeAdvisorPage({
                     a.href = url; a.download = '景觀審查報告.html'; a.click()
                     URL.revokeObjectURL(url)
                     setPdfHtml(null)
+                    setPdfError(null)
                     console.log('[PDF-Download] 下載觸發完成')
                   } catch (err) {
                     console.error('[PDF-Download] 下載例外：', err)
-                    alert(`下載失敗：${err instanceof Error ? err.message : String(err)}`)
+                    setPdfError(`下載失敗：${err instanceof Error ? err.message : String(err)}`)
                   }
                 }}
                 className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border border-stone-200 text-stone-700 font-medium text-sm hover:bg-stone-50 transition-colors">
                 <FileDown size={16} />下載 HTML 報告
               </button>
-              <button onClick={() => setPdfHtml(null)}
+              <button onClick={() => { setPdfHtml(null); setPdfError(null) }}
                 className="text-xs text-stone-400 hover:text-stone-600 text-center py-1">
                 取消
               </button>
