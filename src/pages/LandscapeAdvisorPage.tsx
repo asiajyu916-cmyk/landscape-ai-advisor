@@ -2427,6 +2427,14 @@ tr:nth-child(even) td{background:#f7faf5}
 .plan-txt{font-size:12px;color:#44403c;line-height:1.75}
 .review-box{font-size:12px;color:#44403c;line-height:1.9;white-space:pre-line;padding:14px;background:#f7faf5;border-radius:6px;border:1px solid #d4e8d4}
 .footer{text-align:center;padding:14px;color:#78716c;font-size:10px;border-top:1px solid #e7e5e4;margin-top:20px}
+/* ── 分頁控制 ── */
+.no-break{break-inside:avoid;page-break-inside:avoid}
+.page-break{break-before:page;page-break-before:always}
+.sec-hdr{break-after:avoid;page-break-after:avoid}
+.sec-body{break-before:avoid;page-break-before:avoid}
+tr{break-inside:avoid;page-break-inside:avoid}
+thead{display:table-header-group}
+tfoot{display:table-footer-group}
 </style>
 
 <div class="cover-hdr">
@@ -2471,10 +2479,10 @@ tr:nth-child(even) td{background:#f7faf5}
   </div>
 
   ${activeIssues.length > 0 ? `
-  <div class="sec-hdr">問題明細（${activeIssues.length} 項）</div>
+  <div class="sec-hdr page-break">問題明細（${activeIssues.length} 項）</div>
   <div class="sec-body">
     ${activeIssues.map(issue => `
-    <div class="issue ${issue.level}">
+    <div class="issue no-break ${issue.level}">
       <div class="i-title">${esc(issue.category)}</div>
       <span class="badge ${issue.level==='danger'?'b-d':'b-c'}">${issue.level==='danger'?'高風險':'需注意'}</span>
       <div class="i-lbl">問題原因</div><div class="i-txt">${esc(issue.cause)}</div>
@@ -2484,10 +2492,10 @@ tr:nth-child(even) td{background:#f7faf5}
   </div>` : ''}
 
   ${result.alternatives.length > 0 ? `
-  <div class="sec-hdr">替代植栽建議</div>
+  <div class="sec-hdr page-break">替代植栽建議</div>
   <div class="sec-body">
     ${result.alternatives.map(alt => `
-    <div style="margin-bottom:16px">
+    <div class="no-break" style="margin-bottom:16px">
       <div class="alt-orig">原植栽：${esc(alt.originalPlant.name)}（${esc(alt.originalPlant.subCategory||alt.originalPlant.category)}）</div>
       ${alt.alternatives.length>0 ? `
       <table>
@@ -2499,7 +2507,7 @@ tr:nth-child(even) td{background:#f7faf5}
   </div>` : ''}
 
   ${result.adjustmentPlan.length>0||result.reviewText ? `
-  <div class="sec-hdr">總結建議</div>
+  <div class="sec-hdr page-break">總結建議</div>
   <div class="sec-body">
     ${result.adjustmentPlan.length>0 ? `
     <div style="margin-bottom:16px">
@@ -2515,7 +2523,7 @@ tr:nth-child(even) td{background:#f7faf5}
     <div class="review-box">${esc(result.reviewText)}</div>` : ''}
   </div>` : ''}
 
-  <div class="sec-hdr">審查植栽清單</div>
+  <div class="sec-hdr page-break">審查植栽清單</div>
   <div class="sec-body">
     <table>
       <thead><tr><th>#</th><th>植栽名稱</th><th>類型</th><th>日照</th><th>水分</th><th>耐旱</th><th>耐濕</th></tr></thead>
@@ -2550,57 +2558,63 @@ tr:nth-child(even) td{background:#f7faf5}
       console.log('[PDF] reportEl offsetWidth x scrollHeight:', reportEl.offsetWidth, 'x', elH)
       if (elH === 0) throw new Error('reportEl 高度為 0，內容未渲染')
 
-      // ── Step 4: html2canvas 截圖 ──
-      const html2canvas = (await import('html2canvas')).default
-      console.log('[PDF] 開始 html2canvas，截取 reportEl...')
-      const canvas = await html2canvas(reportEl, {
-        scale: 1.5,
-        useCORS: true,
-        allowTaint: false,
-        backgroundColor: '#ffffff',
-        logging: false,
-        width: 794,
-        height: elH,
-        windowWidth: 794,
-        windowHeight: elH,
-        scrollX: 0,
-        scrollY: 0,
-      })
+      // ── Step 4: html2pdf.js — CSS 分頁 + 安全邊界 + 頁首頁尾 ──
+      console.log('[PDF] 開始 html2pdf.js 渲染...')
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const h2pMod = await import('html2pdf.js' as any)
+      const html2pdfLib = h2pMod.default ?? h2pMod
+      const genTime = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })
 
-      // 截完立即移除
+      await html2pdfLib()
+        .set({
+          margin: [22, 14, 22, 14],          // top / left / bottom / right (mm)
+          filename: '景觀AI設計審查報告.pdf',
+          image: { type: 'jpeg', quality: 0.92 },
+          html2canvas: {
+            scale: 1.5,
+            useCORS: true,
+            allowTaint: false,
+            logging: false,
+            backgroundColor: '#ffffff',
+            width: 794,
+            windowWidth: 794,
+            scrollX: 0,
+            scrollY: 0,
+          },
+          jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+          // 使用 CSS class 分頁，同時避免 tr 與 .no-break 被切斷
+          pagebreak: { mode: ['css', 'legacy'], avoid: ['tr', '.no-break'] },
+        })
+        .from(reportEl)
+        .toPdf()
+        .get('pdf')
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .then((pdf: any) => {
+          const total = pdf.internal.getNumberOfPages()
+          console.log('[PDF] 共', total, '頁')
+          for (let pg = 1; pg <= total; pg++) {
+            pdf.setPage(pg)
+            // 頁首：細線 + 小字（ASCII 避免字型問題）
+            pdf.setDrawColor(26, 71, 49)
+            pdf.setLineWidth(0.35)
+            pdf.line(14, 14, 196, 14)
+            pdf.setFontSize(7)
+            pdf.setTextColor(26, 71, 49)
+            pdf.text('Landscape AI Advisor 2.0  |  Plant Configuration & Review Report', 14, 10.5)
+            // 頁尾：細線 + 日期 + 頁碼
+            pdf.line(14, 279, 196, 279)
+            pdf.setFontSize(7)
+            pdf.setTextColor(120, 120, 120)
+            pdf.text(genTime, 14, 283)
+            pdf.text(`Page ${pg} / ${total}`, 196, 283, { align: 'right' })
+          }
+        })
+        .save()
+
+      // 移除遮罩與容器
       document.body.removeChild(reportEl)
       document.body.removeChild(overlay)
       reportEl = null
-
-      console.log('[PDF] canvas.width:', canvas.width)
-      console.log('[PDF] canvas.height:', canvas.height)
-      if (canvas.width === 0 || canvas.height === 0) {
-        throw new Error(`canvas 尺寸為 0 (${canvas.width}×${canvas.height})`)
-      }
-
-      // ── Step 5: 分頁轉 PDF ──
-      const { jsPDF } = await import('jspdf')
-      const PDF_W_MM = 210, PDF_H_MM = 297
-      const pdf = new jsPDF({ orientation: 'p', unit: 'mm', format: 'a4' })
-
-      const pagePixH = Math.floor(canvas.width * (PDF_H_MM / PDF_W_MM))
-      let y = 0, pageNum = 0
-
-      while (y < canvas.height) {
-        if (pageNum > 0) pdf.addPage()
-        pageNum++
-        const sliceH = Math.min(pagePixH, canvas.height - y)
-        const pc = document.createElement('canvas')
-        pc.width = canvas.width; pc.height = sliceH
-        pc.getContext('2d')!.drawImage(canvas, 0, y, canvas.width, sliceH, 0, 0, canvas.width, sliceH)
-        const imgData = pc.toDataURL('image/jpeg', 0.92)
-        console.log(`[PDF] addImage page ${pageNum}, imgData.length=${imgData.length}`)
-        pdf.addImage(imgData, 'JPEG', 0, 0, PDF_W_MM, sliceH * (PDF_W_MM / canvas.width))
-        y += pagePixH
-      }
-
-      console.log('[PDF] 共', pdf.getNumberOfPages(), '頁，開始 save()')
-      pdf.save('景觀AI設計審查報告.pdf')
       console.log('[PDF] save() 完成')
 
     } catch (err) {
