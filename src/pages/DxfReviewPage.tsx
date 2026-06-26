@@ -335,7 +335,39 @@ function buildZoneReviews(
   schedule: PlantScheduleEntry[],
   texts: DxfText[] = [],
   drawingRadius = 1000,
+  polygons: import('@/types/dxf').DxfPolygon[] = [],
 ): ZoneReviewResult[] {
+  // ── 建立 HATCH pattern → 植物名稱 對照表（從索引表圖例小方塊推導）──────────
+  // 每個 HATCH pattern 的最小 polygon 通常是索引表裡的圖例小方塊，
+  // 其附近文字就是該 pattern 對應的植物名稱。
+  const hatchPatternToPlant = new Map<string, string>()
+  if (polygons.length > 0) {
+    // 每個 pattern 找最小面積的 polygon（圖例小方塊）
+    const smallest = new Map<string, { cx: number; cy: number; area: number }>()
+    for (const poly of polygons) {
+      if (poly.source !== 'HATCH' || !poly.hatchPattern) continue
+      const pat = poly.hatchPattern
+      const n = poly.vertices.length
+      const cx = poly.vertices.reduce((s, v) => s + v.x, 0) / n
+      const cy = poly.vertices.reduce((s, v) => s + v.y, 0) / n
+      const xs = poly.vertices.map(v => v.x), ys = poly.vertices.map(v => v.y)
+      const bboxArea = (Math.max(...xs) - Math.min(...xs)) * (Math.max(...ys) - Math.min(...ys))
+      const ex = smallest.get(pat)
+      if (!ex || bboxArea < ex.area) smallest.set(pat, { cx, cy, area: bboxArea })
+    }
+    // 對每個圖例小方塊搜尋附近植物名稱
+    const legendRadius = Math.max(300, drawingRadius * 0.08)
+    for (const [pattern, { cx, cy }] of smallest) {
+      const nearTexts = findNearbyTexts({ x: cx, y: cy }, texts, legendRadius)
+      for (const txt of nearTexts) {
+        const fromDB = plantDB.find(p => p.name.length >= 2 && txt.includes(p.name))
+        if (fromDB) { hatchPatternToPlant.set(pattern, fromDB.name); break }
+        const fromSched = schedule.find(e => e.plantName && e.plantName.length >= 2 && txt.includes(e.plantName))
+        if (fromSched) { hatchPatternToPlant.set(pattern, fromSched.plantName); break }
+      }
+    }
+  }
+
   return zonePlantLists.map(zpl => {
     const confirmed: SelectedCsvPlant[] = []
     const blockEntries: ZoneBlockEntry[] = []
@@ -369,6 +401,22 @@ function buildZoneReviews(
     for (const area of allAreas) {
       const layerName = (area.layer || '').trim()
       let matched = false
+
+      // ── D. HATCH pattern 圖例對照（最優先：pattern name → 索引表植物名稱）──
+      if (!matched && area.source === 'HATCH' && area.hatchPattern) {
+        const legendPlant = hatchPatternToPlant.get(area.hatchPattern)
+        if (legendPlant && !seenNames.has(legendPlant)) {
+          const dbP = findInDB(legendPlant, plantDB)
+          if (dbP) {
+            seenNames.add(dbP.name)
+            const ps = dbP.wetTolerance === '不耐積水' && dbP.droughtTolerance === '不耐旱' ? '需注意' as const : '可用' as const
+            confirmed.push({ ...dbP, instanceId: uid(), status: ps })
+            blockEntries.push({ blockName: `[HATCH圖例] ${area.hatchPattern}`, plantName: dbP.name, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'db-matched' })
+            matched = true
+          }
+        }
+      }
+      if (matched) continue
 
       // ── A. 掃描 HATCH 幾何中心附近的文字標注 ──────────────────────────
       // 搜尋半徑：HATCH 中心 ± drawingRadius * 5%（最小 100 單位）
@@ -654,7 +702,7 @@ export default function DxfReviewPage({
   // 解決「DXF 上傳時 DB 尚未載入 → 分數為空」的問題
   useEffect(() => {
     if (zonePlantLists.length === 0 || plants.length === 0) return
-    saveZoneReviews(buildZoneReviews(zonePlantLists, plants, plantSchedule.entries, parseResult?.texts ?? [], drawingRadius))
+    saveZoneReviews(buildZoneReviews(zonePlantLists, plants, plantSchedule.entries, parseResult?.texts ?? [], drawingRadius, parseResult?.polygons ?? []))
   }, [plants, zonePlantLists, plantSchedule.entries])
 
   const multiLayerResults = useMemo<MultiLayerResult[]>(() => {
@@ -703,7 +751,7 @@ export default function DxfReviewPage({
       setDetectedZones(zones)
       const zpl = buildZonePlantList(zones, active, result.polygons, result.inserts, result.blockExtents)
       setZonePlantLists(zpl)
-      saveZoneReviews(buildZoneReviews(zpl, loaded, sched.entries, result.texts, radius))
+      saveZoneReviews(buildZoneReviews(zpl, loaded, sched.entries, result.texts, radius, result.polygons))
       setZoneDebug(buildZoneAssignDebug(zones, zpl, active, result.inserts, result.blockExtents))
 
       // ── Debug：直接印出 raw 資料讓瀏覽器 console 可以看 ──────────────────
@@ -733,7 +781,7 @@ export default function DxfReviewPage({
     setExcluded(exc)
     const zpl2 = buildZonePlantList(detectedZones, active, parseResult.polygons, parseResult.inserts, parseResult.blockExtents)
     setZonePlantLists(zpl2)
-    saveZoneReviews(buildZoneReviews(zpl2, plantList, plantSchedule.entries, parseResult.texts, drawingRadius))
+    saveZoneReviews(buildZoneReviews(zpl2, plantList, plantSchedule.entries, parseResult.texts, drawingRadius, parseResult.polygons))
     setZoneDebug(buildZoneAssignDebug(detectedZones, zpl2, active, parseResult.inserts, parseResult.blockExtents))
   }
 

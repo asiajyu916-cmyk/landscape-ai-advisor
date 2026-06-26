@@ -611,10 +611,12 @@ export function parseDxf(text: string): DxfParseResult {
     // ── HATCH ────────────────────────────────────────────────────────────────
     } else if (g.code === 0 && g.value === 'HATCH') {
       let layer = ''
+      let hatchPattern = ''  // group code 2：HATCH 填充樣式名稱，用於索引表圖例對照
       i++
-      // Read layer then try to extract boundary vertices
+      // Read layer (8) and pattern name (2) before boundary data starts (91)
       while (i < groups.length && groups[i].code !== 0 && groups[i].code !== 91) {
         if (groups[i].code === 8) layer = groups[i].value
+        if (groups[i].code === 2) hatchPattern = groups[i].value
         i++
       }
       const { vertices, end } = parseHatchBoundary(groups, i)
@@ -625,6 +627,7 @@ export function parseDxf(text: string): DxfParseResult {
           closed: true,  // HATCH is always closed
           zoneType: classifyZone(layer),
           source: 'HATCH',
+          hatchPattern: hatchPattern || undefined,
         })
       }
 

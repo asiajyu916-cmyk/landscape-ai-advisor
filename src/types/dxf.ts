@@ -71,6 +71,7 @@ export interface DxfPolygon {
   closed: boolean
   zoneType: ZoneType
   source: 'LWPOLYLINE' | 'POLYLINE' | 'HATCH'
+  hatchPattern?: string   // HATCH pattern name (DXF group code 2)，用於圖例對照
 }
 
 // block 定義的本地 bbox（以 block origin 為原點的本地座標系）
@@ -149,6 +150,7 @@ export interface ZonePlantArea {
   vertexCount: number
   centerX: number   // HATCH/polygon 的幾何中心 X
   centerY: number   // HATCH/polygon 的幾何中心 Y
+  hatchPattern?: string  // HATCH pattern name，供索引表圖例對照
 }
 
 export interface ZonePlantList {
