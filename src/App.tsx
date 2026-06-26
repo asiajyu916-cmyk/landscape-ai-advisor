@@ -10,6 +10,8 @@ export default function App() {
 
   // PDF / DXF 導入的植栽名稱清單，橋接到 LandscapeAdvisorPage
   const [importedPlantNames, setImportedPlantNames] = useState<string[]>([])
+  // 只有透過 DXF 匯入流程才顯示分區審查摘要
+  const [dxfZonesLinked, setDxfZonesLinked] = useState(false)
 
   const handlePdfImport = (plantNames: string[]) => {
     setImportedPlantNames(plantNames)
@@ -18,6 +20,7 @@ export default function App() {
 
   const handleDxfImport = (plantNames: string[]) => {
     setImportedPlantNames(plantNames)
+    setDxfZonesLinked(true)   // DXF 分區資料與 AI 配植評估正式連結
     setActiveTab('landscape')
   }
 
@@ -29,6 +32,7 @@ export default function App() {
         onTabChange={setActiveTab}
         importedPlantNames={importedPlantNames.length > 0 ? importedPlantNames : undefined}
         onImportConsumed={() => setImportedPlantNames([])}
+        dxfZonesLinked={dxfZonesLinked}
       />
       {/* PDF / DXF 頁面的內容渲染在共用 Header 下方 */}
       {activeTab === 'pdf' && (

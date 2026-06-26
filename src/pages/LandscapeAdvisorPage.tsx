@@ -2174,11 +2174,13 @@ export default function LandscapeAdvisorPage({
   onTabChange,
   importedPlantNames,
   onImportConsumed,
+  dxfZonesLinked = false,
 }: {
   activeTab?: 'pdf' | 'landscape' | 'dxf'
   onTabChange?: (tab: 'pdf' | 'landscape' | 'dxf') => void
   importedPlantNames?: string[]
   onImportConsumed?: () => void
+  dxfZonesLinked?: boolean
 } = {}) {
   const [allPlants, setAllPlants] = useState<CsvPlantRecord[]>([])
   const [dbStatus, setDbStatus] = useState<'loading' | 'loaded' | 'empty'>('loading')
@@ -2203,15 +2205,17 @@ export default function LandscapeAdvisorPage({
     aiSuggestion?: string; adjustmentPlan?: string[]; reviewText?: string
   }
   const [storedZones, setStoredZones] = useState<StoredZone[]>([])
-  // 每次切回 AI 配植評估 tab 時重新讀取 sessionStorage（DXF 審查後寫入的資料）
+  // 只有透過 DXF 匯入流程（dxfZonesLinked=true）才顯示分區審查摘要
   useEffect(() => {
-    if (activeTab === 'landscape') {
+    if (activeTab === 'landscape' && dxfZonesLinked) {
       try {
         const r = sessionStorage.getItem('dxf-zone-review-full')
         setStoredZones(r ? JSON.parse(r) : [])
       } catch { setStoredZones([]) }
+    } else {
+      setStoredZones([])
     }
-  }, [activeTab])
+  }, [activeTab, dxfZonesLinked])
   const [activeZoneId, setActiveZoneId] = useState<string | null>(null)
   const activeZone = storedZones.find(z => z.zoneName === activeZoneId) ?? null
 
