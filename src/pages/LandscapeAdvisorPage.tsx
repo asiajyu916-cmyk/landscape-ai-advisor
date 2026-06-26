@@ -2368,20 +2368,50 @@ export default function LandscapeAdvisorPage({
     a.click(); URL.revokeObjectURL(url)
   }
 
-  const handleExportPdf = () => {
-    if (!result) return
+  const [pdfGenerating, setPdfGenerating] = useState(false)
+  const [pdfGenError, setPdfGenError] = useState<string | null>(null)
+
+  const handleExportPdf = async () => {
+    if (!result || pdfGenerating) return
+    setPdfGenerating(true)
+    setPdfGenError(null)
     try {
       console.log('[PDF] 開始產生 HTML...')
-      const html = exportReviewReportPdf(selectedPlants, result, { reviewType: 'AI 配植評估' }, { returnHtml: true })
-      console.log('[PDF] exportReviewReportPdf 回傳型別:', typeof html, '長度:', typeof html === 'string' ? html.length : 'N/A')
-      if (typeof html === 'string' && html.length > 0) {
-        setPdfHtml(html)
-        console.log('[PDF] HTML 已存入 state，Modal 應顯示')
-      } else {
-        console.error('[PDF] 錯誤：html 回傳值非字串或為空', html)
-      }
+      const html = exportReviewReportPdf(selectedPlants, result, { reviewType: 'AI 配植評估' }, { returnHtml: true }) as string
+      if (!html) { console.error('[PDF] HTML 為空'); setPdfGenError('PDF 產生失敗，請查看 Console'); return }
+      console.log('[PDF] HTML 長度:', html.length)
+
+      // 取出 <style> 與 <body> 內容，注入隱藏 div 供 html2canvas 渲染
+      const styleBlocks = html.match(/<style[^>]*>[\s\S]*?<\/style>/gi) ?? []
+      const bodyMatch = html.match(/<body[^>]*>([\s\S]*)<\/body>/i)
+      const bodyContent = bodyMatch?.[1] ?? html
+
+      const el = document.createElement('div')
+      el.style.cssText = 'width:794px;position:fixed;left:-9999px;top:0;background:#fff;'
+      el.innerHTML = styleBlocks.join('') + bodyContent
+      el.querySelectorAll('.print-btn').forEach(n => n.remove()) // 移除列印按鈕
+      document.body.appendChild(el)
+
+      console.log('[PDF] 載入 html2pdf...')
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const html2pdf = (await import('html2pdf.js' as any)).default ?? (await import('html2pdf.js' as any))
+      console.log('[PDF] 開始渲染並儲存...')
+      await html2pdf().set({
+        margin: [8, 8, 8, 8],
+        filename: '景觀AI設計審查報告.pdf',
+        image: { type: 'jpeg', quality: 0.92 },
+        html2canvas: { scale: 2, useCORS: true, logging: false },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+        pagebreak: { mode: ['css', 'legacy'] },
+      }).from(el).save()
+
+      document.body.removeChild(el)
+      console.log('[PDF] 下載完成')
     } catch (err) {
-      console.error('[PDF] handleExportPdf 例外：', err)
+      console.error('[PDF] 產生失敗：', err)
+      setPdfGenError('PDF 產生失敗，請查看 Console')
+    } finally {
+      setPdfGenerating(false)
     }
   }
 
@@ -2458,12 +2488,16 @@ export default function LandscapeAdvisorPage({
               </button>
             </div>
             <div className="flex items-center gap-1.5 border-l border-white/20 pl-2">
-              <button onClick={handleExportPdf} disabled={!result}
-                className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
-                  result ? 'bg-[#d8f3dc] text-[#1a4731] hover:bg-white' : 'bg-white/10 text-white/30 cursor-not-allowed'
-                }`}>
-                <FileOutput size={12} />匯出 PDF
-              </button>
+              <div className="flex flex-col items-end gap-0.5">
+                <button onClick={handleExportPdf} disabled={!result || pdfGenerating}
+                  className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                    result && !pdfGenerating ? 'bg-[#d8f3dc] text-[#1a4731] hover:bg-white' : 'bg-white/10 text-white/30 cursor-not-allowed'
+                  }`}>
+                  {pdfGenerating ? <RefreshCw size={12} className="animate-spin" /> : <FileOutput size={12} />}
+                  {pdfGenerating ? '產生中…' : '匯出 PDF'}
+                </button>
+                {pdfGenError && <p className="text-[10px] text-red-300">{pdfGenError}</p>}
+              </div>
               <button onClick={handleExport} disabled={!result}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
                   result ? 'bg-white/10 border-white/20 text-white hover:bg-white/20' : 'border-white/10 text-white/30 cursor-not-allowed'
