@@ -2566,63 +2566,85 @@ tfoot{display:table-footer-group}
       console.log('[PDF] reportEl offsetWidth x scrollHeight:', reportEl.offsetWidth, 'x', elH)
       if (elH === 0) throw new Error('reportEl 高度為 0，內容未渲染')
 
-      // ── Step 4: html2pdf.js — CSS 分頁 + 安全邊界 + 頁首頁尾 ──
-      console.log('[PDF] 開始 html2pdf.js 渲染...')
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const h2pMod = await import('html2pdf.js' as any)
-      const html2pdfLib = h2pMod.default ?? h2pMod
-      const genTime = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })
+      // ── Step 4: html2canvas 截圖（raw，確認可截到 position:fixed 元素）──
+      const html2canvas = (await import('html2canvas')).default
+      console.log('[PDF] 開始 html2canvas...')
+      const canvas = await html2canvas(reportEl, {
+        scale: 1.5,
+        useCORS: true,
+        allowTaint: false,
+        backgroundColor: '#ffffff',
+        logging: false,
+        width: 794,
+        height: elH,
+        windowWidth: 794,
+        windowHeight: elH,
+        scrollX: 0,
+        scrollY: 0,
+      })
 
-      await html2pdfLib()
-        .set({
-          margin: [22, 14, 22, 14],          // top / left / bottom / right (mm)
-          filename: '景觀AI設計審查報告.pdf',
-          image: { type: 'jpeg', quality: 0.92 },
-          html2canvas: {
-            scale: 1.5,
-            useCORS: true,
-            allowTaint: false,
-            logging: false,
-            backgroundColor: '#ffffff',
-            width: 794,
-            windowWidth: 794,
-            scrollX: 0,
-            scrollY: 0,
-          },
-          jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-          // 使用 CSS class 分頁，同時避免 tr 與 .no-break 被切斷
-          pagebreak: { mode: ['css', 'legacy'], avoid: ['tr', '.no-break'] },
-        })
-        .from(reportEl)
-        .toPdf()
-        .get('pdf')
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        .then((pdf: any) => {
-          const total = pdf.internal.getNumberOfPages()
-          console.log('[PDF] 共', total, '頁')
-          for (let pg = 1; pg <= total; pg++) {
-            pdf.setPage(pg)
-            // 頁首：細線 + 小字（ASCII 避免字型問題）
-            pdf.setDrawColor(26, 71, 49)
-            pdf.setLineWidth(0.35)
-            pdf.line(14, 14, 196, 14)
-            pdf.setFontSize(7)
-            pdf.setTextColor(26, 71, 49)
-            pdf.text('Landscape AI Advisor 2.0  |  Plant Configuration & Review Report', 14, 10.5)
-            // 頁尾：細線 + 日期 + 頁碼
-            pdf.line(14, 279, 196, 279)
-            pdf.setFontSize(7)
-            pdf.setTextColor(120, 120, 120)
-            pdf.text(genTime, 14, 283)
-            pdf.text(`Page ${pg} / ${total}`, 196, 283, { align: 'right' })
-          }
-        })
-        .save()
-
-      // 移除遮罩與容器
+      // 截完立即移除
       document.body.removeChild(reportEl)
       document.body.removeChild(overlay)
       reportEl = null
+
+      console.log('[PDF] canvas.width:', canvas.width)
+      console.log('[PDF] canvas.height:', canvas.height)
+      if (canvas.width === 0 || canvas.height === 0) {
+        throw new Error(`canvas 尺寸為 0 (${canvas.width}×${canvas.height})`)
+      }
+
+      // ── Step 5: 分頁轉 PDF（A4，含頁首頁尾）──
+      const { jsPDF } = await import('jspdf')
+      const PDF_W_MM = 210, PDF_H_MM = 297
+      const MARGIN_MM = 14           // 左右邊距
+      const TOP_MM    = 20           // 上邊距（含頁首）
+      const BOT_MM    = 18           // 下邊距（含頁尾）
+      const CONTENT_W_MM = PDF_W_MM - MARGIN_MM * 2   // 182mm
+      const CONTENT_H_MM = PDF_H_MM - TOP_MM - BOT_MM // 259mm
+
+      const pdf = new jsPDF({ orientation: 'p', unit: 'mm', format: 'a4' })
+      const genTime = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })
+
+      // canvas px per mm（canvas 寬對應 182mm 內容寬）
+      const pxPerMm = canvas.width / CONTENT_W_MM
+      const pageCanvasH = Math.floor(CONTENT_H_MM * pxPerMm)
+
+      let y = 0, pageNum = 0
+      while (y < canvas.height) {
+        if (pageNum > 0) pdf.addPage()
+        pageNum++
+
+        const sliceH = Math.min(pageCanvasH, canvas.height - y)
+        const pc = document.createElement('canvas')
+        pc.width = canvas.width; pc.height = sliceH
+        pc.getContext('2d')!.drawImage(canvas, 0, y, canvas.width, sliceH, 0, 0, canvas.width, sliceH)
+        const imgData = pc.toDataURL('image/jpeg', 0.92)
+        console.log(`[PDF] addImage page ${pageNum}, imgData.length=${imgData.length}`)
+
+        // 內容圖片（左右邊距 + 上方留空給頁首）
+        const imgH = sliceH / pxPerMm
+        pdf.addImage(imgData, 'JPEG', MARGIN_MM, TOP_MM, CONTENT_W_MM, imgH)
+
+        // 頁首
+        pdf.setDrawColor(26, 71, 49)
+        pdf.setLineWidth(0.35)
+        pdf.line(MARGIN_MM, TOP_MM - 2, PDF_W_MM - MARGIN_MM, TOP_MM - 2)
+        pdf.setFontSize(7); pdf.setTextColor(26, 71, 49)
+        pdf.text('Landscape AI Advisor 2.0  |  Plant Configuration & Review Report', MARGIN_MM, TOP_MM - 5)
+
+        // 頁尾
+        const footerY = PDF_H_MM - BOT_MM + 4
+        pdf.line(MARGIN_MM, footerY - 2, PDF_W_MM - MARGIN_MM, footerY - 2)
+        pdf.setFontSize(7); pdf.setTextColor(120, 120, 120)
+        pdf.text(genTime, MARGIN_MM, footerY)
+        pdf.text(`Page ${pageNum}`, PDF_W_MM - MARGIN_MM, footerY, { align: 'right' })
+
+        y += pageCanvasH
+      }
+
+      console.log('[PDF] 共', pdf.getNumberOfPages(), '頁，開始 save()')
+      pdf.save('景觀AI設計審查報告.pdf')
       console.log('[PDF] save() 完成')
 
     } catch (err) {
