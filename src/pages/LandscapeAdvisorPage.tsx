@@ -266,9 +266,11 @@ function evaluate(plants: SelectedCsvPlant[], allPlants: CsvPlantRecord[]): Eval
     const sameCat = allPlants.filter(c =>
       c.normalizedCategory === target.normalizedCategory && !selectedIds.has(c.id)
     )
-    // 同 subCategory 有候選就優先用，否則 fallback 到同大類
-    const candidates = sameSubCat.length >= 3 ? sameSubCat : sameCat
-    const strictMode = sameSubCat.length >= 1 // 是否有同小類候選
+    // subCategory 有值時嚴格同層，不跨大喬木/小喬木/灌木等；subCategory 為空才 fallback 同大類
+    const candidates = (target.subCategory && target.subCategory !== '')
+      ? sameSubCat
+      : sameCat
+    const strictMode = sameSubCat.length >= 1
 
     type Scored = { plant: CsvPlantRecord; score: number; reasons: string[]; reductions: string[] }
     const scored: Scored[] = candidates.map(c => {
@@ -612,13 +614,36 @@ function AltCard({ suggestion }: { suggestion: AltSuggestion }) {
             </div>
           ) : (
             <>
-              {/* 替代植栽卡片 — 桌機4欄, 平板2欄, 手機1欄 */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+              {/* 圖例 Legend */}
+              <div className="mb-3 flex flex-wrap gap-x-5 gap-y-1 px-1">
+                <span className="text-[12px] text-stone-400 font-semibold self-center">格條說明：</span>
+                {[
+                  { label: '日照', items: ['遮蔭', '半日照', '全日照'] },
+                  { label: '水分', items: ['低需水', '中需水', '高需水'] },
+                  { label: '耐旱', items: ['不耐旱', '中等', '極耐旱'] },
+                ].map(({ label, items }) => (
+                  <div key={label} className="flex items-center gap-1.5">
+                    <span className="text-[12px] font-semibold text-stone-500">{label}：</span>
+                    {[1, 3, 5].map((v, idx) => (
+                      <div key={v} className="flex items-center gap-1">
+                        <div className="flex gap-[2px]">
+                          {Array.from({ length: 5 }, (_, i) => (
+                            <div key={i} className={`w-3 h-3 rounded-[2px] ${i < v ? 'bg-green-400' : 'bg-stone-200'}`} />
+                          ))}
+                        </div>
+                        <span className="text-[11px] text-stone-400">{items[idx]}</span>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+              {/* 替代植栽卡片 — 固定4欄 */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                 {suggestion.alternatives.map((alt, i) => (
                   <div key={alt.plant.id}
                     className="border border-green-100 rounded-xl overflow-hidden bg-green-50/20 hover:border-green-300 hover:shadow-md transition-all flex flex-col">
                     {/* 照片 */}
-                    <div className="h-[100px] relative overflow-hidden flex-shrink-0 bg-[#d8f3dc]">
+                    <div className="h-[130px] relative overflow-hidden flex-shrink-0 bg-[#d8f3dc]">
                       <AltPlantPhoto name={alt.plant.name} />
                       <div className="absolute top-2 left-2 w-6 h-6 rounded-full bg-[#1a4731] flex items-center justify-center shadow">
                         <span className="text-[11px] font-bold text-white">{i + 1}</span>
@@ -636,32 +661,28 @@ function AltCard({ suggestion }: { suggestion: AltSuggestion }) {
 
                     {/* 資訊 */}
                     <div className="p-3 flex-1 flex flex-col gap-2">
-                      {/* 替換關係標示 */}
-                      <div className="text-[11px] text-stone-400">
-                        <span className="text-stone-500">建議替代：</span>
-                      </div>
                       <div>
-                        <p className="font-bold text-stone-800 leading-tight" style={{ fontSize: 17 }}>{alt.plant.name}</p>
+                        <p className="font-bold text-stone-800 leading-tight text-[17px]">{alt.plant.name}</p>
                         {alt.plant.scientificName && (
-                          <p className="text-[11px] text-stone-400 italic truncate mt-0.5">{alt.plant.scientificName}</p>
+                          <p className="text-[12px] text-stone-400 italic truncate mt-0.5">{alt.plant.scientificName}</p>
                         )}
                       </div>
                       {/* 習性格條 */}
-                      <div className="space-y-1">
+                      <div className="space-y-1.5">
                         <RatingBar label="日照" score={toSunScore(alt.plant.sunRequirement)} />
                         <RatingBar label="水分" score={toWaterBar(alt.plant.waterRequirement)} />
                       </div>
                       {/* 推薦原因 */}
                       <div className="mt-auto space-y-1">
                         {alt.riskReduction.split('、').slice(0, 2).map((r, ri) => (
-                          <p key={ri} className="flex items-start gap-1 leading-tight" style={{ fontSize: 13, color: '#15803d' }}>
+                          <p key={ri} className="flex items-start gap-1 leading-tight text-[13px]" style={{ color: '#15803d' }}>
                             <span className="flex-shrink-0 font-bold">✓</span>
                             <span>{r.trim()}</span>
                           </p>
                         ))}
                       </div>
                       {!alt.plant.dataComplete && (
-                        <p className="text-[11px] text-amber-600 mt-1">⚠ 資料初步判定</p>
+                        <p className="text-[12px] text-amber-600 mt-1">⚠ 資料初步判定</p>
                       )}
                     </div>
                   </div>
@@ -860,14 +881,14 @@ function RatingBar({ label, score, max = 5 }: { label: string; score: number; ma
   const tips = RATING_TOOLTIP[label] ?? []
   return (
     <div className="flex items-center gap-2">
-      <span className="text-[11px] text-stone-500 font-semibold w-6 flex-shrink-0 leading-none">{label}</span>
+      <span className="text-[12px] text-stone-500 font-semibold w-7 flex-shrink-0 leading-none">{label}</span>
       <div className="flex gap-[3px]">
         {Array.from({ length: max }, (_, i) => {
           const tipText = score > 0 && i === score - 1 && tips[i] ? `${label}：${tips[i]}` : undefined
           return (
             <div key={i}
               title={tipText}
-              className={`w-4 h-4 rounded-[3px] transition-colors cursor-default ${
+              className={`w-5 h-[18px] rounded-[3px] transition-colors cursor-default ${
                 score === 0 ? 'bg-stone-100' :
                 i < score ? 'bg-green-400 hover:bg-green-500' : 'bg-stone-200'
               }`}
@@ -2370,42 +2391,48 @@ export default function LandscapeAdvisorPage({
     <div className="min-h-screen" style={{ background: 'radial-gradient(circle at 85% 15%, rgba(121,190,140,0.16) 0%, transparent 30%), radial-gradient(circle at 20% 85%, rgba(183,220,190,0.18) 0%, transparent 35%), linear-gradient(135deg, #f7faf5 0%, #eef6ef 48%, #e5f1e8 100%)' }}>
       {/* Header */}
       <header className="bg-[#1a4731] sticky top-0 z-40 shadow-md">
-        <div className="max-w-[1536px] mx-auto px-4 md:px-8 h-14 md:h-16 flex items-center justify-between gap-2 md:gap-4">
-          {/* 標題 */}
-          <div className="flex items-center gap-2.5 flex-shrink-0 min-w-0">
-            <svg viewBox="0 0 32 32" className="h-8 w-8 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-              <path d="M16 1L28 5V18C28 26 22.5 30.5 16 32C9.5 30.5 4 26 4 18V5Z"
-                    fill="white" fillOpacity="0.1" stroke="white" strokeWidth="1.5" strokeOpacity="0.5" strokeLinejoin="round"/>
-              <polygon points="16,8 20.5,14.5 11.5,14.5" fill="white"/>
-              <polygon points="16,12 22,21.5 10,21.5" fill="white" opacity="0.9"/>
-              <rect x="14.5" y="21.5" width="3" height="3.5" rx="0.5" fill="white" opacity="0.75"/>
-              <polyline points="20,23 22,26 26.5,21" fill="none" stroke="#86efac" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/>
-            </svg>
-            <div className="min-w-0">
-              <h1 className="text-sm md:text-base font-bold text-white leading-tight tracking-wide truncate">景觀 AI 設計審查顧問 2.0</h1>
-              <p className="text-[10px] md:text-xs text-green-200/70 leading-tight hidden sm:block">植栽配置相容性・養護風險・審查回覆</p>
+        <div className="max-w-[1536px] mx-auto px-4 md:px-8 h-14 md:h-[68px] flex items-center justify-between">
+          {/* 左側：Logo + Tab navigation */}
+          <div className="flex items-center gap-4 md:gap-6 flex-shrink-0 min-w-0">
+            {/* Logo + 標題 */}
+            <div className="flex items-center gap-2.5 flex-shrink-0 min-w-0">
+              <svg viewBox="0 0 32 32" className="h-8 w-8 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                <path d="M16 1L28 5V18C28 26 22.5 30.5 16 32C9.5 30.5 4 26 4 18V5Z"
+                      fill="white" fillOpacity="0.1" stroke="white" strokeWidth="1.5" strokeOpacity="0.5" strokeLinejoin="round"/>
+                <polygon points="16,8 20.5,14.5 11.5,14.5" fill="white"/>
+                <polygon points="16,12 22,21.5 10,21.5" fill="white" opacity="0.9"/>
+                <rect x="14.5" y="21.5" width="3" height="3.5" rx="0.5" fill="white" opacity="0.75"/>
+                <polyline points="20,23 22,26 26.5,21" fill="none" stroke="#86efac" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+              <div className="min-w-0">
+                <h1 className="text-sm md:text-base font-bold text-white leading-tight tracking-wide truncate">景觀 AI 設計審查顧問 2.0</h1>
+                <p className="text-[10px] md:text-xs text-green-200/70 leading-tight hidden sm:block">植栽配置相容性・養護風險・審查回覆</p>
+              </div>
             </div>
-          </div>
 
-          {/* Tab navigation — 桌機顯示 */}
-          {onTabChange && (
-            <div className="hidden md:flex items-center bg-[#0f2d1d] rounded-xl p-1 gap-0.5">
-              {([
-                { id: 'pdf'       as const, label: 'PDF 審圖' },
-                { id: 'landscape' as const, label: 'AI 配植評估' },
-                { id: 'dxf'       as const, label: 'DXF 審查' },
-              ]).map(t => (
-                <button key={t.id} onClick={() => onTabChange(t.id)}
-                  className={`px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
-                    activeTab === t.id
-                      ? 'bg-[#2d6a4f] text-white shadow-sm'
-                      : 'text-green-300/80 hover:text-white hover:bg-[#1a4731]'
-                  }`}>
-                  {t.label}
-                </button>
-              ))}
-            </div>
-          )}
+            {/* Tab navigation — 桌機顯示，緊鄰 Logo */}
+            {onTabChange && (
+              <div className="hidden md:flex items-center bg-white rounded-xl p-1 gap-0.5 flex-shrink-0">
+                {([
+                  { id: 'pdf'       as const, label: 'PDF 審圖' },
+                  { id: 'landscape' as const, label: 'AI 配植評估' },
+                  { id: 'dxf'       as const, label: 'DXF 審查' },
+                ]).map(t => (
+                  <button key={t.id} onClick={() => onTabChange(t.id)}
+                    className={`relative px-5 py-2.5 rounded-lg text-[15px] font-semibold transition-colors whitespace-nowrap ${
+                      activeTab === t.id
+                        ? 'bg-[#1a4731] text-white shadow-sm'
+                        : 'text-[#1a4731] hover:bg-green-50'
+                    }`}>
+                    {t.label}
+                    {activeTab === t.id && (
+                      <span className="absolute bottom-1.5 left-4 right-4 h-[2.5px] rounded-full bg-[#4ade80]" />
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
 
           {/* 桌機版工具列 */}
           <div className="hidden md:flex items-center gap-2">
@@ -2902,22 +2929,22 @@ export default function LandscapeAdvisorPage({
                           <p className="text-sm font-semibold text-stone-800 tracking-wide">{title}</p>
                         </div>
                         <div className="p-5">
-                          <p className="text-sm text-stone-600 leading-relaxed">{ai || '（無建議）'}</p>
+                          <p className="text-[16px] text-stone-600 leading-[1.85]">{ai || '（無建議）'}</p>
                         </div>
                       </div>
                       {plan.length > 0 && (
                         <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
                           <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
-                            <p className="text-sm font-semibold text-stone-800 tracking-wide">配置調整方案</p>
+                            <p className="text-[15px] font-semibold text-stone-800 tracking-wide">配置調整方案</p>
                           </div>
                           <div className="p-5">
-                            <ul className="space-y-2.5">
+                            <ul className="space-y-3">
                               {plan.map((p, i) => (
                                 <li key={i} className="flex items-start gap-3">
-                                  <div className="w-5 h-5 rounded-full bg-green-100 flex items-center justify-center flex-shrink-0 mt-0.5">
-                                    <span className="text-xs font-bold text-green-700">{i + 1}</span>
+                                  <div className="w-6 h-6 rounded-full bg-green-100 flex items-center justify-center flex-shrink-0 mt-0.5">
+                                    <span className="text-[13px] font-bold text-green-700">{i + 1}</span>
                                   </div>
-                                  <p className="text-sm text-stone-600 leading-relaxed">{p}</p>
+                                  <p className="text-[16px] text-stone-600 leading-[1.85]">{p}</p>
                                 </li>
                               ))}
                             </ul>
@@ -2930,7 +2957,7 @@ export default function LandscapeAdvisorPage({
                         </div>
                         <div className="p-5 space-y-3">
                           <div className="bg-stone-50 rounded-xl p-4 border border-stone-100 max-h-64 overflow-y-auto">
-                            <p className="text-sm text-stone-700 leading-[1.9] whitespace-pre-line">{rev || '（無審查回覆）'}</p>
+                            <p className="text-[16px] text-stone-700 leading-[1.9] whitespace-pre-line">{rev || '（無審查回覆）'}</p>
                           </div>
                           {!activeZone && (
                             <div className="flex gap-3">
