@@ -2418,8 +2418,8 @@ export default function LandscapeAdvisorPage({
   const activeIssues = result?.issues.filter(i => i.level !== 'ok') ?? []
 
   return (
-    <div className="min-h-screen" style={{ background: 'radial-gradient(circle at 85% 15%, rgba(121,190,140,0.16) 0%, transparent 30%), radial-gradient(circle at 20% 85%, rgba(183,220,190,0.18) 0%, transparent 35%), linear-gradient(135deg, #f7faf5 0%, #eef6ef 48%, #e5f1e8 100%)' }}>
-      {/* Header */}
+    <>
+      {/* Header — 永遠顯示，所有分頁共用 */}
       <header className="bg-[#1a4731] sticky top-0 z-40 shadow-md">
         <div className="max-w-[1536px] mx-auto px-4 md:px-8 h-14 md:h-[68px] flex items-center justify-between">
           {/* 左側：Logo + Tab navigation */}
@@ -2571,6 +2571,9 @@ export default function LandscapeAdvisorPage({
           <div className="fixed inset-0 z-40" onClick={() => setShowMobileTools(false)} />
         )}
       </header>
+
+      {/* 主體內容 — 只在 AI 配植評估分頁顯示 */}
+      {activeTab === 'landscape' && <div className="min-h-screen" style={{ background: 'radial-gradient(circle at 85% 15%, rgba(121,190,140,0.16) 0%, transparent 30%), radial-gradient(circle at 20% 85%, rgba(183,220,190,0.18) 0%, transparent 35%), linear-gradient(135deg, #f7faf5 0%, #eef6ef 48%, #e5f1e8 100%)' }}>
 
       {/* No DB banner (outside main grid so it stays at top) */}
       {dbStatus === 'empty' && (
@@ -3120,6 +3123,7 @@ export default function LandscapeAdvisorPage({
       {showCsvImport && (
         <CsvImportModal onClose={() => setShowCsvImport(false)} onImported={handleCsvImported} />
       )}
-    </div>
+    </div>}
+    </>
   )
 }

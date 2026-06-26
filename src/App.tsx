@@ -23,27 +23,31 @@ export default function App() {
 
   return (
     <>
+      {/* LandscapeAdvisorPage 永遠掛載，其 Header 作為全系統共用 Header */}
+      <LandscapeAdvisorPage
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        importedPlantNames={importedPlantNames.length > 0 ? importedPlantNames : undefined}
+        onImportConsumed={() => setImportedPlantNames([])}
+      />
+      {/* PDF / DXF 頁面的內容渲染在共用 Header 下方 */}
       {activeTab === 'pdf' && (
-        <PdfReviewPage
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
-          onImport={handlePdfImport}
-        />
-      )}
-      {activeTab === 'landscape' && (
-        <LandscapeAdvisorPage
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
-          importedPlantNames={importedPlantNames.length > 0 ? importedPlantNames : undefined}
-          onImportConsumed={() => setImportedPlantNames([])}
-        />
+        <div className="pt-14 md:pt-[68px]">
+          <PdfReviewPage
+            activeTab={activeTab}
+            onTabChange={setActiveTab}
+            onImport={handlePdfImport}
+          />
+        </div>
       )}
       {activeTab === 'dxf' && (
-        <DxfReviewPage
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
-          onImport={handleDxfImport}
-        />
+        <div className="pt-14 md:pt-[68px]">
+          <DxfReviewPage
+            activeTab={activeTab}
+            onTabChange={setActiveTab}
+            onImport={handleDxfImport}
+          />
+        </div>
       )}
     </>
   )
