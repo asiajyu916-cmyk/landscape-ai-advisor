@@ -1964,6 +1964,8 @@ export default function LandscapeAdvisorPage({
   const [showCsvImport, setShowCsvImport] = useState(false)
   const [copyDone, setCopyDone] = useState(false)
   const [activeReviewTab, setActiveReviewTab] = useState<'overview'|'categories'|'issues'|'alternatives'|'summary'>('overview')
+  const [showMobileTools, setShowMobileTools] = useState(false)
+  const [aiSuggestionExpanded, setAiSuggestionExpanded] = useState(false)
   // Initialize imageStore directly from localStorage (lazy init avoids useEffect delay)
   const [imageStore, setImageStore] = useState<ImageStore>(() => loadImageStore())
 
@@ -2099,15 +2101,16 @@ export default function LandscapeAdvisorPage({
     <div className="min-h-screen" style={{ background: 'radial-gradient(circle at 85% 15%, rgba(121,190,140,0.16) 0%, transparent 30%), radial-gradient(circle at 20% 85%, rgba(183,220,190,0.18) 0%, transparent 35%), linear-gradient(135deg, #f7faf5 0%, #eef6ef 48%, #e5f1e8 100%)' }}>
       {/* Header */}
       <header className="bg-[#1a4731] sticky top-0 z-40 shadow-md">
-        <div className="max-w-[1536px] mx-auto px-8 h-16 flex items-center justify-between gap-4">
-          <div className="flex-shrink-0">
-            <h1 className="text-base font-bold text-white leading-tight tracking-wide">景觀 AI 設計審查顧問 2.0</h1>
-            <p className="text-xs text-green-200/70 leading-tight">植栽配置相容性・養護風險・審查回覆</p>
+        <div className="max-w-[1536px] mx-auto px-4 md:px-8 h-14 md:h-16 flex items-center justify-between gap-2 md:gap-4">
+          {/* 標題 */}
+          <div className="flex-shrink-0 min-w-0">
+            <h1 className="text-sm md:text-base font-bold text-white leading-tight tracking-wide truncate">景觀 AI 設計審查顧問 2.0</h1>
+            <p className="text-[10px] md:text-xs text-green-200/70 leading-tight hidden sm:block">植栽配置相容性・養護風險・審查回覆</p>
           </div>
 
-          {/* ── Tab navigation (only when hosted inside App) ── */}
+          {/* Tab navigation — 桌機顯示 */}
           {onTabChange && (
-            <div className="flex items-center bg-[#0f2d1d] rounded-xl p-1 gap-0.5">
+            <div className="hidden md:flex items-center bg-[#0f2d1d] rounded-xl p-1 gap-0.5">
               {([
                 { id: 'pdf'       as const, label: 'PDF 審圖' },
                 { id: 'landscape' as const, label: 'AI 配植評估' },
@@ -2125,8 +2128,8 @@ export default function LandscapeAdvisorPage({
             </div>
           )}
 
-          <div className="flex items-center gap-2">
-            {/* DB status chip */}
+          {/* 桌機版工具列 */}
+          <div className="hidden md:flex items-center gap-2">
             <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border ${
               dbStatus === 'loaded' ? 'bg-green-800/40 text-green-200 border-green-700/50'
               : dbStatus === 'loading' ? 'bg-white/10 text-white/60 border-white/20'
@@ -2136,8 +2139,6 @@ export default function LandscapeAdvisorPage({
                dbStatus === 'loading' ? <><RefreshCw size={11} className="animate-spin" />載入中…</> :
                <><AlertTriangle size={11} />未載入資料庫</>}
             </div>
-
-            {/* 資料管理群組 */}
             <div className="flex items-center gap-1.5 border-l border-white/20 pl-2">
               <button onClick={() => setShowCsvImport(true)}
                 className="flex items-center gap-1.5 px-3 py-1.5 bg-white/10 border border-white/20 rounded-lg text-xs text-white hover:bg-white/20 transition-colors font-medium">
@@ -2150,8 +2151,6 @@ export default function LandscapeAdvisorPage({
                 <Database size={12} />植栽資料庫
               </button>
             </div>
-
-            {/* 報告輸出群組 */}
             <div className="flex items-center gap-1.5 border-l border-white/20 pl-2">
               <button onClick={handleExportPdf} disabled={!result}
                 className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
@@ -2167,7 +2166,70 @@ export default function LandscapeAdvisorPage({
               </button>
             </div>
           </div>
+
+          {/* 手機版右側：模式切換 + 工具下拉 */}
+          <div className="flex md:hidden items-center gap-2">
+            {/* 手機版 tab 切換 */}
+            {onTabChange && (
+              <div className="flex items-center bg-[#0f2d1d] rounded-lg p-0.5 gap-0.5">
+                {([
+                  { id: 'pdf' as const, label: 'PDF' },
+                  { id: 'landscape' as const, label: 'AI' },
+                  { id: 'dxf' as const, label: 'DXF' },
+                ]).map(t => (
+                  <button key={t.id} onClick={() => onTabChange(t.id)}
+                    className={`px-2.5 py-2 rounded-md text-xs font-medium transition-colors min-w-[44px] ${
+                      activeTab === t.id ? 'bg-[#2d6a4f] text-white' : 'text-green-300/80 hover:text-white'
+                    }`}>
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+            )}
+            {/* 工具下拉按鈕 */}
+            <div className="relative">
+              <button onClick={() => setShowMobileTools(v => !v)}
+                className="flex items-center gap-1.5 px-3 py-2 bg-white/10 border border-white/20 rounded-lg text-xs text-white font-medium min-h-[44px]">
+                <ChevronDown size={14} className={`transition-transform ${showMobileTools ? 'rotate-180' : ''}`} />
+                工具
+              </button>
+              {showMobileTools && (
+                <div className="absolute right-0 top-12 z-50 w-52 bg-[#1a4731] border border-white/20 rounded-2xl shadow-xl overflow-hidden">
+                  <div className="p-1 space-y-0.5">
+                    <div className={`flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium ${
+                      dbStatus === 'loaded' ? 'text-green-200' : 'text-amber-200'
+                    }`}>
+                      {dbStatus === 'loaded' ? <CheckCircle size={14} /> : <AlertTriangle size={14} />}
+                      {dbStatus === 'loaded' ? `${allPlants.length} 筆植栽資料庫` : '未載入資料庫'}
+                    </div>
+                    <button onClick={() => { setShowDb(true); setShowMobileTools(false) }} disabled={allPlants.length === 0}
+                      className="w-full flex items-center gap-2 px-3 py-3 rounded-lg text-sm text-white hover:bg-white/10 transition-colors text-left min-h-[44px]">
+                      <Database size={14} />植栽資料庫
+                    </button>
+                    <button onClick={() => { setShowCsvImport(true); setShowMobileTools(false) }}
+                      className="w-full flex items-center gap-2 px-3 py-3 rounded-lg text-sm text-white hover:bg-white/10 transition-colors text-left min-h-[44px]">
+                      <Upload size={14} />匯入 CSV
+                    </button>
+                    <div className="h-px bg-white/10 mx-2" />
+                    <button onClick={() => { handleExportPdf(); setShowMobileTools(false) }} disabled={!result}
+                      className={`w-full flex items-center gap-2 px-3 py-3 rounded-lg text-sm transition-colors text-left min-h-[44px] ${result ? 'text-[#d8f3dc] hover:bg-white/10' : 'text-white/30 cursor-not-allowed'}`}>
+                      <FileOutput size={14} />匯出 PDF 報告
+                    </button>
+                    <button onClick={() => { handleExport(); setShowMobileTools(false) }} disabled={!result}
+                      className={`w-full flex items-center gap-2 px-3 py-3 rounded-lg text-sm transition-colors text-left min-h-[44px] ${result ? 'text-white hover:bg-white/10' : 'text-white/30 cursor-not-allowed'}`}>
+                      <FileDown size={14} />匯出 TXT
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
+
+        {/* 手機版點外部關閉下拉 */}
+        {showMobileTools && (
+          <div className="fixed inset-0 z-40" onClick={() => setShowMobileTools(false)} />
+        )}
       </header>
 
       {/* No DB banner (outside main grid so it stays at top) */}
@@ -2187,11 +2249,11 @@ export default function LandscapeAdvisorPage({
         </div>
       )}
 
-      {/* Main — fixed two-column, each side scrolls independently */}
-      <div style={{ height: 'calc(100vh - 64px)', display: 'grid', gridTemplateColumns: '400px 1fr', gap: '0', overflow: 'hidden' }}>
+      {/* Main — 手機單欄；桌機雙欄固定高度各自滾動 */}
+      <div className="flex flex-col md:flex-row md:h-[calc(100vh-64px)] md:overflow-hidden">
 
         {/* ── Left: 植栽組合 ── */}
-        <div style={{ overflowY: 'auto', borderRight: '1px solid #e7e5e4' }} className="p-5 space-y-4 bg-[#f7f5f0]">
+        <div className="md:w-[400px] md:flex-shrink-0 md:overflow-y-auto border-b md:border-b-0 md:border-r border-stone-200 p-5 space-y-4 bg-[#f7f5f0]">
           {/* Header row */}
           <div className="flex items-center justify-between">
             <p className="text-sm font-semibold text-stone-800 tracking-wide">
@@ -2230,7 +2292,7 @@ export default function LandscapeAdvisorPage({
           {/* Evaluate button — stays in left panel */}
           <div className="sticky bottom-0 pb-2 pt-1 bg-[#f7f5f0]">
             <button onClick={() => { setResult(evaluate(selectedPlants, allPlants)); setActiveReviewTab('overview') }} disabled={selectedPlants.length === 0}
-              className={`w-full py-3.5 rounded-2xl text-sm font-bold transition-all ${
+              className={`w-full py-3.5 rounded-2xl text-sm font-bold transition-all min-h-[44px] ${
                 selectedPlants.length > 0 ? 'bg-[#1a4731] text-white hover:bg-[#2d6a4f] shadow-md' : 'bg-stone-100 text-stone-400 cursor-not-allowed'
               }`}>
               {result ? '重新執行 AI 配植評估' : 'AI 配植評估'}
@@ -2239,7 +2301,7 @@ export default function LandscapeAdvisorPage({
         </div>
 
         {/* ── Right: 評估結果 ── */}
-        <div style={{ overflowY: 'auto' }} className="p-5 bg-[#f7f5f0]">
+        <div className="flex-1 md:overflow-y-auto p-5 bg-[#f7f5f0]">
           {!result ? (
             /* Empty state */
             <div className="border border-stone-200/80 rounded-2xl flex flex-col items-center justify-center py-28 text-center px-8 shadow-sm h-full max-h-[600px]" style={{ background: 'radial-gradient(circle at top right, rgba(111,168,120,0.10) 0%, transparent 32%), linear-gradient(145deg, #ffffff 0%, #fbfdfb 55%, #f3faf5 100%)' }}>
@@ -2310,9 +2372,17 @@ export default function LandscapeAdvisorPage({
                           <p className="text-sm font-bold text-stone-800">{result.compatLevel}</p>
                         </div>
                       </div>
-                      <div className="bg-stone-50 border border-stone-200 rounded-xl p-4">
-                        <p className="text-xs font-semibold text-stone-600 mb-1">AI 核心建議</p>
-                        <p className="text-sm text-stone-700 leading-relaxed">{result.aiSuggestion}</p>
+                      {/* AI 核心建議 — 手機預設收合，桌機展開 */}
+                      <div className="bg-stone-50 border border-stone-200 rounded-xl overflow-hidden">
+                        <button
+                          onClick={() => setAiSuggestionExpanded(v => !v)}
+                          className="w-full flex items-center justify-between px-4 py-3 text-left md:cursor-default min-h-[44px]">
+                          <p className="text-xs font-semibold text-stone-600">AI 核心建議</p>
+                          <ChevronDown size={15} className={`text-stone-400 transition-transform md:hidden ${aiSuggestionExpanded ? 'rotate-180' : ''}`} />
+                        </button>
+                        <div className={`px-4 pb-4 ${aiSuggestionExpanded ? 'block' : 'hidden md:block'}`}>
+                          <p className="text-sm text-stone-700 leading-relaxed">{result.aiSuggestion}</p>
+                        </div>
                       </div>
                     </div>
                   )}
