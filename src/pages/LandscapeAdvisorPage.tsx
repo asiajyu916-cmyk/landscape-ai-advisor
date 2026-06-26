@@ -2375,41 +2375,227 @@ export default function LandscapeAdvisorPage({
     if (!result || pdfGenerating) return
     setPdfGenerating(true)
     setPdfGenError(null)
+    let reportEl: HTMLDivElement | null = null
     try {
-      console.log('[PDF] 開始產生 HTML...')
-      const html = exportReviewReportPdf(selectedPlants, result, { reviewType: 'AI 配植評估' }, { returnHtml: true }) as string
-      if (!html) { console.error('[PDF] HTML 為空'); setPdfGenError('PDF 產生失敗，請查看 Console'); return }
-      console.log('[PDF] HTML 長度:', html.length)
+      // ── Step 1: 建立專用報告 HTML ──
+      const now = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })
+      const scoreClr = result.score >= 80 ? '#15803d' : result.score >= 60 ? '#d97706' : '#dc2626'
+      const riskLabel = result.score >= 80 ? '低風險' : result.score >= 60 ? '中風險' : '高風險'
+      const dangerCount = result.issues.filter(i => i.level === 'danger').length
+      const activeIssues = result.issues.filter(i => i.level !== 'ok')
+      const esc = (s: string) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
 
-      // 取出 <style> 與 <body> 內容，注入隱藏 div 供 html2canvas 渲染
-      const styleBlocks = html.match(/<style[^>]*>[\s\S]*?<\/style>/gi) ?? []
-      const bodyMatch = html.match(/<body[^>]*>([\s\S]*)<\/body>/i)
-      const bodyContent = bodyMatch?.[1] ?? html
+      const reportHtml = `
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Microsoft JhengHei','微軟正黑體','Noto Sans TC',Arial,sans-serif;background:#fff;color:#1c1917;font-size:13px;line-height:1.7;width:794px}
+.cover-hdr{background:#1a4731;padding:36px 50px 28px;display:flex;align-items:center;gap:18px}
+.cover-hdr-text h1{color:#fff;font-size:22px;font-weight:900;margin-bottom:4px}
+.cover-hdr-text p{color:#86efac;font-size:13px}
+.cover-body{padding:36px 50px}
+.meta-box{background:#f7faf5;border:1px solid #d4e8d4;border-radius:10px;padding:24px;margin-bottom:24px}
+.meta-row{display:flex;gap:16px;margin-bottom:8px;font-size:12px}
+.meta-lbl{color:#57534e;width:90px;flex-shrink:0}
+.meta-val{color:#1c1917;font-weight:700}
+.score-row{display:flex;align-items:center;gap:24px;padding:18px;background:#f7faf5;border-radius:10px;margin-bottom:28px}
+.score-circle{width:70px;height:70px;border-radius:50%;border:5px solid;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.score-num{font-size:26px;font-weight:900}
+.score-info-lbl{font-size:11px;color:#57534e}
+.score-info-val{font-size:20px;font-weight:900;margin-top:2px}
+.ai-summary{font-size:12px;color:#44403c;line-height:1.8;margin-top:6px}
+.kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:28px}
+.kpi{background:#f7faf5;border:1px solid #d4e8d4;border-radius:8px;padding:14px;text-align:center}
+.kpi-v{font-size:28px;font-weight:900;line-height:1}
+.kpi-l{font-size:11px;color:#57534e;margin-top:3px}
+.sec-hdr{background:#1a4731;color:#fff;padding:9px 18px;font-size:13px;font-weight:700;border-radius:6px 6px 0 0;margin-top:24px}
+.sec-body{border:1px solid #d4e8d4;border-top:none;border-radius:0 0 6px 6px;padding:18px}
+.issue{border:1px solid #e7e5e4;border-radius:8px;padding:14px;margin-bottom:10px}
+.issue.danger{border-left:4px solid #dc2626}
+.issue.caution{border-left:4px solid #d97706}
+.i-title{font-size:14px;font-weight:700;margin-bottom:6px}
+.badge{display:inline-block;padding:2px 10px;border-radius:99px;font-size:11px;font-weight:700;margin-bottom:8px}
+.b-d{background:#fef2f2;color:#dc2626}.b-c{background:#fffbeb;color:#d97706}
+.i-lbl{font-size:11px;color:#57534e;font-weight:700;margin-top:8px;margin-bottom:3px}
+.i-txt{font-size:12px;color:#44403c;line-height:1.75}
+table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:8px}
+th{background:#1a4731;color:#fff;padding:8px 12px;text-align:left;font-size:12px;font-weight:700}
+td{padding:8px 12px;border-bottom:1px solid #e7e5e4;vertical-align:top}
+tr:nth-child(even) td{background:#f7faf5}
+.alt-orig{font-size:13px;font-weight:700;color:#1a4731;margin-bottom:8px}
+.plan-item{display:flex;gap:10px;margin-bottom:8px;padding:10px;background:#f7faf5;border-radius:6px}
+.plan-num{width:22px;height:22px;background:#1a4731;color:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0}
+.plan-txt{font-size:12px;color:#44403c;line-height:1.75}
+.review-box{font-size:12px;color:#44403c;line-height:1.9;white-space:pre-line;padding:14px;background:#f7faf5;border-radius:6px;border:1px solid #d4e8d4}
+.footer{text-align:center;padding:14px;color:#78716c;font-size:10px;border-top:1px solid #e7e5e4;margin-top:20px}
+</style>
 
-      const el = document.createElement('div')
-      el.style.cssText = 'width:794px;position:fixed;left:-9999px;top:0;background:#fff;'
-      el.innerHTML = styleBlocks.join('') + bodyContent
-      el.querySelectorAll('.print-btn').forEach(n => n.remove()) // 移除列印按鈕
-      document.body.appendChild(el)
+<div class="cover-hdr">
+  <svg width="44" height="44" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+    <path d="M16 1L28 5V18C28 26 22.5 30.5 16 32C9.5 30.5 4 26 4 18V5Z" fill="rgba(255,255,255,0.15)" stroke="white" stroke-width="1.5"/>
+    <polygon points="16,8 20.5,14.5 11.5,14.5" fill="white"/>
+    <polygon points="16,12 22,21.5 10,21.5" fill="white" opacity="0.9"/>
+    <rect x="14.5" y="21.5" width="3" height="3.5" rx="0.5" fill="white" opacity="0.75"/>
+    <polyline points="20,23 22,26 26.5,21" fill="none" stroke="#86efac" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>
+  <div class="cover-hdr-text">
+    <h1>景觀 AI 設計審查顧問 2.0</h1>
+    <p>植栽配置評估報告　｜　AI 配植評估</p>
+  </div>
+</div>
 
-      console.log('[PDF] 載入 html2pdf...')
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const html2pdf = (await import('html2pdf.js' as any)).default ?? (await import('html2pdf.js' as any))
-      console.log('[PDF] 開始渲染並儲存...')
-      await html2pdf().set({
-        margin: [8, 8, 8, 8],
-        filename: '景觀AI設計審查報告.pdf',
-        image: { type: 'jpeg', quality: 0.92 },
-        html2canvas: { scale: 2, useCORS: true, logging: false },
-        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-        pagebreak: { mode: ['css', 'legacy'] },
-      }).from(el).save()
+<div class="cover-body">
+  <div class="meta-box">
+    <div class="meta-row"><span class="meta-lbl">產生時間</span><span class="meta-val">${esc(now)}</span></div>
+    <div class="meta-row"><span class="meta-lbl">審查植栽</span><span class="meta-val">${selectedPlants.length} 種</span></div>
+    <div class="meta-row"><span class="meta-lbl">總評分</span><span class="meta-val" style="color:${scoreClr}">${result.score} / 100（${riskLabel}）</span></div>
+    <div class="meta-row"><span class="meta-lbl">主要問題</span><span class="meta-val">${activeIssues.length} 項</span></div>
+    <div class="meta-row"><span class="meta-lbl">高風險問題</span><span class="meta-val" style="color:${dangerCount>0?'#dc2626':'#15803d'}">${dangerCount} 項</span></div>
+  </div>
 
-      document.body.removeChild(el)
-      console.log('[PDF] 下載完成')
+  <div class="score-row">
+    <div class="score-circle" style="border-color:${scoreClr}">
+      <span class="score-num" style="color:${scoreClr}">${result.score}</span>
+    </div>
+    <div>
+      <div class="score-info-lbl">植栽配置相容性評分</div>
+      <div class="score-info-val" style="color:${scoreClr}">${esc(result.compatLevel)}</div>
+      ${result.aiSuggestion ? `<div class="ai-summary">${esc(result.aiSuggestion.slice(0,120))}</div>` : ''}
+    </div>
+  </div>
+
+  <div class="kpi-grid">
+    <div class="kpi"><div class="kpi-v" style="color:${scoreClr}">${result.score}</div><div class="kpi-l">配置相容性總分</div></div>
+    <div class="kpi"><div class="kpi-v" style="color:${activeIssues.length>0?'#d97706':'#57534e'}">${activeIssues.length}</div><div class="kpi-l">主要問題</div></div>
+    <div class="kpi"><div class="kpi-v" style="color:${dangerCount>0?'#dc2626':'#57534e'}">${dangerCount}</div><div class="kpi-l">高風險問題</div></div>
+    <div class="kpi"><div class="kpi-v" style="color:#1a4731">${selectedPlants.length}</div><div class="kpi-l">審查植栽種數</div></div>
+  </div>
+
+  ${activeIssues.length > 0 ? `
+  <div class="sec-hdr">問題明細（${activeIssues.length} 項）</div>
+  <div class="sec-body">
+    ${activeIssues.map(issue => `
+    <div class="issue ${issue.level}">
+      <div class="i-title">${esc(issue.category)}</div>
+      <span class="badge ${issue.level==='danger'?'b-d':'b-c'}">${issue.level==='danger'?'高風險':'需注意'}</span>
+      <div class="i-lbl">問題原因</div><div class="i-txt">${esc(issue.cause)}</div>
+      <div class="i-lbl">實務影響</div><div class="i-txt">${esc(issue.impact)}</div>
+      <div class="i-lbl">修正建議</div><div class="i-txt">${esc(issue.suggestion)}</div>
+    </div>`).join('')}
+  </div>` : ''}
+
+  ${result.alternatives.length > 0 ? `
+  <div class="sec-hdr">替代植栽建議</div>
+  <div class="sec-body">
+    ${result.alternatives.map(alt => `
+    <div style="margin-bottom:16px">
+      <div class="alt-orig">原植栽：${esc(alt.originalPlant.name)}（${esc(alt.originalPlant.subCategory||alt.originalPlant.category)}）</div>
+      ${alt.alternatives.length>0 ? `
+      <table>
+        <thead><tr><th>建議替代</th><th>植栽類型</th><th>推薦原因</th></tr></thead>
+        <tbody>${alt.alternatives.map(a=>`
+        <tr><td><strong>${esc(a.plant.name)}</strong></td><td>${esc(a.plant.subCategory||a.plant.category)}</td><td>${esc(a.riskReduction)}</td></tr>`).join('')}</tbody>
+      </table>` : `<div style="color:#d97706;font-size:12px">目前無同類型高相容替代植栽</div>`}
+    </div>`).join('')}
+  </div>` : ''}
+
+  ${result.adjustmentPlan.length>0||result.reviewText ? `
+  <div class="sec-hdr">總結建議</div>
+  <div class="sec-body">
+    ${result.adjustmentPlan.length>0 ? `
+    <div style="margin-bottom:16px">
+      <div style="font-size:13px;font-weight:700;color:#1a4731;margin-bottom:10px">優先改善事項</div>
+      ${result.adjustmentPlan.map((p,i)=>`
+      <div class="plan-item">
+        <div class="plan-num">${i+1}</div>
+        <div class="plan-txt">${esc(p)}</div>
+      </div>`).join('')}
+    </div>` : ''}
+    ${result.reviewText ? `
+    <div style="font-size:13px;font-weight:700;color:#1a4731;margin-bottom:8px">審查回覆建議文字</div>
+    <div class="review-box">${esc(result.reviewText)}</div>` : ''}
+  </div>` : ''}
+
+  <div class="sec-hdr">審查植栽清單</div>
+  <div class="sec-body">
+    <table>
+      <thead><tr><th>#</th><th>植栽名稱</th><th>類型</th><th>日照</th><th>水分</th><th>耐旱</th><th>耐濕</th></tr></thead>
+      <tbody>${selectedPlants.map((p,i)=>`
+      <tr><td>${i+1}</td><td><strong>${esc(p.name)}</strong></td><td>${esc(p.subCategory||p.category)}</td><td>${esc(p.sunRequirement)}</td><td>${esc(p.waterRequirement)}</td><td>${esc(p.droughtTolerance)}</td><td>${esc(p.wetTolerance)}</td></tr>`).join('')}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="footer">景觀 AI 設計審查顧問 2.0　｜　植栽配置評估報告　｜　${esc(now)}</div>
+</div>`
+
+      // ── Step 2: 注入隱藏容器（放在 viewport 內，opacity 極低） ──
+      reportEl = document.createElement('div')
+      reportEl.style.cssText = 'position:fixed;top:0;left:0;width:794px;z-index:99999;pointer-events:none;opacity:0.003;background:#fff;overflow:visible;'
+      reportEl.innerHTML = reportHtml
+      document.body.appendChild(reportEl)
+      console.log('[PDF] reportEl 已附加到 body:', reportEl)
+
+      // ── Step 3: 等待字型與圖片渲染 ──
+      await new Promise(r => setTimeout(r, 1200))
+      const elH = reportEl.scrollHeight
+      console.log('[PDF] reportEl 尺寸:', reportEl.offsetWidth, 'x', elH)
+
+      if (elH === 0) throw new Error('reportEl 高度為 0，內容未渲染')
+
+      // ── Step 4: html2canvas 截圖 ──
+      const html2canvas = (await import('html2canvas')).default
+      console.log('[PDF] 開始 html2canvas...')
+      const canvas = await html2canvas(reportEl, {
+        scale: 1.5,
+        useCORS: true,
+        allowTaint: false,
+        backgroundColor: '#ffffff',
+        logging: true,
+        width: 794,
+        height: elH,
+        windowWidth: 794,
+        windowHeight: elH,
+        scrollX: 0,
+        scrollY: 0,
+      })
+      console.log('[PDF] canvas 尺寸:', canvas.width, 'x', canvas.height)
+
+      document.body.removeChild(reportEl)
+      reportEl = null
+
+      if (canvas.width === 0 || canvas.height === 0) {
+        throw new Error(`canvas 尺寸為 0 (${canvas.width}×${canvas.height})`)
+      }
+
+      // ── Step 5: 分頁轉 PDF ──
+      const { jsPDF } = await import('jspdf')
+      const PDF_W_MM = 210, PDF_H_MM = 297
+      const pdf = new jsPDF({ orientation: 'p', unit: 'mm', format: 'a4' })
+
+      const pagePixH = Math.floor(canvas.width * (PDF_H_MM / PDF_W_MM))
+      let y = 0, pageNum = 0
+
+      while (y < canvas.height) {
+        if (pageNum > 0) pdf.addPage()
+        pageNum++
+        const sliceH = Math.min(pagePixH, canvas.height - y)
+        const pc = document.createElement('canvas')
+        pc.width = canvas.width; pc.height = sliceH
+        pc.getContext('2d')!.drawImage(canvas, 0, y, canvas.width, sliceH, 0, 0, canvas.width, sliceH)
+        const imgData = pc.toDataURL('image/jpeg', 0.92)
+        console.log(`[PDF] addImage page ${pageNum}, imgData.length=${imgData.length}`)
+        pdf.addImage(imgData, 'JPEG', 0, 0, PDF_W_MM, sliceH * (PDF_W_MM / canvas.width))
+        y += pagePixH
+      }
+
+      console.log('[PDF] 共', pdf.getNumberOfPages(), '頁，開始 save()')
+      pdf.save('景觀AI設計審查報告.pdf')
+      console.log('[PDF] save() 完成')
+
     } catch (err) {
       console.error('[PDF] 產生失敗：', err)
-      setPdfGenError('PDF 產生失敗，請查看 Console')
+      setPdfGenError(`PDF 產生失敗：${err instanceof Error ? err.message : String(err)}`)
+      if (reportEl && document.body.contains(reportEl)) document.body.removeChild(reportEl)
     } finally {
       setPdfGenerating(false)
     }
