@@ -541,15 +541,33 @@ function IssueCard({ issue }: { issue: IssueDetail }) {
   )
 }
 
+function AltPlantPhoto({ name }: { name: string }) {
+  const [err, setErr] = useState(false)
+  if (err) return (
+    <div className="w-full h-full flex items-center justify-center bg-[#d8f3dc]">
+      <Leaf size={22} className="text-[#2d6a4f] opacity-40" />
+    </div>
+  )
+  return (
+    <img
+      src={`/plant-images/${encodeURIComponent(name)}.jpg`}
+      alt={name}
+      className="w-full h-full object-cover"
+      onError={() => setErr(true)}
+    />
+  )
+}
+
 function AltCard({ suggestion }: { suggestion: AltSuggestion }) {
   const [open, setOpen] = useState(true)
   const p = suggestion.originalPlant
   return (
     <div className="border border-stone-200 rounded-xl overflow-hidden">
+      {/* 標題列：原植物 + 問題標籤 */}
       <button onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center justify-between px-4 py-3 bg-stone-50 hover:bg-stone-100 transition-colors">
+        className="w-full flex items-center justify-between px-4 py-2.5 bg-stone-50 hover:bg-stone-100 transition-colors">
         <div className="flex items-center gap-2 min-w-0 flex-wrap">
-          <Leaf size={13} className="text-stone-400 flex-shrink-0" />
+          <span className="text-xs text-stone-400">替換</span>
           <span className="font-semibold text-sm text-stone-800">{p.name}</span>
           <span className={`text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0 ${CAT_COLOR[p.category] ?? 'bg-stone-100 text-stone-600'}`}>
             {p.subCategory || p.category}
@@ -560,34 +578,77 @@ function AltCard({ suggestion }: { suggestion: AltSuggestion }) {
         </div>
         {open ? <ChevronUp size={14} className="text-stone-400 flex-shrink-0 ml-2" /> : <ChevronDown size={14} className="text-stone-400 flex-shrink-0 ml-2" />}
       </button>
+
+      {/* 替代植栽 3 欄橫排 */}
       {open && (
-        <div className="p-4 space-y-3 bg-white">
-          {suggestion.alternatives.map((alt, i) => (
-            <div key={alt.plant.id} className="flex gap-3">
-              <div className="w-6 h-6 rounded-full bg-green-100 flex items-center justify-center flex-shrink-0 mt-0.5">
-                <span className="text-xs font-bold text-green-700">{i + 1}</span>
-              </div>
-              <div className="flex-1 bg-green-50 border border-green-100 rounded-xl p-3">
-                <div className="flex items-center gap-2 flex-wrap mb-1.5">
-                  <ArrowRight size={12} className="text-green-500 flex-shrink-0" />
-                  <span className="font-semibold text-stone-800 text-sm">{alt.plant.name}</span>
-                  <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${CAT_COLOR[alt.plant.category] ?? 'bg-stone-100 text-stone-600'}`}>
-                    {alt.plant.subCategory || alt.plant.category}
-                  </span>
-                  {alt.plant.scientificName && <span className="text-xs text-stone-400 italic">{alt.plant.scientificName}</span>}
+        <div className="p-3 bg-white">
+          <div className="grid grid-cols-3 gap-2.5">
+            {suggestion.alternatives.map((alt, i) => (
+              <div key={alt.plant.id}
+                className="border border-green-100 rounded-xl overflow-hidden bg-green-50/30 hover:border-green-300 hover:shadow-sm transition-all flex flex-col">
+                {/* 照片 */}
+                <div className="h-24 relative overflow-hidden flex-shrink-0 bg-[#d8f3dc]">
+                  <AltPlantPhoto name={alt.plant.name} />
+                  {/* 序號 badge */}
+                  <div className="absolute top-1.5 left-1.5 w-5 h-5 rounded-full bg-[#1a4731] flex items-center justify-center">
+                    <span className="text-[10px] font-bold text-white">{i + 1}</span>
+                  </div>
+                  {/* 類型 badge */}
+                  <div className="absolute top-1.5 right-1.5">
+                    <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-semibold shadow-sm ${CAT_COLOR[alt.plant.subCategory] ?? CAT_COLOR[alt.plant.category] ?? 'bg-stone-100 text-stone-600'}`}>
+                      {alt.plant.subCategory || alt.plant.category}
+                    </span>
+                  </div>
                 </div>
-                <div className="flex gap-3 text-xs text-stone-500 mb-2 flex-wrap">
-                  <span>日照：{alt.plant.sunRequirement}</span>
-                  <span>水分：{alt.plant.waterRequirement}</span>
-                  <span>耐濕：{alt.plant.wetTolerance}</span>
-                  <span>維護：{alt.plant.maintenanceLevel}</span>
-                  {!alt.plant.dataComplete && <span className="text-amber-600 font-medium">⚠ 資料初步判定</span>}
+
+                {/* 資訊 */}
+                <div className="p-2.5 flex-1 flex flex-col gap-1.5">
+                  <div>
+                    <p className="font-bold text-stone-800 text-sm leading-tight">{alt.plant.name}</p>
+                    {alt.plant.scientificName && (
+                      <p className="text-[10px] text-stone-400 italic truncate">{alt.plant.scientificName}</p>
+                    )}
+                  </div>
+                  {/* 重點習性 */}
+                  <div className="grid grid-cols-2 gap-1">
+                    {[
+                      { label: '日照', value: alt.plant.sunRequirement },
+                      { label: '水分', value: alt.plant.waterRequirement },
+                    ].map(item => (
+                      <div key={item.label} className="bg-white rounded px-1.5 py-1">
+                        <p className="text-[9px] text-stone-400 leading-none">{item.label}</p>
+                        <p className="text-[10px] font-semibold text-stone-700 truncate leading-tight mt-0.5">
+                          {item.value !== '待查' ? item.value : '—'}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                  {/* 替代理由 */}
+                  <p className="text-[10px] text-stone-600 leading-relaxed line-clamp-2 mt-auto">
+                    <span className="font-semibold text-green-700">↑ </span>{alt.riskReduction}
+                  </p>
+                  {!alt.plant.dataComplete && (
+                    <span className="text-[9px] text-amber-600">⚠ 資料初步判定</span>
+                  )}
                 </div>
-                <p className="text-xs text-stone-600 leading-relaxed mb-1"><span className="font-medium text-stone-500">替代理由：</span>{alt.reason}</p>
-                <p className="text-xs text-green-700 leading-relaxed"><span className="font-medium">可降低風險：</span>{alt.riskReduction}</p>
               </div>
-            </div>
-          ))}
+            ))}
+          </div>
+          {/* 詳細替代理由（收合在下方）*/}
+          {suggestion.alternatives.length > 0 && (
+            <details className="mt-2">
+              <summary className="text-xs text-stone-400 cursor-pointer select-none hover:text-stone-600">
+                查看詳細替代理由
+              </summary>
+              <div className="mt-1.5 space-y-1.5">
+                {suggestion.alternatives.map((alt, i) => (
+                  <p key={alt.plant.id} className="text-xs text-stone-600 leading-relaxed">
+                    <span className="font-semibold text-stone-700">{i+1}. {alt.plant.name}：</span>{alt.reason}
+                  </p>
+                ))}
+              </div>
+            </details>
+          )}
         </div>
       )}
     </div>
