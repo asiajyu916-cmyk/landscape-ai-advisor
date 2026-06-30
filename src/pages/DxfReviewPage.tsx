@@ -4,7 +4,7 @@ import {
   ChevronDown, X, ArrowRight, Layers, Trash2, BookOpen, Table2, FileOutput, FileDown,
 } from 'lucide-react'
 import { parseDxf, detectPlantSchedule, findNearbyTexts } from '@/utils/dxfParser'
-import { analyzeMultiLayer, zoneLabel, detectZonesFromText, buildZonePlantList, buildZoneAssignDebug, polygonBBox } from '@/utils/spatialAnalysis'
+import { analyzeMultiLayer, zoneLabel, detectZonesFromText, buildZonePlantList, buildZoneAssignDebug, polygonBBox, pointInPolygon } from '@/utils/spatialAnalysis'
 import type { ZoneAssignDebug } from '@/utils/spatialAnalysis'
 import { exportZoneReviewPdf } from '@/utils/exportReviewPdf'
 import type { ZoneReviewPdfData } from '@/utils/exportReviewPdf'
@@ -39,6 +39,8 @@ function detectBlockType(blockName: string, layer: string): string {
   return ''
 }
 
+export type PlantSourceType = 'saved_rule' | 'block' | 'attribute' | 'legend' | 'text' | 'unidentified'
+
 interface MatchResult {
   plant: CsvPlantRecord | null
   status: MatchStatus
@@ -48,8 +50,19 @@ interface MatchResult {
   detectedType: string
   possiblePlantCode: string
   evidence: string[]
+  sourceType: PlantSourceType
+  detectedPlantName: string  // 最終辨識的植物名稱（可能不在 DB 中）
 }
 
+// ── 植栽辨識優先順序 ──────────────────────────────────────────────────────────
+// 1. 已儲存規則（使用者確認過）
+// 2. Block Attribute（ATTRIB 實體，直接連結到 INSERT）
+// 3. Block Name（中文 / 代號 / 英文含植物名）
+// 4. Legend（植栽索引表）比對代號或名稱
+// 5. 附近文字（鄰近標註）
+// 6. 未辨識植栽（Layer 不作為植栽名稱）
+//
+// Layer 僅用於：detectBlockType（喬木/灌木/草皮 類型輔助），永遠不決定植物名稱。
 function matchPlant(
   blockName: string,
   layer: string,
@@ -58,139 +71,183 @@ function matchPlant(
   savedRules: DxfBlockRule[],
   schedule: PlantScheduleEntry[],
   nearbyTexts: string[],
+  blockAttribs: import('@/types/dxf').DxfAttrib[],
 ): MatchResult {
-  const bn  = blockName.toLowerCase().trim()
-  const ln  = layer.toLowerCase().trim()
-  const detectedType    = detectBlockType(blockName, layer)
-  const possibleCode    = extractBlockCode(blockName)
-  const ev: string[]    = []
-  if (detectedType) ev.push(detectedType)
+  const bn = blockName.toLowerCase().trim()
+  // detectBlockType 僅用 block name，layer 不參與植物名稱判斷
+  const detectedType = detectBlockType(blockName, '')
+  const possibleCode = extractBlockCode(blockName)
+  const ev: string[] = []
+  if (detectedType) ev.push(`圖塊類型推測：${detectedType}`)
 
   const ok = (
-    confidence: number, plant: CsvPlantRecord | null, reason: string,
-    sched?: PlantScheduleEntry, code = possibleCode
+    confidence: number,
+    plant: CsvPlantRecord | null,
+    reason: string,
+    sourceType: PlantSourceType,
+    detectedPlantName: string,
+    sched?: PlantScheduleEntry,
+    code = possibleCode,
   ): MatchResult => ({
-    plant, status: confidence >= 70 ? 'matched' : confidence >= 30 ? 'partial' : 'unmatched',
+    plant,
+    status: confidence >= 70 ? 'matched' : confidence >= 30 ? 'partial' : 'unmatched',
     confidence, reason, scheduleEntry: sched,
-    detectedType, possiblePlantCode: code, evidence: [...ev],
+    detectedType, possiblePlantCode: code,
+    evidence: [...ev],
+    sourceType, detectedPlantName,
   })
 
-  // ── 0. 已儲存規則（最高優先，使用者確認過）──────────────────────────────────
+  // ── P0. 已儲存規則（使用者手動確認，最高優先）───────────────────────────────
   const rule = savedRules.find(r => r.blockName === blockName)
   if (rule) {
-    const plant = plants.find(p => p.name === rule.plantName)
-    if (plant) { ev.push('已儲存規則'); return ok(95, plant, '已儲存規則') }
+    const plant = plants.find(p => p.name === rule.plantName) ?? null
+    ev.push(`已儲存規則：${rule.plantName}`)
+    return ok(95, plant, `已儲存規則（${rule.plantName}）`, 'saved_rule', rule.plantName)
   }
 
-  // ── 1. block name 本身就是索引表 plantCode（完全相等）────────────────────────
-  const schedExact = schedule.find(e => e.code && e.code.toLowerCase() === bn)
-  if (schedExact) {
-    ev.push(`圖塊名稱即索引表代號 ${schedExact.code}`)
-    const plant = plants.find(p => p.name === schedExact.plantName) ?? null
-    return ok(90, plant, `圖塊名稱即索引表代號 ${schedExact.code}（${schedExact.plantName}）`, schedExact, schedExact.code)
+  // ── P1. Block Attribute（ATTRIB 實體）────────────────────────────────────────
+  // DXF INSERT → ATTRIB → SEQEND；ATTRIB 的 value 是最可靠的植物名稱來源
+  for (const attr of blockAttribs) {
+    const val = attr.value.trim()
+    if (!val || val.length < 2) continue
+
+    // P1a. ATTRIB value 完全等於 DB 中的植物名稱
+    const exactDbPlant = plants.find(p => p.name === val)
+    if (exactDbPlant) {
+      ev.push(`Block屬性 [${attr.tag}]="${val}" → 資料庫植物名稱完全吻合`)
+      return ok(92, exactDbPlant, `Block屬性「${val}」（資料庫確認）`, 'attribute', val)
+    }
+
+    // P1b. ATTRIB value 對應索引表植物名稱
+    const schedByAttrName = schedule.find(s => s.plantName === val)
+    if (schedByAttrName) {
+      const plant = plants.find(p => p.name === val) ?? null
+      ev.push(`Block屬性 [${attr.tag}]="${val}" → 索引表植物名稱吻合`)
+      return ok(90, plant, `Block屬性對應索引表「${val}」`, 'attribute', val, schedByAttrName)
+    }
+
+    // P1c. ATTRIB value 對應索引表代號
+    const schedByAttrCode = schedule.find(s => s.code && s.code === val)
+    if (schedByAttrCode) {
+      const plant = plants.find(p => p.name === schedByAttrCode.plantName) ?? null
+      ev.push(`Block屬性 [${attr.tag}]="${val}" → 索引表代號 ${schedByAttrCode.code}（${schedByAttrCode.plantName}）`)
+      return ok(88, plant, `Block屬性代號對應索引表「${schedByAttrCode.plantName}」`, 'attribute', schedByAttrCode.plantName, schedByAttrCode)
+    }
+
+    // P1d. ATTRIB value 包含中文且 DB 中有子字串命中
+    if (/[一-鿿]{2,}/.test(val)) {
+      const subPlant = plants.find(p => p.name.length >= 2 && val.includes(p.name))
+      if (subPlant) {
+        ev.push(`Block屬性 [${attr.tag}]="${val}" 含植物名稱「${subPlant.name}」`)
+        return ok(80, subPlant, `Block屬性包含植物名稱「${subPlant.name}」`, 'attribute', subPlant.name)
+      }
+      // P1e. ATTRIB value 是中文但 DB 未收錄 → 仍以 ATTRIB 為準，不讓 layer 覆蓋
+      ev.push(`Block屬性 [${attr.tag}]="${val}" 含中文，以屬性值為植栽名稱（DB 未收錄，請確認）`)
+      return ok(60, null, `Block屬性「${val}」（DB 未收錄，請確認）`, 'attribute', val)
+    }
   }
 
-  // ── 2. 附近文字明確標示索引表代號（最直接的圖面佐證）────────────────────────
+  // ── P2. Block Name 含植物資訊 ─────────────────────────────────────────────
+  // P2a. Block name 完全等於 DB 植物名稱
+  const exactDbBlock = plants.find(p => /[一-鿿]/.test(p.name) && p.name === blockName.trim())
+  if (exactDbBlock) {
+    ev.push(`圖塊名稱「${blockName}」完全符合資料庫植物名稱`)
+    return ok(88, exactDbBlock, `圖塊名稱即植物名稱「${exactDbBlock.name}」`, 'block', exactDbBlock.name)
+  }
+
+  // P2b. Block name 就是索引表代號（完全相等）
+  const schedByBlockCode = schedule.find(e => e.code && e.code.toLowerCase() === bn)
+  if (schedByBlockCode) {
+    ev.push(`圖塊名稱「${blockName}」= 索引表代號 ${schedByBlockCode.code}（${schedByBlockCode.plantName}）`)
+    const plant = plants.find(p => p.name === schedByBlockCode.plantName) ?? null
+    return ok(88, plant, `圖塊名稱對應索引表代號「${schedByBlockCode.plantName}」`, 'block', schedByBlockCode.plantName, schedByBlockCode, schedByBlockCode.code)
+  }
+
+  // P2c. Block name 包含 DB 植物名稱子字串（2字以上中文）
+  const subDbBlock = plants.find(p => p.name.length >= 2 && /[一-鿿]{2}/.test(p.name) && blockName.includes(p.name))
+  if (subDbBlock) {
+    ev.push(`圖塊名稱「${blockName}」包含植物名稱「${subDbBlock.name}」（資料庫確認）`)
+    return ok(75, subDbBlock, `圖塊名稱包含植物名稱「${subDbBlock.name}」`, 'block', subDbBlock.name)
+  }
+
+  // P2d. Block name 本身含中文（DB 未收錄）→ 直接用作植栽名稱，優先於 Layer
+  if (/[一-鿿]{2,}/.test(blockName)) {
+    ev.push(`圖塊名稱「${blockName}」含中文，以圖塊名稱為植栽名稱（DB 未收錄，請確認）`)
+    return ok(55, null, `圖塊名稱「${blockName}」（DB 未收錄，請確認）`, 'block', blockName)
+  }
+
+  // P2e. Block name 含數字代號 → 查索引表
+  if (possibleCode) {
+    const schedByNum = schedule.find(e => {
+      const ec = e.code.trim()
+      return ec !== '' && (ec === possibleCode || parseInt(ec, 10) === parseInt(possibleCode, 10))
+    })
+    if (schedByNum) {
+      ev.push(`圖塊名稱含數字代號 ${possibleCode}，索引表有對應記錄（${schedByNum.plantName}）`)
+      const plant = plants.find(p => p.name === schedByNum.plantName) ?? null
+      const qtyOk = schedByNum.quantity !== undefined &&
+        Math.abs(count - schedByNum.quantity) <= Math.max(1, Math.round(count * 0.15))
+      if (qtyOk) ev.push(`圖塊數量 ${count} ≈ 索引表數量 ${schedByNum.quantity}`)
+      const conf = qtyOk ? 78 : 50
+      return ok(conf, plant, `代號 ${possibleCode} 索引表推測「${schedByNum.plantName}」${qtyOk ? '，數量符合' : '，請確認'}`, 'legend', schedByNum.plantName, schedByNum)
+    }
+    if (schedule.length > 0) ev.push(`代號 ${possibleCode} 未在索引表找到對應`)
+  }
+
+  // ── P3. 附近文字 → 索引表代號 ────────────────────────────────────────────────
   for (const text of nearbyTexts) {
     const t = text.trim()
     const e = schedule.find(s => s.code && s.code === t)
     if (e) {
-      ev.push(`附近文字「${t}」= 索引表代號 ${e.code}`)
+      ev.push(`附近文字「${t}」= 索引表代號 ${e.code}（${e.plantName}）`)
       const plant = plants.find(p => p.name === e.plantName) ?? null
-      return ok(88, plant, `附近文字「${t}」符合索引表代號（${e.plantName}）`, e, e.code)
+      return ok(85, plant, `附近文字對應索引表代號「${e.plantName}」`, 'text', e.plantName, e, e.code)
     }
   }
 
-  // ── 3. 提取 block name 中的數字代號，查索引表 ────────────────────────────────
-  //   僅有代號一項不足以高信心；需要數量或類型佐證才能升至已確認
-  if (possibleCode) {
-    // 比對時同時 trim + 嘗試整數比較，防止 DXF 文字帶空白或前置零
-    const schedByExtracted = schedule.find(e => {
-      const ec = e.code.trim()
-      return ec !== '' && (ec === possibleCode || parseInt(ec, 10) === parseInt(possibleCode, 10))
-    })
-    if (schedByExtracted) {
-      ev.push(`圖塊名稱含數字代號 ${possibleCode}，索引表有對應記錄（${schedByExtracted.plantName}）`)
-      const plant = plants.find(p => p.name === schedByExtracted.plantName) ?? null
-
-      // 佐證一：數量吻合（±15%或±1）
-      const qtyOk = schedByExtracted.quantity !== undefined &&
-        Math.abs(count - schedByExtracted.quantity) <= Math.max(1, Math.round(count * 0.15))
-      if (qtyOk) ev.push(`圖塊數量 ${count} ≈ 索引表數量 ${schedByExtracted.quantity}`)
-      else if (schedByExtracted.quantity !== undefined)
-        ev.push(`圖塊數量 ${count} ≠ 索引表數量 ${schedByExtracted.quantity}（需確認）`)
-
-      // 佐證二：圖層類型吻合
-      const typeOk = !!(detectedType && schedByExtracted.plantType &&
-        ((detectedType.includes('喬木') && /喬木/.test(schedByExtracted.plantType)) ||
-         (detectedType.includes('灌木') && /灌木/.test(schedByExtracted.plantType))))
-      if (typeOk) ev.push(`圖層類型吻合：${detectedType}`)
-
-      if (qtyOk || typeOk) {
-        return ok(78, plant, `代號 ${possibleCode} 索引表吻合，${qtyOk ? '數量符合' : '類型符合'}`, schedByExtracted)
-      } else {
-        // 只有代號吻合 → 系統推測（confidence 50 → partial，絕不是 unmatched）
-        ev.push('代號相符但缺乏數量 / 類型佐證，請人工確認')
-        return ok(50, plant, `代號 ${possibleCode} 與索引表相符，推測為「${schedByExtracted.plantName}」，請確認`, schedByExtracted)
-      }
-    }
-
-    // possibleCode 存在但索引表查無此代號
-    if (schedule.length > 0) {
-      ev.push(`代號 ${possibleCode} 未在索引表中找到對應`)
-    }
-  }
-
-  // ── 4. 附近文字含索引表植物名稱 ─────────────────────────────────────────────
+  // ── P4. 附近文字 → 索引表植物名稱 ───────────────────────────────────────────
   for (const text of nearbyTexts) {
-    const e = schedule.find(s => s.dbMatched && text.includes(s.plantName))
+    const e = schedule.find(s => text.includes(s.plantName) && s.plantName.length >= 2)
     if (e) {
-      ev.push(`附近文字包含索引表植物名稱「${e.plantName}」`)
+      ev.push(`附近文字「${text}」包含索引表植物名稱「${e.plantName}」`)
       const plant = plants.find(p => p.name === e.plantName) ?? null
-      return ok(80, plant, `附近文字對應索引表植物名稱（${e.plantName}）`, e)
+      return ok(78, plant, `附近文字對應索引表植物名稱「${e.plantName}」`, 'text', e.plantName, e)
     }
   }
 
-  // ── 5. 附近文字直接命中植栽資料庫（中文植物名稱）───────────────────────────
+  // ── P5. 附近文字 → 直接命中植栽資料庫 ───────────────────────────────────────
   for (const text of nearbyTexts) {
     const plant = plants.find(p => p.name.length >= 2 && /[一-鿿]/.test(p.name) && text.includes(p.name))
     if (plant) {
-      ev.push(`附近文字「${plant.name}」直接比對植栽資料庫`)
-      return ok(75, plant, `附近文字直接對應植物名稱（${plant.name}）`)
+      ev.push(`附近文字「${text}」直接命中資料庫植物名稱「${plant.name}」`)
+      return ok(72, plant, `附近文字直接對應植物名稱「${plant.name}」`, 'text', plant.name)
     }
   }
 
-  // ── 6. block name 完全等於中文植物名稱 ──────────────────────────────────────
-  const exactChinese = plants.find(p => /[一-鿿]/.test(p.name) && p.name.toLowerCase() === bn)
-  if (exactChinese) {
-    ev.push('圖塊名稱即植物中文名稱')
-    return ok(75, exactChinese, '圖塊名稱即植物名稱')
-  }
-
-  // ── 7. block name 包含中文植物名稱（2字以上）───────────────────────────────
-  const chinesePlant = plants.find(p => p.name.length >= 2 && /[一-鿿]{2}/.test(p.name) && bn.includes(p.name.toLowerCase()))
-  if (chinesePlant) {
-    ev.push(`圖塊名稱含植物名稱「${chinesePlant.name}」`)
-    return ok(60, chinesePlant, `圖塊名稱包含植物名稱「${chinesePlant.name}」（系統推測）`)
-  }
-
-  // ── 8. 僅識別出圖塊類型，無索引表佐證 ──────────────────────────────────────
-  //   confidence 35（≥30）確保狀態是 partial 而非 unmatched
-  if (detectedType) {
-    ev.push('僅依圖塊 / 圖層命名識別類型，缺乏索引表或附近文字佐證')
-    return ok(35, null, `識別為${detectedType}，尚無足夠依據，請人工確認`)
-  }
-
-  // ── 9. 圖層名稱含中文植物名稱 ───────────────────────────────────────────────
+  // ── P6. 未辨識植栽 ───────────────────────────────────────────────────────────
+  // Layer 含植物名稱 → 僅記錄在 evidence，不作為辨識結果
+  const ln = layer.toLowerCase()
   const layerPlant = plants.find(p => p.name.length >= 2 && /[一-鿿]/.test(p.name) && ln.includes(p.name.toLowerCase()))
   if (layerPlant) {
-    ev.push(`圖層名稱含植物名稱「${layerPlant.name}」`)
-    return ok(40, layerPlant, `圖層名稱包含植物名稱「${layerPlant.name}」`)
+    ev.push(`[Layer參考] 圖層「${layer}」含植物名稱「${layerPlant.name}」，但 Layer 不作為辨識來源`)
+  } else if (layer) {
+    ev.push(`[Layer參考] ${layer}（不作為植栽辨識依據）`)
   }
 
-  ev.push('無足夠依據')
-  return { plant: null, status: 'unmatched', confidence: 0,
-    reason: '無足夠依據，請人工確認', detectedType, possiblePlantCode: possibleCode, evidence: ev }
+  // 有偵測到圖塊類型但無植栽名稱 → partial
+  if (detectedType) {
+    ev.push('類型已識別但缺乏植栽名稱依據，請人工確認')
+    return ok(30, null, `${detectedType}，植栽名稱未辨識，請確認`, 'unidentified', '')
+  }
+
+  ev.push('Block / Attribute / Legend / 附近文字 均無法辨識植栽')
+  return {
+    plant: null, status: 'unmatched', confidence: 0,
+    reason: '未辨識植栽',
+    detectedType, possiblePlantCode: possibleCode,
+    evidence: ev,
+    sourceType: 'unidentified', detectedPlantName: '',
+  }
 }
 
 function calcDrawingRadius(blockGroups: DxfParseResult['blockGroups']): number {
@@ -227,16 +284,28 @@ function buildMappings(
       continue
     }
 
+    // 彙整每個插入點的附近文字（取第一個位置，足夠用於植栽標籤偵測）
     const nearby = grp.positions.length > 0
       ? findNearbyTexts(grp.positions[0], texts, radius)
       : []
-    const result = matchPlant(grp.blockName, grp.layer, grp.count, plants, savedRules, schedule, nearby)
-    // 植物名稱 fallback：CSV DB → 索引表植物名稱
-    // 用 || 而非 ?? 確保空字串也能被 fallback 覆蓋
-    const nameFromSchedule = result.scheduleEntry?.plantName
+
+    const result = matchPlant(
+      grp.blockName, grp.layer, grp.count,
+      plants, savedRules, schedule,
+      nearby,
+      grp.attributes,   // Block ATTRIB 直接連結，不依賴 nearby text
+    )
+
+    // 植物名稱解析：DB名稱 > detectedPlantName（block/attribute/text）> 索引表名稱
+    // Layer 名稱永遠不作為 plantName
+    const resolvedName =
+      result.plant?.name ||
+      (result.detectedPlantName || undefined) ||
+      result.scheduleEntry?.plantName
+
     item.matchStatus       = result.status
     item.confidenceScore   = result.confidence
-    item.plantName         = result.plant?.name || nameFromSchedule || undefined
+    item.plantName         = resolvedName
     item.plantCategory     = result.plant?.category
     item.plantSubCategory  = result.plant?.subCategory
     item.matchReason       = result.reason
@@ -245,6 +314,27 @@ function buildMappings(
     item.detectedType      = result.detectedType
     item.possiblePlantCode = result.possiblePlantCode
     item.evidence          = result.evidence
+    item.sourceType        = result.sourceType
+    item.attributes        = grp.attributes
+
+    // ── Debug：結構化輸出每株植物辨識結果 ───────────────────────────────────
+    const confidenceLabel =
+      result.confidence >= 85 ? 'High' :
+      result.confidence >= 60 ? 'Medium' :
+      result.confidence >= 30 ? 'Low' : 'None'
+    const legendEntry = result.scheduleEntry
+    console.debug(
+      `[DXF植栽辨識]\n` +
+      `  Plant      : ${resolvedName ?? '未辨識植栽'}\n` +
+      `  Source     : ${result.sourceType}\n` +
+      `  BlockName  : ${grp.blockName}\n` +
+      `  LayerName  : ${grp.layer}\n` +
+      `  Attributes : ${grp.attributes.map(a => `${a.tag}=${a.value}`).join(', ') || '（無）'}\n` +
+      `  Legend     : ${legendEntry ? `Matched → ${legendEntry.code} ${legendEntry.plantName}` : 'Not matched'}\n` +
+      `  Confidence : ${result.confidence} (${confidenceLabel})\n` +
+      `  Evidence   : ${result.evidence.join(' | ')}`
+    )
+
     active.push(item)
   }
 
@@ -298,6 +388,105 @@ function MultiLayerBadge({ judgment }: { judgment: MultiLayerJudgment }) {
 
 type ZoneReviewStatus = '可審查' | '植物待確認' | '無法審查'
 
+// ── PatternSignature：從任何圖元（HATCH / LWPOLYLINE / LINE）提取的圖案特徵 ──
+interface PatternSignature {
+  entityType: 'HATCH' | 'LWPOLYLINE_GROUP' | 'LINE_GROUP' | 'UNKNOWN'
+  layer: string
+  color: number | null      // ACI color
+  bbox: { minX: number; minY: number; maxX: number; maxY: number; width: number; height: number }
+  lineCount: number         // 頂點數（HATCH 的近似線段數）
+  hatchPattern: string | null
+  hatchScale: number | null
+  hatchAngle: number | null
+  density: number           // lineCount / bbox area（粗略密度）
+  geometryHash: string      // pattern+scale+angle+color 的簡易指紋
+}
+
+// ── FinalReviewResult：每個分區最終審查結果（UI / PDF / 報告唯一來源）─────────
+export interface FinalReviewResult {
+  zoneName: string
+  matchedPlantName: string | null
+  matchedLegendRow: string | null     // 索引表代號
+  detectedPatternType: string         // HATCH / LWPOLYLINE_GROUP / etc.
+  matchScore: number                  // 0–100
+  confidence: 'high' | 'medium' | 'low'
+  matchReason: string
+  reviewStatus: ZoneReviewStatus
+  noMatchReasons?: string[]           // reviewStatus = 無法審查 時才有
+}
+
+/** 從 ZonePlantArea 提取 PatternSignature */
+function extractPatternSignature(area: import('@/types/dxf').ZonePlantArea): PatternSignature {
+  const verts = area.vertices ?? []
+  const xs = verts.map(v => v.x); const ys = verts.map(v => v.y)
+  const minX = xs.length ? Math.min(...xs) : 0; const maxX = xs.length ? Math.max(...xs) : 0
+  const minY = ys.length ? Math.min(...ys) : 0; const maxY = ys.length ? Math.max(...ys) : 0
+  const w = maxX - minX; const h = maxY - minY
+  const area_ = w * h || 1
+  const lineCount = area.vertexCount
+  const density = lineCount / area_
+
+  const entityType: PatternSignature['entityType'] =
+    area.source === 'HATCH' ? 'HATCH' :
+    (area.source === 'LWPOLYLINE' || area.source === 'POLYLINE') ? 'LWPOLYLINE_GROUP' : 'UNKNOWN'
+
+  const gHash = [area.hatchPattern ?? '', area.hatchScale?.toFixed(2) ?? '', (area.hatchAngle ?? 0).toFixed(1), area.hatchColor ?? 0].join('|')
+
+  return {
+    entityType, layer: area.layer, color: area.hatchColor ?? null,
+    bbox: { minX, minY, maxX, maxY, width: w, height: h },
+    lineCount, hatchPattern: area.hatchPattern ?? null,
+    hatchScale: area.hatchScale ?? null, hatchAngle: area.hatchAngle ?? null,
+    density, geometryHash: gHash,
+  }
+}
+
+/** 計算兩個 PatternSignature 的相似度分數（0–100）*/
+function computeSignatureSimilarity(
+  zone: PatternSignature,
+  legend: PatternSignature,
+): { score: number; reasons: string[] } {
+  const reasons: string[] = []
+  let score = 0
+
+  // 1. HATCH pattern name（最強特徵，30分）
+  if (zone.hatchPattern && legend.hatchPattern) {
+    if (zone.hatchPattern.trim() === legend.hatchPattern.trim()) {
+      score += 30; reasons.push('pattern 相同(+30)')
+    }
+  }
+  // 2. color（10分）
+  if (zone.color !== null && legend.color !== null) {
+    if (zone.color === legend.color) { score += 10; reasons.push('color 相同(+10)') }
+    else reasons.push(`color 不同(zone=${zone.color} legend=${legend.color})`)
+  }
+  // 3. scale（15分）
+  if (zone.hatchScale !== null && legend.hatchScale !== null) {
+    const diff = Math.abs(zone.hatchScale - legend.hatchScale)
+    if (diff < 0.05) { score += 15; reasons.push('scale 相同(+15)') }
+    else if (diff < 0.2)  { score += 7;  reasons.push(`scale 接近(+7 diff=${diff.toFixed(2)})`) }
+    else reasons.push(`scale 差異大(${diff.toFixed(2)})`)
+  } else { score += 7; reasons.push('scale 無法比對，給一半分(+7)') }
+  // 4. angle（15分）
+  if (zone.hatchAngle !== null && legend.hatchAngle !== null) {
+    const diff = Math.abs((zone.hatchAngle - legend.hatchAngle + 360) % 360)
+    if (diff < 1) { score += 15; reasons.push('angle 相同(+15)') }
+    else if (diff < 5)  { score += 7;  reasons.push(`angle 接近(+7 diff=${diff.toFixed(1)}°)`) }
+    else reasons.push(`angle 差異大(${diff.toFixed(1)}°)`)
+  } else { score += 7; reasons.push('angle 無法比對，給一半分(+7)') }
+  // 5. entity type 一致（10分）
+  if (zone.entityType === legend.entityType) { score += 10; reasons.push('entityType 相同(+10)') }
+  // 6. density 接近（10分）
+  if (zone.density > 0 && legend.density > 0) {
+    const ratio = Math.min(zone.density, legend.density) / Math.max(zone.density, legend.density)
+    if (ratio > 0.5) { score += Math.round(ratio * 10); reasons.push(`density 接近(+${Math.round(ratio * 10)})`) }
+  }
+  // 7. layer 輔助（5分）
+  if (zone.layer && legend.layer && zone.layer === legend.layer) { score += 5; reasons.push('layer 相同(+5)') }
+
+  return { score: Math.min(100, score), reasons }
+}
+
 // 分區內每個圖塊的摘要（含未對應植物）
 interface ZoneBlockEntry {
   blockName: string
@@ -313,9 +502,10 @@ interface ZoneReviewResult {
   blockEntries: ZoneBlockEntry[]     // 所有圖塊（含未對應）
   unmatchedBlocks: string[]          // 純未對應 blockName 清單（向下相容）
   areaTypes: string[]
-  areaLayerNotes: string[]           // 有 HATCH 但圖層名稱無法識別植物
+  areaLayerNotes: string[]
   status: ZoneReviewStatus
   evalResult?: EvalResult
+  finalReviewResults: FinalReviewResult[]  // 最終審查結果（UI/PDF 唯一來源）
 }
 
 function uid() { return Math.random().toString(36).slice(2) }
@@ -329,6 +519,45 @@ function findInDB(name: string | undefined, db: CsvPlantRecord[]): CsvPlantRecor
     ?? db.find(p => p.name.replace(/\s/g, '') === n.replace(/\s/g, ''))  // 忽略空白
 }
 
+/** Legend / site HATCH lookup key — pattern name if present, else stable geometry fingerprint */
+function legendSymbolLookupKey(poly: import('@/types/dxf').DxfPolygon, cx: number, cy: number): string {
+  const pattern = poly.hatchPattern?.trim()
+  if (pattern) return pattern
+  return `${poly.source}@${Math.round(cx * 10) / 10}_${Math.round(cy * 10) / 10}`
+}
+
+/** HATCH（含無 pattern）與圖例列內的小型 LWPOLYLINE / POLYLINE 符號 */
+function buildLegendSymbolCenters(
+  polygons: import('@/types/dxf').DxfPolygon[],
+  maxSymbolArea: number,
+) {
+  return polygons
+    .filter(p => {
+      if (!p.closed || p.vertices.length < 3) return false
+      if (p.source === 'HATCH') return true
+      if (p.source === 'LWPOLYLINE' || p.source === 'POLYLINE') {
+        const bb = polygonBBox(p.vertices)
+        return bb.width > 0 && bb.height > 0 && bb.width * bb.height <= maxSymbolArea
+      }
+      return false
+    })
+    .map(p => {
+      const n = p.vertices.length
+      const cx = p.vertices.reduce((s, v) => s + v.x, 0) / n
+      const cy = p.vertices.reduce((s, v) => s + v.y, 0) / n
+      return { poly: p, cx, cy, lookupKey: legendSymbolLookupKey(p, cx, cy) }
+    })
+}
+
+function lookupLegendPlant(
+  map: Map<string, string>,
+  patternKey: string | undefined,
+): string | undefined {
+  if (!patternKey) return undefined
+  const trimmed = patternKey.trim()
+  return map.get(patternKey) ?? (trimmed !== patternKey ? map.get(trimmed) : undefined)
+}
+
 function buildZoneReviews(
   zonePlantLists: ZonePlantList[],
   plantDB: CsvPlantRecord[],
@@ -337,15 +566,289 @@ function buildZoneReviews(
   drawingRadius = 1000,
   polygons: import('@/types/dxf').DxfPolygon[] = [],
 ): ZoneReviewResult[] {
-  // ── 建立 HATCH pattern → 植物名稱 對照表（從索引表圖例小方塊推導）──────────
-  // 每個 HATCH pattern 的最小 polygon 通常是索引表裡的圖例小方塊，
-  // 其附近文字就是該 pattern 對應的植物名稱。
+  // ── 建立 HATCH pattern → 植物名稱 對照表 ──────────────────────────────────
+  //
+  // 策略：從「植物名稱文字位置」出發找鄰近的 HATCH（圖例格子），取得 pattern name。
+  // 這比「最小 HATCH 找附近文字」更可靠，因為圖例格子不一定是最小面積。
+  //
+  // 流程：
+  //   A. 對每個索引表 / 植栽資料庫的植物名稱，找圖面中該名稱文字的座標
+  //   B. 從文字位置向外搜尋一定半徑，找最近的 HATCH
+  //   C. 取得那個 HATCH 的 pattern name，建立 pattern → 植物名稱 的對照
+  //   D. Fallback：舊法（最小 HATCH 向外找文字），捕捉 A–C 遺漏的 pattern
   const hatchPatternToPlant = new Map<string, string>()
+
+  // 計算圖面整體範圍（用文字位置，比只看 block 更準確）
+  const drawingExtentRadius = (() => {
+    if (texts.length < 2) return drawingRadius * 10
+    const xs = texts.map(t => t.x); const ys = texts.map(t => t.y)
+    return Math.hypot(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys))
+  })()
+  // 圖例格子通常緊貼植物名稱文字，搜尋半徑 = 圖面範圍的 3%（最小 200 單位）
+  const legendCellRadius = Math.max(200, drawingExtentRadius * 0.03)
+
+  // ── 所有 HATCH polygon 一覽（含 pattern name）──────────────────────────────
+  const allHatchPolys = polygons.filter(p => p.source === 'HATCH')
+  const hatchPatternSet = [...new Set(allHatchPolys.map(p => p.hatchPattern ?? '(無pattern)'))]
+  console.group('[HATCH Debug] 圖面中所有 HATCH polygons')
+  console.debug(`總計 ${allHatchPolys.length} 個 HATCH，含 pattern name 的有 ${allHatchPolys.filter(p => p.hatchPattern).length} 個`)
+  console.debug('Pattern 清單：', hatchPatternSet)
+  for (const p of allHatchPolys) {
+    const n = p.vertices.length
+    const cx = (p.vertices.reduce((s, v) => s + v.x, 0) / n).toFixed(0)
+    const cy = (p.vertices.reduce((s, v) => s + v.y, 0) / n).toFixed(0)
+    const xs = p.vertices.map(v => v.x); const ys = p.vertices.map(v => v.y)
+    const bboxW = (Math.max(...xs) - Math.min(...xs)).toFixed(0)
+    const bboxH = (Math.max(...ys) - Math.min(...ys)).toFixed(0)
+    console.debug(`  pattern="${p.hatchPattern ?? '(無)'}" layer="${p.layer}" center=(${cx},${cy}) bbox=${bboxW}×${bboxH} vertices=${n}`)
+  }
+  console.groupEnd()
+
+  // A–C：文字→鄰近 HATCH（Legend Mapping 建立）
+  // 搜索索引表植物名稱 + DB 植物名稱
+  const schedPlantNames = schedule.map(e => e.plantName).filter(n => n && n.length >= 2)
+
+  // 圖例符號候選：HATCH（含無 pattern）+ 圖例列內小型 polyline
+  const legendSymbolMaxArea = Math.max(legendCellRadius * legendCellRadius * 4, 250_000)
+  const legendSymbolCenters = buildLegendSymbolCenters(polygons, legendSymbolMaxArea)
+
+  // 向後相容：僅含具 pattern 的 HATCH（debug / D-fallback 用）
+  const hatchCenters = legendSymbolCenters.filter(hc => hc.poly.source === 'HATCH' && hc.poly.hatchPattern)
+
+  // ── 索引表列 Y 中心對照表（用於 row-bbox 搜尋）────────────────────────────
+  // 對每個索引表植物名稱，計算其文字的平均 Y 位置（= 列中心 Y）
+  const schedRowYMap = new Map<string, number>()  // plantName → avg Y
+  const schedRowXMap = new Map<string, number>()  // plantName → avg X（文字右側邊界）
+  for (const entry of schedule) {
+    if (!entry.plantName || entry.plantName.length < 2) continue
+    const ys = texts.filter(t => t.content.includes(entry.plantName)).map(t => t.y)
+    const xs = texts.filter(t => t.content.includes(entry.plantName)).map(t => t.x)
+    if (ys.length > 0) {
+      schedRowYMap.set(entry.plantName, ys.reduce((s, y) => s + y, 0) / ys.length)
+      schedRowXMap.set(entry.plantName, xs.reduce((s, x) => s + x, 0) / xs.length)
+    }
+  }
+  // 計算相鄰列 Y 間距 → 決定 rowHalfHeight（不超出本列範圍）
+  const sortedRowYs = [...new Set(schedRowYMap.values())].sort((a, b) => a - b)
+  const rowSpacings = sortedRowYs.slice(1).map((y, i) => Math.abs(y - sortedRowYs[i])).filter(d => d > 10)
+  const rowHalfHeight = rowSpacings.length > 0 ? Math.min(...rowSpacings) * 0.45 : legendCellRadius * 0.5
+
+  // ── Table-based Legend Parser：依「圖例」欄 X 定位 symbol 欄，逐列配對 HATCH ──
+  // 步驟：1. 找表頭行，取得 symbol 欄 X  2. 逐列在 (symbolColX±halfW, rowY±halfH) bbox 找 HATCH
+
+  // 1. 偵測表頭行（多個表頭 text 在同一 Y 附近）
+  const legendHeaderKws = ['圖例', '符號', '圖式', '植物名稱', '植栽名稱', '名稱', '項次', '代號', '編號', '數量', '單位', '備註']
+  const allHeaderTexts = texts.filter(t => legendHeaderKws.some(kw => t.content.includes(kw)))
+  // group by Y（±50 容忍），取包含最多表頭的行
+  const headerYGroups = new Map<number, Array<typeof texts[0]>>()
+  for (const ht of allHeaderTexts) {
+    const existing = [...headerYGroups.entries()].find(([y]) => Math.abs(y - ht.y) < 50)
+    if (existing) existing[1].push(ht)
+    else headerYGroups.set(ht.y, [ht])
+  }
+  const bestHeaderRow = [...headerYGroups.values()].sort((a, b) => b.length - a.length)[0] ?? []
+
+  // 2. 從表頭行取得 symbol 欄 X 和估算欄寬
+  const symHeader = bestHeaderRow.find(t => ['圖例', '符號', '圖式'].some(kw => t.content.includes(kw)))
+  let symbolColX   = symHeader?.x ?? NaN
+  let symbolColHalfW = legendCellRadius * 2  // 預設值
+  if (symHeader) {
+    const otherDists = bestHeaderRow
+      .filter(t => t !== symHeader)
+      .map(t => Math.abs(t.x - symbolColX))
+      .filter(d => d > 0)
+    if (otherDists.length > 0) symbolColHalfW = Math.min(...otherDists) * 0.55
+  }
+
+  // 3. 逐列建立 legendItems + 寫入 hatchPatternToPlant
+  interface LegendItem {
+    rowNo: string; plantName: string
+    quantity: number | undefined; unit: string | undefined
+    hatchPattern: string | null
+    hatchScale: number | null; hatchAngle: number | null; hatchColor: number | null
+    compositeKey: string | null  // pattern@scale@angle，用於精確比對
+    symbolBBox: string | null
+    candidatesCount: number; confidence: 'high' | 'medium' | 'low'; reason?: string
+  }
+  const legendItems: LegendItem[] = []
+
+  for (const entry of schedule) {
+    if (!entry.plantName || entry.plantName.length < 2) continue
+    const rowCenterY = schedRowYMap.get(entry.plantName)
+    if (rowCenterY === undefined) {
+      legendItems.push({ rowNo: entry.code ?? `row${entry.rowIndex}`, plantName: entry.plantName, quantity: entry.quantity, unit: entry.unit, hatchPattern: null, hatchScale: null, hatchAngle: null, hatchColor: null, compositeKey: null, symbolBBox: null, candidatesCount: 0, confidence: 'low', reason: '找不到植物名稱文字' })
+      continue
+    }
+    const rowTop  = rowCenterY + rowHalfHeight
+    const rowBot  = rowCenterY - rowHalfHeight
+    const symXMin = isNaN(symbolColX) ? -Infinity : symbolColX - symbolColHalfW
+    const symXMax = isNaN(symbolColX) ?  Infinity : symbolColX + symbolColHalfW
+
+    const candidates = legendSymbolCenters.filter(hc =>
+      hc.cy >= rowBot && hc.cy <= rowTop && hc.cx >= symXMin && hc.cx <= symXMax
+    )
+    // Y 最接近列中心者優先
+    let bestH: typeof legendSymbolCenters[0] | null = null; let bestD = Infinity
+    for (const hc of candidates) {
+      const d = Math.abs(hc.cy - rowCenterY)
+      if (d < bestD) { bestD = d; bestH = hc }
+    }
+
+    const hxs = bestH?.poly.vertices.map(v => v.x) ?? []
+    const hys = bestH?.poly.vertices.map(v => v.y) ?? []
+    const tableLookupKey = bestH?.lookupKey ?? null
+    const bPoly = bestH?.poly
+    const bPat  = bPoly?.hatchPattern?.trim() ?? null
+    const bSc   = bPoly?.hatchScale
+    const bAng  = bPoly?.hatchAngle ?? 0
+    const bClr  = bPoly?.hatchColor ?? 0
+    // compositeKey 有兩個版本：含 color（最精確）和不含（fallback）
+    const compositeKeyFull = bPat && bSc !== undefined
+      ? `${bPat}@${bSc.toFixed(2)}@${bAng.toFixed(1)}@c${bClr}`
+      : null
+    const compositeKey = bPat && bSc !== undefined
+      ? `${bPat}@${bSc.toFixed(2)}@${bAng.toFixed(1)}`
+      : null
+    legendItems.push({
+      rowNo: entry.code ?? `row${entry.rowIndex}`, plantName: entry.plantName,
+      quantity: entry.quantity, unit: entry.unit,
+      hatchPattern: bPat,
+      hatchScale: bSc ?? null,
+      hatchAngle: bSc !== undefined ? bAng : null,
+      hatchColor: bSc !== undefined ? bClr : null,
+      compositeKey: compositeKeyFull ?? compositeKey,
+      symbolBBox: bestH ? `(${Math.min(...hxs).toFixed(0)},${Math.min(...hys).toFixed(0)})~(${Math.max(...hxs).toFixed(0)},${Math.max(...hys).toFixed(0)})` : null,
+      candidatesCount: candidates.length,
+      confidence: bestH ? (bPat ? 'high' : 'medium') : 'low',
+      reason: bestH ? (bPat ? undefined : '圖例符號已匹配（LWPOLYLINE 或無 pattern HATCH）') : '文字已讀到，但圖例符號未匹配',
+    })
+
+    // 寫入 hatchPatternToPlant：三個 key（精確→fallback）
+    if (compositeKeyFull && !hatchPatternToPlant.has(compositeKeyFull))
+      hatchPatternToPlant.set(compositeKeyFull, entry.plantName)
+    if (compositeKey && !hatchPatternToPlant.has(compositeKey))
+      hatchPatternToPlant.set(compositeKey, entry.plantName)
+    if (tableLookupKey && !hatchPatternToPlant.has(tableLookupKey))
+      hatchPatternToPlant.set(tableLookupKey, entry.plantName)
+    // 索引表代號輔助 key（供無 pattern 的圖例符號對照）
+    if (entry.code?.trim() && tableLookupKey) {
+      const codeKey = `__code__${entry.code.trim()}`
+      if (!hatchPatternToPlant.has(codeKey)) {
+        hatchPatternToPlant.set(codeKey, entry.plantName)
+      }
+    }
+    // 僅在成功建立 pattern 對照時才標記 resolved，否則 A–C 半徑 fallback 仍可接手
+    if (tableLookupKey && hatchPatternToPlant.get(tableLookupKey) === entry.plantName) {
+      hatchPatternToPlant.set('__resolved__' + entry.plantName, '1')
+    }
+  }
+
+  // ── Debug Table 1: legendItems signatures ────────────────────────────────
+  console.group('📋 Debug Table 1: legendItems')
+  console.debug(`symbolColX=${isNaN(symbolColX) ? '(未找到圖例欄標頭)' : symbolColX.toFixed(0)}  symbolColHalfW=${symbolColHalfW.toFixed(0)}  rowHalfHeight=${rowHalfHeight.toFixed(0)}`)
+  console.table(legendItems.map(item => ({
+    plantName:   item.plantName,
+    legendCode:  item.rowNo,
+    pattern:     item.hatchPattern ?? '(無)',
+    scale:       item.hatchScale ?? null,
+    angle:       item.hatchAngle ?? null,
+    color:       item.hatchColor ?? null,
+    compositeKey: item.compositeKey ?? '(無)',
+    entityType:  item.hatchPattern ? 'HATCH' : '(LWPOLYLINE/無)',
+    bbox:        item.symbolBBox ?? '(無)',
+    confidence:  item.confidence,
+  })))
+  console.groupEnd()
+
+  // 追蹤每個 pattern 的 legend 配對證據（供最終報告使用）
+  interface LegendEvidence {
+    pattern: string
+    nearbyText: string      // 找到的文字內容
+    textPos: string         // 文字座標
+    matchedPlant: string
+    distance: number
+    buildKey: string        // 寫入 Map 的原始 key（未 trim / 轉換）
+    confidence: 'high' | 'medium' | 'low'
+    via: 'A-C-strategy' | 'D-fallback'
+  }
+  interface LegendMiss {
+    pattern: string
+    closestText?: string
+    closestTextPos?: string
+    closestDist?: number
+    reason: string
+  }
+  const legendEvidence = new Map<string, LegendEvidence>()
+  const legendMisses   = new Map<string, LegendMiss>()   // 每個 pattern 只記一次
+
+  const allPlantNames = [
+    ...schedPlantNames,
+    ...plantDB.map(p => p.name).filter(n => n.length >= 2),
+  ]
+
+  for (const plantName of allPlantNames) {
+    if (hatchPatternToPlant.has('__resolved__' + plantName)) continue
+    const nameTexts = texts.filter(t => t.content.includes(plantName) && plantName.length >= 2)
+    if (nameTexts.length === 0) continue
+
+    let bestDist = Infinity
+    let bestHatch: import('@/types/dxf').DxfPolygon | null = null
+    let bestTextContent = ''; let bestTextPos = ''
+    let closestDistOfAll = Infinity
+    let closestPatOfAll = ''; let closestTextOfAll = ''; let closestTextPosOfAll = ''
+
+    // 處理尚未被 table parser 成功對照 pattern 的植物（含索引表與 DB 名稱）
+    for (const nt of nameTexts) {
+      for (const { poly, cx, cy, lookupKey } of legendSymbolCenters) {
+        const dist = Math.hypot(cx - nt.x, cy - nt.y)
+        if (dist < closestDistOfAll) {
+          closestDistOfAll = dist
+          closestPatOfAll  = lookupKey
+          closestTextOfAll = nt.content
+          closestTextPosOfAll = `(${nt.x.toFixed(0)},${nt.y.toFixed(0)})`
+        }
+        if (dist <= legendCellRadius && dist < bestDist) {
+          bestDist = dist; bestHatch = poly
+          bestTextContent = nt.content; bestTextPos = `(${nt.x.toFixed(0)},${nt.y.toFixed(0)})`
+        }
+      }
+    }
+
+    if (bestHatch) {
+      const n = bestHatch.vertices.length
+      const cx = bestHatch.vertices.reduce((s, v) => s + v.x, 0) / n
+      const cy = bestHatch.vertices.reduce((s, v) => s + v.y, 0) / n
+      const buildKey = legendSymbolLookupKey(bestHatch, cx, cy)
+      if (!hatchPatternToPlant.has(buildKey)) {
+        hatchPatternToPlant.set(buildKey, plantName)
+        const conf: LegendEvidence['confidence'] =
+          bestDist < legendCellRadius * 0.3 ? 'high' :
+          bestDist < legendCellRadius * 0.7 ? 'medium' : 'low'
+        legendEvidence.set(buildKey, {
+          pattern: buildKey, nearbyText: bestTextContent, textPos: bestTextPos,
+          matchedPlant: plantName, distance: bestDist,
+          buildKey, confidence: conf, via: 'A-C-strategy',
+        })
+      }
+      if (hatchPatternToPlant.get(buildKey) === plantName) {
+        hatchPatternToPlant.set('__resolved__' + plantName, '1')
+      }
+    } else if (closestPatOfAll && !legendEvidence.has(closestPatOfAll) && !legendMisses.has(closestPatOfAll)) {
+      legendMisses.set(closestPatOfAll, {
+        pattern: closestPatOfAll,
+        closestText: closestTextOfAll, closestTextPos: closestTextPosOfAll,
+        closestDist: closestDistOfAll,
+        reason: `Plant="${plantName}" 文字距 HATCH 超出半徑（距離${closestDistOfAll.toFixed(0)} > legendCellRadius=${legendCellRadius.toFixed(0)}，差${(closestDistOfAll - legendCellRadius).toFixed(0)}）`,
+      })
+    }
+  }
+
+  // D Fallback：最小面積 HATCH 向外找文字（補捉 A–C 未覆蓋的 pattern）
   if (polygons.length > 0) {
-    // 每個 pattern 找最小面積的 polygon（圖例小方塊）
     const smallest = new Map<string, { cx: number; cy: number; area: number }>()
     for (const poly of polygons) {
       if (poly.source !== 'HATCH' || !poly.hatchPattern) continue
+      if (hatchPatternToPlant.has(poly.hatchPattern)) continue
       const pat = poly.hatchPattern
       const n = poly.vertices.length
       const cx = poly.vertices.reduce((s, v) => s + v.x, 0) / n
@@ -355,18 +858,100 @@ function buildZoneReviews(
       const ex = smallest.get(pat)
       if (!ex || bboxArea < ex.area) smallest.set(pat, { cx, cy, area: bboxArea })
     }
-    // 對每個圖例小方塊搜尋附近植物名稱
-    const legendRadius = Math.max(300, drawingRadius * 0.08)
+    const fallbackRadius = Math.max(500, drawingExtentRadius * 0.05)
     for (const [pattern, { cx, cy }] of smallest) {
-      const nearTexts = findNearbyTexts({ x: cx, y: cy }, texts, legendRadius)
+      const nearTexts = findNearbyTexts({ x: cx, y: cy }, texts, fallbackRadius)
+      let fbText = ''; let fbPlant = ''
       for (const txt of nearTexts) {
         const fromDB = plantDB.find(p => p.name.length >= 2 && txt.includes(p.name))
-        if (fromDB) { hatchPatternToPlant.set(pattern, fromDB.name); break }
+        if (fromDB) { hatchPatternToPlant.set(pattern, fromDB.name); fbText = txt; fbPlant = fromDB.name; break }
         const fromSched = schedule.find(e => e.plantName && e.plantName.length >= 2 && txt.includes(e.plantName))
-        if (fromSched) { hatchPatternToPlant.set(pattern, fromSched.plantName); break }
+        if (fromSched) { hatchPatternToPlant.set(pattern, fromSched.plantName); fbText = txt; fbPlant = fromSched.plantName; break }
+        if (/^[一-鿿]{2,}/.test(txt.trim())) { hatchPatternToPlant.set(pattern, txt.trim()); fbText = txt; fbPlant = txt.trim(); break }
+      }
+      if (fbPlant) {
+        legendEvidence.set(pattern, {
+          pattern, nearbyText: fbText, textPos: `center=(${cx.toFixed(0)},${cy.toFixed(0)})`,
+          matchedPlant: fbPlant, distance: -1,
+          buildKey: pattern, confidence: 'low', via: 'D-fallback',
+        })
       }
     }
   }
+
+  // 清理輔助 key（保留 __code__ 供代號對照）
+  for (const k of [...hatchPatternToPlant.keys()]) {
+    if (k.startsWith('__resolved__')) hatchPatternToPlant.delete(k)
+  }
+
+  // ── Legend Parser 最終報告（per-pattern）────────────────────────────────────
+  // 列出圖面中每個 HATCH pattern 的配對結果
+  const allPatternsInDrawing = [...new Set(
+    polygons.filter(p => p.source === 'HATCH' && p.hatchPattern).map(p => p.hatchPattern!)
+  )]
+
+  console.group(`══ Legend Parser Report (legendCellRadius=${legendCellRadius.toFixed(0)}) ══`)
+  console.debug(`圖面 HATCH pattern 數：${allPatternsInDrawing.length}，已建立 Mapping：${hatchPatternToPlant.size} 筆`)
+
+  for (const pat of allPatternsInDrawing) {
+    const ev = legendEvidence.get(pat)
+    const miss = legendMisses.get(pat)
+
+    if (ev) {
+      // ── 命中 ──────────────────────────────────────────────────────────────
+      const distStr = ev.distance >= 0 ? ev.distance.toFixed(0) : 'N/A (D-fallback)'
+      const confEmoji = ev.confidence === 'high' ? '🟢' : ev.confidence === 'medium' ? '🟡' : '🔴'
+      console.group(`✅  Pattern : ${pat}`)
+      console.debug(`    Legend Text  : "${ev.nearbyText}"  @ ${ev.textPos}`)
+      console.debug(`    Matched Plant: ${ev.matchedPlant}`)
+      console.debug(`    Distance     : ${distStr}`)
+      console.debug(`    Build Key    : "${ev.buildKey}"  (原始字串，無 trim/大小寫轉換)`)
+      console.debug(`    Confidence   : ${confEmoji} ${ev.confidence}  (via ${ev.via})`)
+      console.groupEnd()
+    } else if (miss) {
+      // ── 未命中（有找到最近 HATCH 但距離超出半徑）───────────────────────────
+      const gap = miss.closestDist !== undefined ? (miss.closestDist - legendCellRadius).toFixed(0) : '?'
+      console.group(`❌  Pattern : ${pat}`)
+      console.debug(`    Legend Text  : "${miss.closestText ?? '(無)'}"  @ ${miss.closestTextPos ?? ''}`)
+      console.debug(`    Matched Plant: null`)
+      console.debug(`    Distance     : ${miss.closestDist?.toFixed(0) ?? '?'}  (半徑 ${legendCellRadius.toFixed(0)}，超出 +${gap} 單位)`)
+      console.debug(`    Build Key    : N/A (未寫入 Map)`)
+      console.debug(`    Confidence   : ❌ none`)
+      console.debug(`    Reason       : ${miss.reason}`)
+      console.groupEnd()
+    } else {
+      // ── 完全未找到任何候選文字 ────────────────────────────────────────────
+      console.group(`⚠️  Pattern : ${pat}`)
+      console.debug(`    Legend Text  : (無 — 圖面中找不到任何包含索引表植物名稱的文字)`)
+      console.debug(`    Matched Plant: null`)
+      console.debug(`    Distance     : N/A`)
+      console.debug(`    Build Key    : N/A (未寫入 Map)`)
+      console.debug(`    Confidence   : ❌ none`)
+      console.debug(`    Reason       : 索引表植物名稱文字與此 pattern 的 HATCH 都相距超過半徑，或索引表為空`)
+      console.groupEnd()
+    }
+  }
+
+  console.group('📋  Lookup Key 一致性確認')
+  console.debug('  build key = lookup key 應完全一致（原始字串，無轉換）')
+  for (const [k, v] of hatchPatternToPlant) {
+    console.debug(`  Map.set("${k}", "${v}")  → Map.get("${k}") = "${hatchPatternToPlant.get(k)}"`)
+  }
+  console.groupEnd()
+
+  console.groupEnd() // end Legend Parser Report
+
+  // ── Map 狀態快照（return 前）── 確認 map 在進入 zone lookup 前仍有內容 ──────
+  console.group('🗺  legendMap 狀態（return zonePlantLists.map 前）')
+  console.debug(`legendMap.size = ${hatchPatternToPlant.size}`)
+  console.debug(`legendMap.keys() = [${[...hatchPatternToPlant.keys()].join(' | ')}]`)
+  for (const [k, v] of hatchPatternToPlant) {
+    console.debug(`  "${k}" → "${v}"`)
+  }
+  if (hatchPatternToPlant.size === 0) {
+    console.warn('⚠️  Map 為空！Legend Mapping 未成功或已被清除。')
+  }
+  console.groupEnd()
 
   return zonePlantLists.map(zpl => {
     const confirmed: SelectedCsvPlant[] = []
@@ -398,99 +983,423 @@ function buildZoneReviews(
     const allAreas = [...zpl.shrubAreas, ...zpl.lawnAreas, ...zpl.groundcoverAreas, ...zpl.unknownAreas]
     const areaLayerNotes: string[] = []
 
+    // ── Debug Table 2: zoneHatches（每個分區的 HATCH 特徵清單）────────────────
+    {
+      const zoneHatchRows = allAreas.map((a, i) => {
+        const ck = a.hatchPattern?.trim() && a.hatchScale !== undefined
+          ? `${a.hatchPattern.trim()}@${a.hatchScale.toFixed(2)}@${(a.hatchAngle ?? 0).toFixed(1)}@c${a.hatchColor ?? 0}`
+          : null
+        return {
+          zoneName:  zpl.zone.name,
+          areaId:    `${a.source[0]}${i + 1}`,
+          source:    a.source,
+          pattern:   a.hatchPattern ?? '(無)',
+          scale:     a.hatchScale ?? null,
+          angle:     a.hatchAngle ?? null,
+          color:     a.hatchColor ?? null,
+          layer:     a.layer || '(無)',
+          compositeKey: ck ?? '(無 composite)',
+          center:    `(${a.centerX.toFixed(0)},${a.centerY.toFixed(0)})`,
+        }
+      })
+      console.group(`🗺 Debug Table 2: zoneHatches — ${zpl.zone.name}（共 ${zoneHatchRows.length} 筆）`)
+      if (zoneHatchRows.length > 0) console.table(zoneHatchRows)
+      else console.log('（此分區無面狀圖元）')
+      console.groupEnd()
+    }
+
+    // 注：pre-processing HATCH 對應結果表已移除，避免與 Table 3 (matches) 衝突。
+    // 最終對應結果請看 Debug Table 3: matches（在 zone 處理完畢後輸出）。
+
     for (const area of allAreas) {
       const layerName = (area.layer || '').trim()
       let matched = false
 
       // ── D. HATCH pattern 圖例對照（最優先：pattern name → 索引表植物名稱）──
-      if (!matched && area.source === 'HATCH' && area.hatchPattern) {
-        const legendPlant = hatchPatternToPlant.get(area.hatchPattern)
-        if (legendPlant && !seenNames.has(legendPlant)) {
-          const dbP = findInDB(legendPlant, plantDB)
-          if (dbP) {
-            seenNames.add(dbP.name)
-            const ps = dbP.wetTolerance === '不耐積水' && dbP.droughtTolerance === '不耐旱' ? '需注意' as const : '可用' as const
-            confirmed.push({ ...dbP, instanceId: uid(), status: ps })
-            blockEntries.push({ blockName: `[HATCH圖例] ${area.hatchPattern}`, plantName: dbP.name, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'db-matched' })
-            matched = true
+      // 即使植栽不在 DB，也要標記為 matched，不讓 Layer 名稱覆蓋辨識結果
+      if (!matched && area.source === 'HATCH') {
+        const _aPat = area.hatchPattern?.trim()
+        const _aSc  = area.hatchScale
+        const _aAng = area.hatchAngle ?? 0
+        const _aClr = area.hatchColor ?? 0
+        // 三個 key：完整 composite（pattern+scale+angle+color）→ 無 color（pattern+scale+angle）→ pattern-only
+        const drawingCompositeKeyFull = _aPat && _aSc !== undefined
+          ? `${_aPat}@${_aSc.toFixed(2)}@${_aAng.toFixed(1)}@c${_aClr}`
+          : null
+        const drawingCompositeKey = _aPat && _aSc !== undefined
+          ? `${_aPat}@${_aSc.toFixed(2)}@${_aAng.toFixed(1)}`
+          : null
+        const lookupKeys = [
+          drawingCompositeKeyFull,      // 1st: pattern+scale+angle+color（完整比對）
+          drawingCompositeKey,          // 2nd: pattern+scale+angle（無 color）
+          area.hatchPattern,            // 3rd: pattern only（fallback）
+          legendSymbolLookupKey(
+            {
+              layer: area.layer,
+              vertices: area.vertices ?? [],
+              closed: true,
+              zoneType: area.zoneType,
+              source: 'HATCH',
+              hatchPattern: area.hatchPattern,
+            },
+            area.centerX,
+            area.centerY,
+          ),                            // 3rd: geometry fingerprint
+        ]
+        let legendPlant: string | undefined
+        let matchedLookupKey: string | undefined
+        for (const key of lookupKeys) {
+          if (key === null) continue
+          const hit = lookupLegendPlant(hatchPatternToPlant, key ?? undefined)
+          if (hit) {
+            legendPlant = hit
+            matchedLookupKey = (key ?? '').trim() || (key ?? undefined)
+            break
           }
         }
-      }
-      if (matched) continue
+        // ── per-polygon lookup log：若無 match，診斷比對失敗原因 ──
+        if (!legendPlant) {
+          console.group(`❌ [HATCH noMatch] zone="${zpl.zone.name}"  pattern="${area.hatchPattern ?? '(無)'}"`)
+          console.log('  drawing HATCH signature:', {
+            pattern: area.hatchPattern ?? null,
+            scale: area.hatchScale ?? null,
+            angle: area.hatchAngle ?? null,
+            color: area.hatchColor ?? null,
+            layer: area.layer || null,
+            compositeKeyFull: drawingCompositeKeyFull,
+            compositeKey: drawingCompositeKey,
+          })
+          // 對每個 legendItem 計算比對分數，明確說明為何 no match
+          const diagRows = legendItems.map(li => {
+            const patMatch   = li.hatchPattern !== null && li.hatchPattern === area.hatchPattern?.trim()
+            const scaleMatch = li.hatchScale !== null && area.hatchScale !== undefined
+              ? Math.abs(li.hatchScale - area.hatchScale) < 0.05
+              : null  // null = 無法比對
+            const angleMatch = li.hatchAngle !== null && area.hatchAngle !== undefined
+              ? Math.abs(li.hatchAngle - (area.hatchAngle ?? 0)) < 1
+              : null
+            const colorMatch = li.hatchColor !== null
+              ? li.hatchColor === (area.hatchColor ?? 0)
+              : null
+            const score = [patMatch, scaleMatch, angleMatch, colorMatch]
+              .filter(v => v !== null).reduce((s, v) => s + (v ? 25 : 0), 0)
+            const reasons: string[] = []
+            if (!patMatch)            reasons.push('pattern 不同: drawing=' + (area.hatchPattern ?? '(無)') + ' legend=' + (li.hatchPattern ?? '(無)'))
+            if (scaleMatch === false)  reasons.push(`scale 不同: drawing=${area.hatchScale} legend=${li.hatchScale}`)
+            if (angleMatch === false)  reasons.push(`angle 不同: drawing=${area.hatchAngle ?? 0} legend=${li.hatchAngle}`)
+            if (colorMatch === false)  reasons.push(`color 不同: drawing=${area.hatchColor ?? 0} legend=${li.hatchColor}`)
+            if (li.hatchPattern === null) reasons.push('legend parser 未抓到此植物的 HATCH pattern')
+            return { plantName: li.plantName, matchScore: score, noMatchReasons: reasons.join(' | ') || '(無法比對 scale/angle/color)' }
+          })
+          console.table(diagRows)
+          console.log('  hatchPatternToPlant keys:', [...hatchPatternToPlant.keys()].filter(k => !k.startsWith('__')))
+          if (legendItems.length === 0) console.warn('  ⚠️ legendItems 為空 — legend parser 未成功建立索引表')
 
-      // ── A. 掃描 HATCH 幾何中心附近的文字標注 ──────────────────────────
-      // 搜尋半徑：HATCH 中心 ± drawingRadius * 5%（最小 100 單位）
-      const nearRadius = Math.max(100, drawingRadius * 0.05)
-      const nearbyTexts = findNearbyTexts(
-        { x: area.centerX, y: area.centerY },
-        texts,
-        nearRadius,
-      )
-
-      for (const txt of nearbyTexts) {
-        // 直接比對 DB 植物名稱
-        const fromDB = plantDB.find(p =>
-          p.name.length >= 2 && txt.includes(p.name) && !seenNames.has(p.name)
-        )
-        if (fromDB) {
-          seenNames.add(fromDB.name)
-          const ps = fromDB.wetTolerance === '不耐積水' && fromDB.droughtTolerance === '不耐旱' ? '需注意' as const : '可用' as const
-          confirmed.push({ ...fromDB, instanceId: uid(), status: ps })
-          blockEntries.push({ blockName: `[面狀] ${layerName || area.zoneType}`, plantName: fromDB.name, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'db-matched' })
-          matched = true; break
-        }
-        // 比對索引表植物名稱
-        const fromSched = schedule.find(e =>
-          e.plantName && e.plantName.length >= 2 &&
-          txt.includes(e.plantName) && !seenNames.has(e.plantName)
-        )
-        if (fromSched) {
-          const dbP = findInDB(fromSched.plantName, plantDB)
-          if (dbP && !seenNames.has(dbP.name)) {
-            seenNames.add(dbP.name)
-            const ps = dbP.wetTolerance === '不耐積水' && dbP.droughtTolerance === '不耐旱' ? '需注意' as const : '可用' as const
-            confirmed.push({ ...dbP, instanceId: uid(), status: ps })
-            blockEntries.push({ blockName: `[面狀] ${layerName || area.zoneType}`, plantName: dbP.name, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'db-matched' })
-            matched = true; break
+          // ── Score-based fallback：exact key 失敗時，用分數比對補救 ───────────
+          // 只要 pattern 相同且總分 ≥ 60（允許 scale/angle/color 有差異），就 match。
+          // 這確保即使 CAD 圖層改名、color 不同，仍能透過索引表 HATCH 圖例辨識植物。
+          if (area.hatchPattern) {
+            let bestScore = 0; let bestPlant: string | null = null
+            for (const li of legendItems) {
+              if (!li.hatchPattern || li.hatchPattern !== area.hatchPattern.trim()) continue
+              // pattern 相同，評估 scale/angle/color 接近程度
+              const sc = li.hatchScale !== null && area.hatchScale !== undefined
+                ? (Math.abs(li.hatchScale - area.hatchScale) < 0.05 ? 1 : 0)
+                : 0.5   // 無法比對 → 給一半分
+              const an = li.hatchAngle !== null && area.hatchAngle !== undefined
+                ? (Math.abs(li.hatchAngle - (area.hatchAngle ?? 0)) < 1 ? 1 : 0)
+                : 0.5
+              const cl = li.hatchColor !== null
+                ? (li.hatchColor === (area.hatchColor ?? 0) ? 1 : 0)
+                : 0.5
+              const score = (1 + sc + an + cl) / 4 * 100  // pattern 算 1，其他各 0~1
+              if (score > bestScore && score >= 60) { bestScore = score; bestPlant = li.plantName }
+            }
+            if (bestPlant) {
+              legendPlant = bestPlant
+              matchedLookupKey = `score:${bestScore.toFixed(0)}`
+              console.log(`✅ [HATCH ScoreMatch] zone="${zpl.zone.name}"  pattern="${area.hatchPattern}"  →  "${legendPlant}"  score=${bestScore.toFixed(0)}`)
+            }
           }
+          console.groupEnd()
+        } else {
+          const whichKey = drawingCompositeKeyFull && hatchPatternToPlant.has(drawingCompositeKeyFull) ? 'composite+color'
+            : drawingCompositeKey && hatchPatternToPlant.has(drawingCompositeKey) ? 'composite'
+            : 'pattern-only'
+          console.log(`✅ [HATCH Match] zone="${zpl.zone.name}"  pattern="${area.hatchPattern}"  →  "${legendPlant}"  via=${whichKey}`)
         }
-        // 比對索引表代號（例如文字「003」對應索引表代號 003 = 麥門冬）
-        const fromCode = schedule.find(e =>
-          e.code && txt.trim() === e.code.trim() && !seenNames.has(e.plantName)
-        )
-        if (fromCode) {
-          const dbP = findInDB(fromCode.plantName, plantDB)
-          if (dbP && !seenNames.has(dbP.name)) {
-            seenNames.add(dbP.name)
-            const ps = dbP.wetTolerance === '不耐積水' && dbP.droughtTolerance === '不耐旱' ? '需注意' as const : '可用' as const
-            confirmed.push({ ...dbP, instanceId: uid(), status: ps })
-            blockEntries.push({ blockName: `[面狀代號] ${fromCode.code}`, plantName: dbP.name, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'db-matched' })
-            matched = true; break
+        if (legendPlant) {
+          const nameKey = legendPlant
+          const alreadySeen = seenNames.has(nameKey)
+          console.debug(`  ├─ seenNames.has("${nameKey}") = ${alreadySeen}  (seenNames=[${[...seenNames].join(', ')}])`)
+          if (!alreadySeen) {
+            seenNames.add(nameKey)
+            const dbP = findInDB(legendPlant, plantDB)
+            console.debug(`  ├─ findInDB("${legendPlant}") = ${dbP ? `"${dbP.name}" (DB命中)` : 'null (DB未收錄)'}`)
+            if (dbP) {
+              const ps = dbP.wetTolerance === '不耐積水' && dbP.droughtTolerance === '不耐旱' ? '需注意' as const : '可用' as const
+              confirmed.push({ ...dbP, instanceId: uid(), status: ps })
+              blockEntries.push({ blockName: `[HATCH圖例] ${matchedLookupKey ?? area.hatchPattern ?? 'symbol'}`, plantName: dbP.name, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'db-matched' })
+            } else {
+              blockEntries.push({ blockName: `[HATCH圖例] ${matchedLookupKey ?? area.hatchPattern ?? 'symbol'}`, plantName: legendPlant, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'name-only' })
+            }
+            console.debug(`  └─ ✅ PlantEntity PUSHED`, {
+              sourceType: 'HATCH',
+              entityName: `[HATCH圖例] ${matchedLookupKey ?? area.hatchPattern ?? 'symbol'}`,
+              plantName: dbP?.name ?? legendPlant,
+              legendMatchedPlantName: legendPlant,
+              hatchPattern: area.hatchPattern,
+              matchStatus: dbP ? 'db-matched' : 'name-only',
+            })
+            console.debug(`     blockEntries.length = ${blockEntries.length}`)
+          } else {
+            console.debug(`  └─ ⚠️  seenNames 已含 "${nameKey}"，跳過（同區重複）`)
           }
-        }
-      }
-      if (matched) continue
-
-      // ── B. 圖層名稱含植物名 ────────────────────────────────────────────
-      if (layerName) {
-        const fromLayer = plantDB.find(p =>
-          p.name.length >= 2 && /[一-鿿]/.test(p.name) &&
-          layerName.includes(p.name) && !seenNames.has(p.name)
-        )
-        if (fromLayer) {
-          seenNames.add(fromLayer.name)
-          const ps = fromLayer.wetTolerance === '不耐積水' && fromLayer.droughtTolerance === '不耐旱' ? '需注意' as const : '可用' as const
-          confirmed.push({ ...fromLayer, instanceId: uid(), status: ps })
-          blockEntries.push({ blockName: `[面狀] ${layerName}`, plantName: fromLayer.name, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'db-matched' })
           matched = true
         }
       }
       if (matched) continue
 
-      // ── C. 無法識別 → 記錄提示 ──────────────────────────────────────────
-      areaLayerNotes.push(
-        `${layerName || '(無圖層)'}（${zoneLabel(area.zoneType)}，中心座標 ${area.centerX.toFixed(0)}, ${area.centerY.toFixed(0)}）`
+      // ── A. 文字搜尋：HATCH + LWPOLYLINE/POLYLINE 皆可（後者只限 DB/索引表命名，不用 raw 中文）──
+      if (area.source === 'HATCH' || area.source === 'LWPOLYLINE' || area.source === 'POLYLINE') {
+        // 策略 A1：先收集 polygon 內部的所有文字（最可靠，引線標注也在此）
+        // 策略 A2：再從幾何中心向外擴大半徑搜尋（覆蓋外部標注、引線）
+        const polyVerts = area.vertices ?? []
+        const insideTexts = polyVerts.length >= 3
+          ? texts.filter(t => pointInPolygon(t.x, t.y, polyVerts))
+          : []
+        // 半徑：polygon 對角線的 20%（最小 200 單位），涵蓋外部標注
+        const polyBBoxDiag = polyVerts.length >= 3 ? (() => {
+          const xs = polyVerts.map(v => v.x); const ys = polyVerts.map(v => v.y)
+          return Math.hypot(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys))
+        })() : 0
+        const nearRadius = Math.max(200, Math.max(polyBBoxDiag * 0.20, drawingRadius * 0.08))
+        const nearbyTexts = findNearbyTexts({ x: area.centerX, y: area.centerY }, texts, nearRadius)
+        // 合併（優先 inside，再 nearby；以 content 去重）
+        const candidateTexts = [
+          ...insideTexts.map(t => t.content),
+          ...nearbyTexts.filter(c => !insideTexts.some(t => t.content === c)),
+        ]
+
+        if (insideTexts.length > 0 || nearbyTexts.length > 0) {
+          console.debug(`[面狀文字搜尋] layer="${layerName}" center=(${area.centerX.toFixed(0)},${area.centerY.toFixed(0)}) inside=${insideTexts.length} nearby=${nearbyTexts.length} radius=${nearRadius.toFixed(0)}`)
+        }
+
+        for (const txt of candidateTexts) {
+          // 直接比對 DB 植物名稱
+          const fromDB = plantDB.find(p =>
+            p.name.length >= 2 && txt.includes(p.name) && !seenNames.has(p.name)
+          )
+          if (fromDB) {
+            seenNames.add(fromDB.name)
+            const ps = fromDB.wetTolerance === '不耐積水' && fromDB.droughtTolerance === '不耐旱' ? '需注意' as const : '可用' as const
+            confirmed.push({ ...fromDB, instanceId: uid(), status: ps })
+            blockEntries.push({ blockName: `[面狀] ${layerName || area.zoneType}`, plantName: fromDB.name, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'db-matched' })
+            matched = true; break
+          }
+          // 比對索引表植物名稱（不需在 DB 中）
+          const fromSched = schedule.find(e =>
+            e.plantName && e.plantName.length >= 2 &&
+            txt.includes(e.plantName) && !seenNames.has(e.plantName)
+          )
+          if (fromSched) {
+            seenNames.add(fromSched.plantName)
+            const dbP = findInDB(fromSched.plantName, plantDB)
+            if (dbP) {
+              const ps = dbP.wetTolerance === '不耐積水' && dbP.droughtTolerance === '不耐旱' ? '需注意' as const : '可用' as const
+              confirmed.push({ ...dbP, instanceId: uid(), status: ps })
+              blockEntries.push({ blockName: `[面狀] ${layerName || area.zoneType}`, plantName: dbP.name, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'db-matched' })
+            } else {
+              blockEntries.push({ blockName: `[面狀] ${layerName || area.zoneType}`, plantName: fromSched.plantName, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'name-only' })
+            }
+            matched = true; break
+          }
+          // 比對索引表代號（文字「003」→ 索引表代號 003 → 植物名稱）
+          const fromCode = schedule.find(e =>
+            e.code && txt.trim() === e.code.trim() && !seenNames.has(e.plantName)
+          )
+          if (fromCode) {
+            seenNames.add(fromCode.plantName)
+            const dbP = findInDB(fromCode.plantName, plantDB)
+            if (dbP) {
+              const ps = dbP.wetTolerance === '不耐積水' && dbP.droughtTolerance === '不耐旱' ? '需注意' as const : '可用' as const
+              confirmed.push({ ...dbP, instanceId: uid(), status: ps })
+              blockEntries.push({ blockName: `[面狀代號] ${fromCode.code}`, plantName: dbP.name, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'db-matched' })
+            } else {
+              blockEntries.push({ blockName: `[面狀代號] ${fromCode.code}`, plantName: fromCode.plantName, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'name-only' })
+            }
+            matched = true; break
+          }
+          // 純中文文字（2字以上，不在索引表）→ 只允許 HATCH，LWPOLYLINE/POLYLINE 跳過
+          if (area.source === 'HATCH' && !matched && /^[一-鿿]{2,}$/.test(txt.trim()) && !seenNames.has(txt.trim())) {
+            const chName = txt.trim()
+            const dbP = findInDB(chName, plantDB)
+            if (dbP) {
+              seenNames.add(dbP.name)
+              const ps = dbP.wetTolerance === '不耐積水' && dbP.droughtTolerance === '不耐旱' ? '需注意' as const : '可用' as const
+              confirmed.push({ ...dbP, instanceId: uid(), status: ps })
+              blockEntries.push({ blockName: `[面狀文字] ${chName}`, plantName: dbP.name, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'db-matched' })
+              matched = true; break
+            }
+          }
+        }
+      } // end Section A (HATCH only)
+      if (matched) continue
+
+      // ── B. Layer Fallback — 完全禁用 ─────────────────────────────────────
+      // layer 只用於區域分類，永遠不作為植物名稱
+
+      // ── E. LWPOLYLINE / POLYLINE 繼承重疊 HATCH 的植物名稱 ───────────────
+      // 當面積多邊形是 LWPOLYLINE（CAD 封閉折線）且 Legend Mapping 有值，
+      // 嘗試找與此 LWPOLYLINE 幾何重疊的 HATCH → 繼承其植物名稱。
+      // 原因：AutoCAD 常見做法是 LWPOLYLINE 框出範圍，HATCH 填充顏色/圖案，
+      //        兩個實體共用同一邊界。LWPOLYLINE 本身沒有 hatchPattern，
+      //        但透過重疊的 HATCH 可以得到植物名稱。
+      if (!matched && area.source !== 'HATCH' && (area.vertices?.length ?? 0) >= 3) {
+        const polyVerts = area.vertices!
+        let inheritedPlant: string | null = null
+        let inheritedPattern: string | null = null
+
+        // 找與此 LWPOLYLINE 幾何重疊且已有 Legend Mapping 的 HATCH
+        for (const poly of polygons) {
+          if (poly.source !== 'HATCH') continue
+          const n = poly.vertices.length
+          const hx = poly.vertices.reduce((s, v) => s + v.x, 0) / n
+          const hy = poly.vertices.reduce((s, v) => s + v.y, 0) / n
+          const mappedPlant = lookupLegendPlant(hatchPatternToPlant, poly.hatchPattern)
+            ?? lookupLegendPlant(hatchPatternToPlant, legendSymbolLookupKey(poly, hx, hy))
+          if (!mappedPlant) continue
+          // 用 point-in-polygon 做重疊檢測
+          const hatchCenter = (() => {
+            const n = poly.vertices.length
+            return { x: poly.vertices.reduce((s, v) => s + v.x, 0) / n, y: poly.vertices.reduce((s, v) => s + v.y, 0) / n }
+          })()
+          const overlap = pointInPolygon(hatchCenter.x, hatchCenter.y, polyVerts) ||
+            poly.vertices.some(v => pointInPolygon(v.x, v.y, polyVerts)) ||
+            polyVerts.some(v => pointInPolygon(v.x, v.y, poly.vertices))
+          if (overlap) {
+            inheritedPlant = mappedPlant
+            inheritedPattern = poly.hatchPattern ?? legendSymbolLookupKey(poly, hx, hy)
+            break
+          }
+        }
+
+        if (inheritedPlant && !seenNames.has(inheritedPlant)) {
+          seenNames.add(inheritedPlant)
+          const dbP = findInDB(inheritedPlant, plantDB)
+          if (dbP) {
+            const ps = dbP.wetTolerance === '不耐積水' && dbP.droughtTolerance === '不耐旱' ? '需注意' as const : '可用' as const
+            confirmed.push({ ...dbP, instanceId: uid(), status: ps })
+            blockEntries.push({ blockName: `[HATCH繼承] ${inheritedPattern}`, plantName: dbP.name, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'db-matched' })
+          } else {
+            blockEntries.push({ blockName: `[HATCH繼承] ${inheritedPattern}`, plantName: inheritedPlant, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'name-only' })
+          }
+          matched = true
+          console.debug(`[Section E] ${area.source} layer="${area.layer}" 繼承重疊 HATCH pattern="${inheritedPattern}" → plantName="${inheritedPlant}"`, {
+            legendItems: schedule.map(e => ({ code: e.code, plantName: e.plantName })),
+            matchedLegendItem: schedule.find(e => e.plantName === inheritedPlant),
+            legendPlantName: inheritedPlant,
+            entityLayer: area.layer,
+            entityType: area.source,
+            finalPlantName: dbP?.name ?? inheritedPlant,
+            confidence: 'medium',
+          })
+        } else if (inheritedPlant && seenNames.has(inheritedPlant)) {
+          matched = true  // 已在同區加入，不重複
+        } else {
+          // 找不到重疊 HATCH，輸出 debug
+          console.debug(`[Section E] ${area.source} layer="${area.layer}" center=(${area.centerX.toFixed(0)},${area.centerY.toFixed(0)}) 找不到重疊的已知 HATCH`, {
+            legendItems: schedule.map(e => ({ code: e.code, plantName: e.plantName })),
+            matchedLegendItem: null,
+            legendPlantName: null,
+            entityLayer: area.layer,
+            entityType: area.source,
+            finalPlantName: '未辨識',
+            confidence: 'none',
+            hatchPatternMap: Object.fromEntries(hatchPatternToPlant),
+          })
+        }
+      }
+      if (matched) continue
+
+      // ── F. 索引表 m² 候選植栽（最後手段）────────────────────────────────────
+      // 當 HATCH/LWPOLYLINE 無法用 pattern / 文字 / 重疊對應時，
+      // 把索引表中單位為 m²、尚未出現在本分區的植栽列為候選，讓使用者確認。
+      // 不加到 confirmed（需人工確認），不加到 seenNames（另一區塊可再候選）。
+      {
+        const existingInZone = new Set(blockEntries.map(b => b.plantName).filter(Boolean) as string[])
+        const m2Candidates = schedule.filter(e =>
+          e.plantName && e.plantName.length >= 2 &&
+          !existingInZone.has(e.plantName) &&
+          (e.unit === 'm²' || e.unit === '㎡' || e.unit === 'm2' || e.unit === 'M²')
+        )
+        if (m2Candidates.length > 0) {
+          const cand = m2Candidates[0]  // 取索引表第一個尚未對應的 m² 植栽
+          const dbP = findInDB(cand.plantName, plantDB)
+          blockEntries.push({
+            blockName: `[m²候選] ${area.source} layer=${layerName || '無'}`,
+            plantName: dbP?.name ?? cand.plantName,
+            detectedType: zoneLabel(area.zoneType),
+            count: 1,
+            matchStatus: 'name-only',
+          })
+          matched = true
+          console.log(
+            `[Section F] zone="${zpl.zone.name}" ${area.source} layer="${layerName}" → m²候選: "${cand.plantName}" (代號:${cand.code ?? '—'})`,
+            { reason: 'schedule-m2-candidate', totalM2Candidates: m2Candidates.length, source: area.source }
+          )
+        }
+      }
+      if (matched) continue
+
+      // ── C. 無法識別 → 結構化 debug + areaLayerNotes ─────────────────────
+      const legendPlantForDebug = area.source === 'HATCH'
+        ? hatchPatternToPlant.get(area.hatchPattern ?? '')
+        : undefined
+
+      const zoneBoundaryLayer = zpl.zone.boundary?.layer ?? '(無邊界polygon)'
+      const hatchLayer        = area.layer || '(無)'
+      const hatchPattern      = area.hatchPattern ?? '(無)'
+      const sourceType        = area.source   // HATCH | LWPOLYLINE | POLYLINE
+
+      // ── reason 分類（供 debug 快速定位）──────────────────────────────────────
+      const reason = area.source === 'HATCH'
+        ? (area.hatchPattern
+            ? (hatchPatternToPlant.size === 0
+                ? 'noLegendMap'            // Map 完全為空
+                : 'noMatchedLegend')       // Map 有內容但無此 pattern
+            : 'noHatchPattern')            // HATCH 實體本身缺少 pattern name
+        : 'lwpolylineNoBoundaryHatch'      // LWPOLYLINE/POLYLINE 找不到重疊 HATCH
+
+      console.log(
+        `[面狀未辨識] zone="${zpl.zone.name}"  source=${sourceType}  hatchPattern="${hatchPattern}"`,
+        { reason, hatchLayer, center: `(${area.centerX.toFixed(0)},${area.centerY.toFixed(0)})`, legendMapSize: hatchPatternToPlant.size }
       )
+
+      if (area.source === 'HATCH') {
+        blockEntries.push({
+          blockName: `[未辨識 HATCH] pattern=${hatchPattern}`,
+          plantName: undefined,
+          detectedType: zoneLabel(area.zoneType),
+          count: 1,
+          matchStatus: 'unmatched',
+        })
+        areaLayerNotes.push(
+          `未辨識 HATCH | pattern="${hatchPattern}" hatchLayer="${hatchLayer}" zoneLayer="${zoneBoundaryLayer}" | ${zoneLabel(area.zoneType)} 中心(${area.centerX.toFixed(0)},${area.centerY.toFixed(0)})`
+        )
+      } else {
+        // LWPOLYLINE / POLYLINE — 無對應 HATCH，標記為未辨識面狀區域
+        blockEntries.push({
+          blockName: `[未辨識面狀區域] sourceType=${sourceType} layer=${hatchLayer}`,
+          plantName: undefined,
+          detectedType: zoneLabel(area.zoneType),
+          count: 1,
+          matchStatus: 'unmatched',
+        })
+        areaLayerNotes.push(
+          `未辨識面狀區域 | sourceType="${sourceType}" layer="${hatchLayer}" zoneLayer="${zoneBoundaryLayer}" | confidence=low | ${zoneLabel(area.zoneType)} 中心(${area.centerX.toFixed(0)},${area.centerY.toFixed(0)})`
+        )
+      }
     }
 
     const areaLabels = [
@@ -501,7 +1410,6 @@ function buildZoneReviews(
     ]
 
     // ── 3. 決定審查狀態 ────────────────────────────────────────────────────
-    // 有 ≥ 1 種 DB 植物就執行評估（1 種時無跨植物衝突，分數通常偏高，但仍有意義）
     const unmatchedBlocks = blockEntries.filter(b => b.matchStatus === 'unmatched').map(b => b.blockName)
     const hasAnyBlock = blockEntries.length > 0
 
@@ -514,6 +1422,147 @@ function buildZoneReviews(
       status = '植物待確認'
     }
 
+    // ── ZoneReview 資料流：blockEntries 最終內容 ─────────────────────────
+    console.group(`═══ ZoneReview 最終結果：${zpl.zone.name} ═══`)
+    console.debug(`status = "${status}"   confirmed.length = ${confirmed.length}   blockEntries.length = ${blockEntries.length}`)
+    for (const b of blockEntries) {
+      const tag = b.matchStatus === 'db-matched' ? '✅ DB' : b.matchStatus === 'name-only' ? '🟡 名稱' : '❌ 未識別'
+      const src = b.blockName.startsWith('[HATCH') ? 'HATCH' : b.blockName.startsWith('[面狀') ? 'HATCH/poly' : 'INSERT'
+      console.debug(`  ${tag} sourceType=${src}  plantName="${b.plantName ?? '(無)'}"  matchStatus="${b.matchStatus}"  blockName="${b.blockName}"`)
+    }
+    if (blockEntries.length === 0) console.debug('  (blockEntries 為空)')
+    console.debug('→ 上方 HATCH 植栽已在 blockEntries，但 ZonePlantList.treeBlocks 無此資料（不同資料結構）')
+    console.groupEnd()
+
+    // ── Debug Table 3: matches（每個分區的對應結果）────────────────────────
+    {
+      const matchRows = blockEntries.map(b => {
+        const src = b.blockName.startsWith('[HATCH圖例]')  ? 'legend hatch'
+          : b.blockName.startsWith('[HATCH繼承]')          ? 'LWPOLYLINE→HATCH inherit'
+          : b.blockName.startsWith('[面狀代號]')            ? 'nearby text (code)'
+          : b.blockName.startsWith('[面狀文字]')            ? 'nearby text (Chinese)'
+          : b.blockName.startsWith('[面狀]')                ? 'nearby text (DB/schedule)'
+          : b.blockName.startsWith('[m²候選]')              ? 'schedule m² candidate ⚠️'
+          : b.blockName.startsWith('[未辨識')               ? 'unmatched ❌'
+          : 'INSERT block'
+        const score = b.matchStatus === 'db-matched' ? 100 : b.matchStatus === 'name-only' ? 65 : 0
+        return {
+          zoneName:    zpl.zone.name,
+          plantName:   b.plantName ?? '(未對應)',
+          matchSource: src,
+          matchScore:  score,
+          matchStatus: b.matchStatus,
+          blockName:   b.blockName,
+        }
+      })
+      console.group(`✅ Debug Table 3: matches — ${zpl.zone.name}（共 ${matchRows.length} 筆）`)
+      if (matchRows.length > 0) console.table(matchRows)
+      else console.log('（此分區無植栽 blockEntries）')
+      console.groupEnd()
+    }
+
+    // ── FinalReviewResult 建構 ───────────────────────────────────────────────
+    // UI / PDF 的唯一資料來源。從 blockEntries 和 unmatched areas 建立。
+    const legendSigs = legendItems
+      .filter(li => li.hatchPattern)
+      .map(li => {
+        const sig: PatternSignature = {
+          entityType: 'HATCH', layer: '', color: li.hatchColor,
+          bbox: { minX: 0, minY: 0, maxX: 0, maxY: 0, width: 0, height: 0 },
+          lineCount: 0, hatchPattern: li.hatchPattern, hatchScale: li.hatchScale,
+          hatchAngle: li.hatchAngle, density: 0, geometryHash: li.compositeKey ?? li.hatchPattern ?? '',
+        }
+        return { sig, plantName: li.plantName, legendCode: li.rowNo }
+      })
+
+    const zoneResults: FinalReviewResult[] = []
+
+    // 1. 成功配對的 blockEntries → FinalReviewResult
+    for (const b of blockEntries) {
+      if (!b.plantName || b.matchStatus === 'unmatched') continue
+      const src = b.blockName.startsWith('[HATCH圖例]') || b.blockName.includes('ScoreMatch')
+        ? 'HATCH'
+        : b.blockName.startsWith('[HATCH繼承]') ? 'HATCH(繼承)'
+        : b.blockName.startsWith('[m²候選]') ? 'LWPOLYLINE_GROUP'
+        : b.blockName.startsWith('[面狀') ? 'NEARBY_TEXT'
+        : 'INSERT'
+      const matchReason = b.blockName.includes('score:')
+        ? `索引表 HATCH 圖例 pattern 相同，score-based 比對成功`
+        : b.blockName.startsWith('[HATCH圖例]')
+          ? `索引表 HATCH 圖例比對（legend hatch）`
+          : b.blockName.startsWith('[HATCH繼承]')
+            ? `LWPOLYLINE 重疊的 HATCH 繼承索引表植物名稱`
+            : b.blockName.startsWith('[m²候選]')
+              ? `索引表 m² 候選植物（LWPOLYLINE 無法直接比對，需人工確認）`
+              : b.blockName.startsWith('[面狀')
+                ? `附近文字標注比對`
+                : `INSERT 圖塊比對`
+      const rawScore = b.matchStatus === 'db-matched' ? 95 : 65
+      // 若有 score-based match，從 blockName 取得分數
+      const scoreMatch = b.blockName.match(/score:(\d+)/)
+      const matchScore = scoreMatch ? parseInt(scoreMatch[1]) : rawScore
+      const confidence: FinalReviewResult['confidence'] =
+        matchScore >= 80 ? 'high' : matchScore >= 60 ? 'medium' : 'low'
+
+      zoneResults.push({
+        zoneName: zpl.zone.name,
+        matchedPlantName: b.plantName,
+        matchedLegendRow: legendItems.find(li => li.plantName === b.plantName)?.rowNo ?? null,
+        detectedPatternType: src,
+        matchScore,
+        confidence,
+        matchReason,
+        reviewStatus: status,
+      })
+    }
+
+    // 2. 完全 unmatched 的面狀區域 → FinalReviewResult（失敗理由）
+    const unmatchedAreas = allAreas.filter(a => {
+      const matched = blockEntries.some(b =>
+        b.plantName && (
+          b.blockName.includes(a.layer || '') ||
+          b.blockName.includes(a.hatchPattern ?? '__never__')
+        )
+      )
+      return !matched && a.source !== 'HATCH'  // HATCH unmatched 已有 blockEntry
+    })
+
+    if (blockEntries.filter(b => b.matchStatus === 'unmatched').length > 0 || unmatchedAreas.length > 0) {
+      const noMatchReasons: string[] = []
+      if (allAreas.length === 0)        noMatchReasons.push('分區內未找到可比對鋪面圖案')
+      if (legendItems.length === 0)     noMatchReasons.push('索引表圖例無法解析')
+      if (legendSigs.length === 0)      noMatchReasons.push('索引表 HATCH 圖例無 pattern 特徵')
+      const hatchCount = allAreas.filter(a => a.source === 'HATCH').length
+      if (hatchCount > 0)               noMatchReasons.push(`${hatchCount} 個 HATCH 區域圖案相似度低於門檻`)
+      const lwpolyCount = allAreas.filter(a => a.source !== 'HATCH').length
+      if (lwpolyCount > 0)              noMatchReasons.push(`${lwpolyCount} 個 LWPOLYLINE 區域無法直接比對（需人工確認）`)
+
+      if (zoneResults.length === 0) {
+        zoneResults.push({
+          zoneName: zpl.zone.name,
+          matchedPlantName: null,
+          matchedLegendRow: null,
+          detectedPatternType: allAreas.map(a => a.source).join('/') || 'UNKNOWN',
+          matchScore: 0,
+          confidence: 'low',
+          matchReason: '',
+          reviewStatus: '無法審查',
+          noMatchReasons: noMatchReasons.length > 0 ? noMatchReasons : ['比對邏輯失敗，請查 Console'],
+        })
+      }
+    }
+
+    // ── Debug Table 4: finalReviewResults ──────────────────────────────────
+    console.group(`🏁 Debug Table 4: finalReviewResults — ${zpl.zone.name}`)
+    console.table(zoneResults.map(r => ({
+      zoneName: r.zoneName, matchedPlantName: r.matchedPlantName ?? '(無)',
+      detectedPatternType: r.detectedPatternType, matchScore: r.matchScore,
+      confidence: r.confidence, reviewStatus: r.reviewStatus,
+      matchReason: r.matchReason.slice(0, 60),
+      noMatchReasons: r.noMatchReasons?.join(' / ') ?? '',
+    })))
+    console.groupEnd()
+
     return {
       zoneName: zpl.zone.name,
       plants: confirmed,
@@ -523,6 +1572,7 @@ function buildZoneReviews(
       areaLayerNotes,
       status,
       evalResult,
+      finalReviewResults: zoneResults,
     }
   })
 }
@@ -663,7 +1713,19 @@ export default function DxfReviewPage({
   const [pdfHtml, setPdfHtml] = useState<string | null>(null)
 
   // 每次 zoneReviews 更新就持久化到 localStorage，供 AI配植頁與 PDF 讀取
-  const saveZoneReviews = (reviews: ZoneReviewResult[]) => {
+  const saveZoneReviews = (reviews: ZoneReviewResult[], caller = 'unknown') => {
+    console.group(`📥 saveZoneReviews called [${caller}]  zones=${reviews.length}`)
+    for (const r of reviews) {
+      const hatchEntries = r.blockEntries.filter(b => b.blockName.includes('HATCH'))
+      const insertEntries = r.blockEntries.filter(b => !b.blockName.includes('HATCH') && !b.blockName.includes('面狀') && !b.blockName.includes('未辨識'))
+      console.debug(`  Zone "${r.zoneName}": total blockEntries=${r.blockEntries.length}`)
+      for (const b of r.blockEntries) {
+        const tag = b.matchStatus === 'db-matched' ? '✅' : b.matchStatus === 'name-only' ? '🟡' : '❌'
+        console.debug(`    ${tag} plantName="${b.plantName ?? '(無)'}"  blockName="${b.blockName}"  matchStatus="${b.matchStatus}"`)
+      }
+      if (hatchEntries.length === 0) console.debug(`    ⚠️  無 HATCH 植栽 entry`)
+    }
+    console.groupEnd()
     setZoneReviews(reviews)
     try {
       const full = reviews.map(r => ({
@@ -702,7 +1764,10 @@ export default function DxfReviewPage({
   // 解決「DXF 上傳時 DB 尚未載入 → 分數為空」的問題
   useEffect(() => {
     if (zonePlantLists.length === 0 || plants.length === 0) return
-    saveZoneReviews(buildZoneReviews(zonePlantLists, plants, plantSchedule.entries, parseResult?.texts ?? [], drawingRadius, parseResult?.polygons ?? []))
+    saveZoneReviews(
+      buildZoneReviews(zonePlantLists, plants, plantSchedule.entries, parseResult?.texts ?? [], drawingRadius, parseResult?.polygons ?? []),
+      `useEffect [polygons=${parseResult?.polygons?.length ?? 0} texts=${parseResult?.texts?.length ?? 0}]`
+    )
   }, [plants, zonePlantLists, plantSchedule.entries])
 
   const multiLayerResults = useMemo<MultiLayerResult[]>(() => {
@@ -751,16 +1816,47 @@ export default function DxfReviewPage({
       setDetectedZones(zones)
       const zpl = buildZonePlantList(zones, active, result.polygons, result.inserts, result.blockExtents)
       setZonePlantLists(zpl)
-      saveZoneReviews(buildZoneReviews(zpl, loaded, sched.entries, result.texts, radius, result.polygons))
+      saveZoneReviews(buildZoneReviews(zpl, loaded, sched.entries, result.texts, radius, result.polygons), 'handleFile [polygons=' + result.polygons.length + ']')
       setZoneDebug(buildZoneAssignDebug(zones, zpl, active, result.inserts, result.blockExtents))
 
-      // ── Debug：直接印出 raw 資料讓瀏覽器 console 可以看 ──────────────────
-      console.group('[DXF Zone Debug]')
-      console.log('Total texts:', result.texts.length)
-      console.log('First 30 texts:', result.texts.slice(0, 30).map(t => ({ content: t.content, x: t.x, y: t.y, layer: t.layer })))
-      console.log('Texts containing 區:', result.texts.filter(t => t.content.includes('區') || t.content.includes('区')))
-      console.log('Total polygons:', result.polygons.length)
-      console.log('Detected zones:', zones)
+      // ── Debug：資料流追蹤 ──────────────────────────────────────────────────
+      console.group('[DXF Zone Setup]')
+      console.debug('Total texts:', result.texts.length)
+      console.debug('First 30 texts:', result.texts.slice(0, 30).map(t => ({ content: t.content, x: t.x, y: t.y, layer: t.layer })))
+      console.debug('Texts containing 蔓:', result.texts.filter(t => t.content.includes('蔓')))
+      console.debug('Total polygons:', result.polygons.length)
+      console.debug('Detected zones:', zones.map(z => z.name))
+      console.groupEnd()
+
+      // ── ZonePlantList 資料流：每區的 INSERT / HATCH 各有哪些 ────────────────
+      console.group('═══ ZonePlantList 資料流（buildZonePlantList 輸出）═══')
+      for (const zone of zpl) {
+        const zoneName = zone.zone.name
+        const insertPlants = zone.treeBlocks.map((tb: import('@/types/dxf').ZoneTreeBlock) => ({
+          blockName: tb.blockName,
+          plantName: tb.plantName ?? '(未識別)',
+          positionsInZone: tb.positionsInZone,
+        }))
+        const allAreas = [
+          ...zone.shrubAreas.map((a: import('@/types/dxf').ZonePlantArea) => ({ srcType: 'HATCH/SHRUB', pattern: a.hatchPattern ?? '(無)', layer: a.layer })),
+          ...zone.lawnAreas.map((a: import('@/types/dxf').ZonePlantArea) => ({ srcType: 'HATCH/LAWN', pattern: a.hatchPattern ?? '(無)', layer: a.layer })),
+          ...zone.groundcoverAreas.map((a: import('@/types/dxf').ZonePlantArea) => ({ srcType: 'HATCH/GCOVER', pattern: a.hatchPattern ?? '(無)', layer: a.layer })),
+          ...zone.unknownAreas.map((a: import('@/types/dxf').ZonePlantArea) => ({ srcType: 'HATCH/UNKNOWN', pattern: a.hatchPattern ?? '(無)', layer: a.layer })),
+        ]
+
+        console.group(`Zone: ${zoneName}`)
+        for (const p of insertPlants) {
+          console.debug(`  push INSERT: "${p.plantName}"  blockName=${p.blockName}  count=${p.positionsInZone}`)
+        }
+        if (insertPlants.length === 0) console.debug('  INSERT: (無)')
+        for (const h of allAreas) {
+          console.debug(`  HATCH area  : pattern="${h.pattern}" layer="${h.layer}" srcType=${h.srcType}`)
+          console.debug(`    ↳ plantName 在此為 undefined，將在 buildZoneReviews 解析`)
+        }
+        if (allAreas.length === 0) console.debug('  HATCH area: (無)')
+        console.debug(`  ZonePlantList.treeBlocks=${insertPlants.length}  HATCH_areas=${allAreas.length}`)
+        console.groupEnd()
+      }
       console.groupEnd()
 
       // 永遠先顯示分區配置診斷，讓使用者確認分區辨識狀態
@@ -781,7 +1877,7 @@ export default function DxfReviewPage({
     setExcluded(exc)
     const zpl2 = buildZonePlantList(detectedZones, active, parseResult.polygons, parseResult.inserts, parseResult.blockExtents)
     setZonePlantLists(zpl2)
-    saveZoneReviews(buildZoneReviews(zpl2, plantList, plantSchedule.entries, parseResult.texts, drawingRadius, parseResult.polygons))
+    saveZoneReviews(buildZoneReviews(zpl2, plantList, plantSchedule.entries, parseResult.texts, drawingRadius, parseResult.polygons), 'rebuildMappings [polygons=' + parseResult.polygons.length + ']')
     setZoneDebug(buildZoneAssignDebug(detectedZones, zpl2, active, parseResult.inserts, parseResult.blockExtents))
   }
 
@@ -827,7 +1923,7 @@ export default function DxfReviewPage({
 
   const restoreExcluded = (item: MappedItem) => {
     setExcluded(prev => prev.filter(e => e.blockName !== item.blockName || e.layer !== item.layer))
-    const r3 = matchPlant(item.blockName, item.layer, item.count, plants, savedRules, plantSchedule.entries, [])
+    const r3 = matchPlant(item.blockName, item.layer, item.count, plants, savedRules, plantSchedule.entries, [], item.attributes ?? [])
     setMappings(prev => [...prev, {
       ...item, matchStatus: r3.status, confidenceScore: r3.confidence,
       plantName: r3.plant?.name || r3.scheduleEntry?.plantName,
@@ -905,7 +2001,7 @@ export default function DxfReviewPage({
 
       {/* ── 工具列（原 Header 內容，移至內容區） ── */}
       <div className="border-b border-stone-200 bg-white/80 backdrop-blur-sm">
-        <div className="max-w-[1536px] mx-auto px-8 py-2 flex items-center justify-between gap-4 flex-wrap">
+        <div className="max-w-[1536px] mx-auto px-4 md:px-8 py-2 flex items-center justify-between gap-2 md:gap-4 flex-wrap">
           <p className="text-xs text-stone-500 truncate">
             {fileName}
             {detectedEnc && <span className="ml-2 px-1.5 py-0.5 rounded bg-stone-100 text-stone-500 text-xs">編碼：{detectedEnc}</span>}
@@ -925,18 +2021,18 @@ export default function DxfReviewPage({
                   const html = exportZoneReviewPdf(pdfData, fileName, { returnHtml: true })
                   if (typeof html === 'string') setPdfHtml(html)
                 }}
-                className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-[#1a4731] text-white text-xs font-bold hover:bg-[#2d6a4f] transition-colors">
+                className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-[#1a4731] text-white text-xs font-bold hover:bg-[#2d6a4f] transition-colors whitespace-nowrap">
                 <FileOutput size={13} />匯出分區審查 PDF
               </button>
             )}
             <button onClick={() => { setParseResult(null); setFileName(''); setMappings([]); sessionStorage.removeItem('dxf-zone-review-full'); sessionStorage.removeItem('dxf-zone-review-summary') }}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-stone-300 text-xs text-stone-600 hover:bg-stone-100 transition-colors">
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-stone-300 text-xs text-stone-600 hover:bg-stone-100 transition-colors whitespace-nowrap">
               <X size={12} />重新上傳
             </button>
           </div>
         </div>
         {/* Stats bar */}
-        <div className="flex gap-2 pb-2 px-8 flex-wrap">
+        <div className="flex gap-1.5 md:gap-2 pb-2 px-4 md:px-8 flex-wrap">
           {[
             { label: '✅ 已自動對應', count: matched.length,  cls: 'bg-green-50 text-green-700 border-green-200' },
             { label: '⚠ 部分符合',   count: partial.length,  cls: 'bg-amber-50 text-amber-700 border-amber-200' },
@@ -953,7 +2049,7 @@ export default function DxfReviewPage({
 
       {/* Unmatched warning */}
       {unmatched.length > 0 && (
-        <div className="bg-red-50 border-b border-red-200 px-8 py-3 flex items-center gap-3">
+        <div className="bg-red-50 border-b border-red-200 px-4 md:px-8 py-3 flex items-center gap-3">
           <AlertTriangle size={18} className="text-red-500 flex-shrink-0" />
           <p className="text-sm text-red-700 font-medium">
             有 <strong>{unmatched.length}</strong> 個圖塊無法自動對應，請至「未對應項目」分頁確認。
@@ -966,7 +2062,7 @@ export default function DxfReviewPage({
       )}
 
       {/* ── Tab nav ── */}
-      <div className="bg-white border-b border-stone-200 px-6 flex gap-0 overflow-x-auto shadow-sm">
+      <div className="bg-white border-b border-stone-200 px-2 md:px-6 flex gap-0 overflow-x-auto shadow-sm">
         {([
           { id: 'zonereview', label: `分區審查（${zoneReviews.filter(r => r.evalResult).length}/${zoneReviews.length}）`, highlight: zoneReviews.some(r => r.evalResult) },
           { id: 'zoneplan',   label: `分區配置（${detectedZones.length}）`, highlight: detectedZones.length > 0 },
@@ -995,7 +2091,7 @@ export default function DxfReviewPage({
       </div>
 
       {/* ── Content ── */}
-      <main className="flex-1 px-8 py-6">
+      <main className="flex-1 px-4 md:px-8 py-4 md:py-6">
 
         {/* ── Schedule tab ── */}
         {tab === 'schedule' && (
@@ -1017,6 +2113,7 @@ export default function DxfReviewPage({
             mappings={mappings}
             totalInserts={parseResult?.stats.totalInserts ?? 0}
             zoneDebug={zoneDebug}
+            zoneReviews={zoneReviews}
           />
         )}
 
@@ -1037,7 +2134,7 @@ export default function DxfReviewPage({
               const item = mappings.find(m => m.blockName === blockName)
               const nearby = item?.positions.length
                 ? findNearbyTexts(item.positions[0], parseResult.texts, drawingRadius) : []
-              const r2 = matchPlant(blockName, item?.layer ?? '', item?.count ?? 0, plants, rules, plantSchedule.entries, nearby)
+              const r2 = matchPlant(blockName, item?.layer ?? '', item?.count ?? 0, plants, rules, plantSchedule.entries, nearby, item?.attributes ?? [])
               setMappings(prev => prev.map(m => m.blockName !== blockName ? m : {
                 ...m, manualOverride: undefined, matchStatus: r2.status,
                 confidenceScore: r2.confidence, scheduleEntry: r2.scheduleEntry,
@@ -1993,6 +3090,31 @@ function ZoneReviewTab({ reviews }: { reviews: ZoneReviewResult[] }) {
         {/* ── 各分區內容 ── */}
         {activeReview && (() => {
           const r = activeReview
+
+          // ── display helpers ──────────────────────────────────────────────
+          // plantName / legendMatchedPlantName 有值時永遠優先顯示植物名稱。
+          // blockName / layerName / entityType 只用於 debug，不作為植物名稱。
+          const isHatchEntry    = (b: ZoneBlockEntry) => b.blockName.startsWith('[HATCH') || b.blockName.startsWith('[面狀') || b.blockName.startsWith('[未辨識 HATCH')
+          const isPolyBoundary  = (b: ZoneBlockEntry) => b.blockName.startsWith('[未辨識 LWPOLYLINE') || b.blockName.startsWith('[未辨識 POLYLINE')
+          // LWPOLYLINE boundary 沒有植物名稱時隱藏（它是空間邊界，不是植栽）
+          const visibleEntries  = r.blockEntries.filter(b => b.plantName || !isPolyBoundary(b))
+          // 清理後的植物顯示名稱（供主列表使用）
+          const plantDisplayName = (b: ZoneBlockEntry): string | null => {
+            if (b.plantName) return b.plantName
+            if (isHatchEntry(b)) return null   // HATCH 未識別 → 顯示專用提示
+            return null                         // INSERT 未識別 → 顯示原有「未對應」
+          }
+          // 清理後的 source 標籤（替代 blockName）
+          const sourceLabel = (b: ZoneBlockEntry): string => {
+            if (b.blockName.startsWith('[HATCH圖例]'))  return `HATCH 面狀植栽`
+            if (b.blockName.startsWith('[面狀代號]'))   return `索引表代號`
+            if (b.blockName.startsWith('[面狀文字]'))   return `文字標注`
+            if (b.blockName.startsWith('[面狀]'))       return `HATCH 面狀植栽`
+            if (b.blockName.startsWith('[未辨識 HATCH]')) return `HATCH 未辨識`
+            if (isPolyBoundary(b))                      return `範圍邊界`
+            return b.blockName  // INSERT：直接顯示圖塊名稱
+          }
+
           const nameOnlyBlocks = r.blockEntries.filter(b => b.matchStatus === 'name-only')
           const unmatchedBlks  = r.blockEntries.filter(b => b.matchStatus === 'unmatched')
           const totalCount     = plantCount(r)
@@ -2030,8 +3152,10 @@ function ZoneReviewTab({ reviews }: { reviews: ZoneReviewResult[] }) {
                       </p>
                     </div>
                     <div className="divide-y divide-stone-100">
-                      {r.blockEntries.map((b, i) => {
+                      {visibleEntries.map((b, i) => {
                         const dbPlant = b.plantName ? plantMap.get(b.plantName) : undefined
+                        const displayName = plantDisplayName(b)
+                        const isHatch = isHatchEntry(b)
                         return (
                           <div key={i} className={`flex items-start gap-3 px-4 py-2.5 ${
                             b.matchStatus === 'db-matched' ? '' :
@@ -2041,7 +3165,12 @@ function ZoneReviewTab({ reviews }: { reviews: ZoneReviewResult[] }) {
                             <div className="flex-1 min-w-0">
                               <div className="flex items-center gap-2 flex-wrap">
                                 <span className="font-semibold text-stone-800 text-sm">
-                                  {b.plantName ?? <span className="text-stone-400 italic text-xs">未對應（{b.blockName}）</span>}
+                                  {displayName
+                                    ? displayName
+                                    : isHatch
+                                      ? <span className="text-stone-400 italic text-xs">未辨識 {b.detectedType || 'HATCH'}</span>
+                                      : <span className="text-stone-400 italic text-xs">未對應</span>
+                                  }
                                 </span>
                                 {dbPlant?.scientificName && (
                                   <span className="text-xs text-stone-400 italic">{dbPlant.scientificName}</span>
@@ -2051,9 +3180,11 @@ function ZoneReviewTab({ reviews }: { reviews: ZoneReviewResult[] }) {
                                   b.matchStatus === 'name-only'  ? 'bg-amber-50 border-amber-200 text-amber-600' :
                                                                     'bg-red-50 border-red-200 text-red-500'
                                 }`}>
-                                  {b.matchStatus === 'db-matched' ? (dbPlant?.subCategory || dbPlant?.category || b.detectedType || '—')
-                                    : b.matchStatus === 'name-only' ? '索引表名稱'
-                                    : '未對應'}
+                                  {b.matchStatus === 'db-matched'
+                                    ? (dbPlant?.subCategory || dbPlant?.category || b.detectedType || '—')
+                                    : b.matchStatus === 'name-only'
+                                      ? (isHatch ? `面狀植栽｜${b.detectedType || 'HATCH'}` : '索引表名稱')
+                                      : (isHatch ? `未辨識 ${b.detectedType || 'HATCH'}` : '未對應')}
                                 </span>
                               </div>
                               {/* DB 詳細資訊列 */}
@@ -2071,9 +3202,9 @@ function ZoneReviewTab({ reviews }: { reviews: ZoneReviewResult[] }) {
                                   {dbPlant.maintenanceLevel && <span>維護 {dbPlant.maintenanceLevel}</span>}
                                 </div>
                               )}
-                              {/* 無 DB 資料時只顯示圖塊名稱 */}
-                              {!dbPlant && b.plantName && (
-                                <p className="text-xs text-stone-400 mt-0.5">圖塊：{b.blockName}</p>
+                              {/* source label（替代 blockName）— 僅在有植物名稱時顯示，供對照 DXF 原圖 */}
+                              {b.plantName && (
+                                <p className="text-xs text-stone-400 mt-0.5">{sourceLabel(b)}</p>
                               )}
                             </div>
                             {/* 右：數量 */}
@@ -2169,21 +3300,25 @@ function ZoneReviewTab({ reviews }: { reviews: ZoneReviewResult[] }) {
                       </tr>
                     </thead>
                     <tbody>
-                      {r.blockEntries.map((b, i) => (
+                      {visibleEntries.map((b, i) => (
                         <tr key={i} className={`border border-stone-100 ${
                           b.matchStatus === 'db-matched' ? 'bg-emerald-50/40' :
                           b.matchStatus === 'name-only'  ? 'bg-amber-50/40'   : 'bg-red-50/20'
                         }`}>
-                          <td className="px-3 py-1.5 font-mono text-stone-700">{b.blockName}</td>
+                          {/* 來源（替代原始 blockName，避免 DXF 技術字串污染 UI）*/}
+                          <td className="px-3 py-1.5 text-xs text-stone-500">{sourceLabel(b)}</td>
                           <td className="px-3 py-1.5 font-medium text-stone-800">
-                            {b.plantName ?? <span className="text-stone-400 italic">未對應</span>}
+                            {b.plantName
+                              ?? (isHatchEntry(b)
+                                ? <span className="text-stone-400 italic text-xs">未辨識 {b.detectedType || 'HATCH'}</span>
+                                : <span className="text-stone-400 italic text-xs">未對應</span>)}
                           </td>
                           <td className="px-3 py-1.5 text-stone-500">{b.detectedType ?? '—'}</td>
                           <td className="px-3 py-1.5 text-center font-semibold text-stone-700">{b.count}</td>
                           <td className="px-3 py-1.5">
-                            {b.matchStatus === 'db-matched' && <span className="text-emerald-600 text-xs">✅ 已比對 DB</span>}
-                            {b.matchStatus === 'name-only'  && <span className="text-amber-600 text-xs">⚠ 索引表名稱，DB 無記錄</span>}
-                            {b.matchStatus === 'unmatched'  && <span className="text-red-500 text-xs">❌ 未對應，請至圖塊對應 tab 指定</span>}
+                            {b.matchStatus === 'db-matched' && <span className="text-emerald-600 text-xs">✅ DB</span>}
+                            {b.matchStatus === 'name-only'  && <span className="text-amber-600 text-xs">⚠ 索引表名稱</span>}
+                            {b.matchStatus === 'unmatched'  && <span className="text-red-500 text-xs">❌ 未識別</span>}
                           </td>
                         </tr>
                       ))}
@@ -2244,6 +3379,7 @@ function ZonePlanTab({
   mappings,
   totalInserts,
   zoneDebug,
+  zoneReviews,
 }: {
   zonePlantLists: ZonePlantList[]
   detectedZones: DetectedZone[]
@@ -2252,6 +3388,7 @@ function ZonePlanTab({
   mappings: MappedItem[]
   totalInserts: number
   zoneDebug: ZoneAssignDebug | null
+  zoneReviews: ZoneReviewResult[]
 }) {
   // ── 原始資料（不過任何 filter）──────────────────────────────────────────────
   const rawTextsWithZone = texts.filter(t => t.content.includes('區') || t.content.includes('区') ||
@@ -2769,12 +3906,43 @@ function ZonePlanTab({
                     </p>
                     {totalAreas === 0
                       ? <p className="text-xs text-stone-400">{z.boundary ? '邊界內無面狀範圍' : '無邊界，無法判斷'}</p>
-                      : <>
-                          {zpl.shrubAreas.map((a, i)    => <p key={`s${i}`} className="text-xs text-green-700">灌木區 · {a.layer || '無圖層'} · {a.source}</p>)}
-                          {zpl.lawnAreas.map((a, i)     => <p key={`l${i}`} className="text-xs text-lime-700">草皮區 · {a.layer || '無圖層'} · {a.source}</p>)}
-                          {zpl.groundcoverAreas.map((a, i) => <p key={`g${i}`} className="text-xs text-emerald-700">地被區 · {a.layer || '無圖層'} · {a.source}</p>)}
-                          {zpl.unknownAreas.map((a, i)  => <p key={`u${i}`} className="text-xs text-amber-600">待確認 · {a.layer || '無圖層'} · {a.source}</p>)}
-                        </>}
+                      : (() => {
+                          // 從 zoneReviews 找此區已解析的植物名稱（HATCH 植栽）
+                          const review = zoneReviews.find(r => r.zoneName === z.name)
+                          // 根據 hatchPattern 或面積類型 lookup 已解析植物
+                          const resolvedPlantForArea = (a: import('@/types/dxf').ZonePlantArea, typeLabel: string): string | null => {
+                            if (!review) return null
+                            // 優先：用 hatchPattern 精確比對
+                            if (a.hatchPattern) {
+                              const e = review.blockEntries.find(b =>
+                                b.plantName && (b.blockName.includes(a.hatchPattern!) || b.blockName.includes(`[HATCH圖例] ${a.hatchPattern}`))
+                              )
+                              if (e?.plantName) return e.plantName
+                            }
+                            // 次：找同類型的面狀植栽 entry
+                            const e = review.blockEntries.find(b =>
+                              b.plantName && b.detectedType === typeLabel &&
+                              (b.blockName.startsWith('[HATCH') || b.blockName.startsWith('[面狀'))
+                            )
+                            return e?.plantName ?? null
+                          }
+                          const areaRow = (a: import('@/types/dxf').ZonePlantArea, typeLabel: string, cls: string, key: string) => {
+                            const plant = resolvedPlantForArea(a, typeLabel)
+                            const srcLabel = a.source === 'HATCH' ? `HATCH${a.hatchPattern ? ` (${a.hatchPattern})` : ''}` : a.source
+                            return (
+                              <p key={key} className={`text-xs ${plant ? 'text-green-700 font-medium' : cls}`}>
+                                {plant ?? `未辨識 ${typeLabel}`}
+                                <span className="text-stone-400 font-normal ml-1">· {srcLabel}</span>
+                              </p>
+                            )
+                          }
+                          return <>
+                            {zpl.shrubAreas.map((a, i)       => areaRow(a, '灌木區', 'text-green-600', `s${i}`))}
+                            {zpl.lawnAreas.map((a, i)        => areaRow(a, '草皮區', 'text-lime-600', `l${i}`))}
+                            {zpl.groundcoverAreas.map((a, i) => areaRow(a, '地被區', 'text-emerald-600', `g${i}`))}
+                            {zpl.unknownAreas.map((a, i)     => areaRow(a, '待確認範圍', 'text-amber-600', `u${i}`))}
+                          </>
+                        })()}
                   </div>
                 </div>
               </div>

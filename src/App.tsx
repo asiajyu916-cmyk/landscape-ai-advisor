@@ -1,5 +1,7 @@
 import { useState } from 'react'
 import PdfReviewPage from '@/pages/PdfReviewPage'
+import type { ZonePlantingRow } from '@/utils/parsePdfZones'
+import type { ZoneReviewResult } from '@/utils/evaluateZone'
 import LandscapeAdvisorPage from '@/pages/LandscapeAdvisorPage'
 import DxfReviewPage from '@/pages/DxfReviewPage'
 
@@ -10,11 +12,18 @@ export default function App() {
 
   // PDF / DXF 導入的植栽名稱清單，橋接到 LandscapeAdvisorPage
   const [importedPlantNames, setImportedPlantNames] = useState<string[]>([])
+  // PDF 分區植栽表（解析結果，空陣列代表失敗）
+  const [importedZoneTable, setImportedZoneTable] = useState<ZonePlantingRow[] | undefined>(undefined)
+  // 直接傳給 LandscapeAdvisorPage 渲染的分區表，undefined=尚未解析，[]= 解析失敗
+  const [zonePlantingTable, setZonePlantingTable] = useState<ZonePlantingRow[] | undefined>(undefined)
+  // 分區審查結果，tab 切換後不清空
+  const [zoneReviewResults, setZoneReviewResults] = useState<ZoneReviewResult[]>([])
   // 只有透過 DXF 匯入流程才顯示分區審查摘要
   const [dxfZonesLinked, setDxfZonesLinked] = useState(false)
 
-  const handlePdfImport = (plantNames: string[]) => {
+  const handlePdfImport = (plantNames: string[], zoneTable?: ZonePlantingRow[]) => {
     setImportedPlantNames(plantNames)
+    setImportedZoneTable(zoneTable)
     setActiveTab('landscape')
   }
 
@@ -31,8 +40,12 @@ export default function App() {
         activeTab={activeTab}
         onTabChange={setActiveTab}
         importedPlantNames={importedPlantNames.length > 0 ? importedPlantNames : undefined}
-        onImportConsumed={() => setImportedPlantNames([])}
+        onImportConsumed={() => { setImportedPlantNames([]); setImportedZoneTable(undefined) }}
         dxfZonesLinked={dxfZonesLinked}
+        importedZoneTable={importedZoneTable}
+        zonePlantingTable={zonePlantingTable ?? []}
+        pdfParsed={zonePlantingTable !== undefined}
+        zoneReviewResults={zoneReviewResults}
       />
       {/* PDF / DXF 頁面的內容渲染在共用 Header 下方 */}
       {activeTab === 'pdf' && (
@@ -40,6 +53,8 @@ export default function App() {
           activeTab={activeTab}
           onTabChange={setActiveTab}
           onImport={handlePdfImport}
+          onZoneParsed={rows => setZonePlantingTable(rows)}
+          onZoneReviewed={results => setZoneReviewResults(results)}
         />
       )}
       {activeTab === 'dxf' && (

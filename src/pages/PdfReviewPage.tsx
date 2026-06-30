@@ -9,6 +9,8 @@ import {
 } from 'lucide-react'
 import { loadPlantsFromStorage } from '@/data/plantStore'
 import type { CsvPlantRecord } from '@/types/csvPlant'
+import { parsePdfZonePlantingTable, type ZonePlantingRow } from '@/utils/parsePdfZones'
+import { evaluateZone, type ZoneReviewResult } from '@/utils/evaluateZone'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.mjs',
@@ -52,6 +54,13 @@ const PLANT_CODE_PATTERN = /^[A-Z]{1,2}\d{1,2}$/ // T1, S2, G3, SH1 等植栽代
 
 function isNonPlantLine(line: string): { excluded: boolean; reason?: string } {
   const t = line.trim()
+
+  // 分區名稱（A區～Z區、第X區）不是植物，直接排除
+  if (/^[A-Za-z一二三四五六七八九十]\s*區$/.test(t))
+    return { excluded: true, reason: '分區名稱' }
+  // 表格欄位標頭
+  if (/^(分區|灌木配置|喬木配置|灌木|喬木|區域|區別)$/.test(t))
+    return { excluded: true, reason: '表格欄位標頭' }
 
   if (t.length < 2)  return { excluded: true, reason: '太短' }
   if (t.length > 20) return { excluded: true, reason: '字串太長（可能是說明文字）' }
@@ -114,6 +123,112 @@ function hasPlantSignal(line: string): { yes: boolean; reason: string } {
   return { yes: false, reason: '無植栽正向信號' }
 }
 
+// ── 分區植栽表解析 ───────────────────────────────────────────────────────────────
+
+// ZonePlantingRow 已移至 @/utils/parsePdfZones
+
+interface ZoneTableResult {
+  rows: ZonePlantingRow[]
+  parseSuccess: boolean
+  failReason?: string
+  headerDetected?: string   // 偵測到的欄位標頭
+}
+
+/** 從 PDF 原始文字解析「分區｜灌木配置｜喬木配置」表格 */
+function parseZoneTable(rawText: string): ZoneTableResult {
+  const lines = rawText.split(/\n+/).map(l => l.trim()).filter(Boolean)
+
+  // 1. 找表頭行（含「分區」+「灌木」或「喬木」）
+  const ZONE_HEADER_KWS  = ['分區', '區域', '區別']
+  const SHRUB_HEADER_KWS = ['灌木', '地被', '草皮', '鋪面植栽', '灌木配置', '地被配置']
+  const TREE_HEADER_KWS  = ['喬木', '喬木配置', '喬木類', '行道樹']
+  const ZONE_CELL_PATTERN = /^[A-Ia-i１-９一二三四五六七八九][\s區]|^[A-Ia-i]\s*區|^第[一二三四五六七八九]區/
+
+  let headerLineIdx = -1
+  let shrubColHint  = -1
+  let treeColHint   = -1
+  let headerText    = ''
+
+  for (let i = 0; i < Math.min(lines.length, 30); i++) {
+    const l = lines[i]
+    const hasZone  = ZONE_HEADER_KWS.some(kw => l.includes(kw))
+    const hasShrub = SHRUB_HEADER_KWS.some(kw => l.includes(kw))
+    const hasTree  = TREE_HEADER_KWS.some(kw => l.includes(kw))
+    if (hasZone && (hasShrub || hasTree)) {
+      headerLineIdx = i; headerText = l
+      // 粗估欄位 hint（供後續行判斷）
+      shrubColHint = hasShrub ? SHRUB_HEADER_KWS.findIndex(kw => l.includes(kw)) : -1
+      treeColHint  = hasTree  ? TREE_HEADER_KWS.findIndex(kw => l.includes(kw))  : -1
+      break
+    }
+  }
+
+  if (headerLineIdx === -1) {
+    // 嘗試直接偵測分區行（即使沒找到標頭）
+    const zoneLines = lines.filter(l => ZONE_CELL_PATTERN.test(l))
+    if (zoneLines.length < 2) {
+      return {
+        rows: [], parseSuccess: false,
+        failReason: '未偵測到分區表格欄位（需包含「分區」+「灌木配置」/「喬木配置」欄頭），請確認 PDF 表格結構。',
+      }
+    }
+  }
+
+  // 2. 從表頭後逐行解析分區列
+  const rows: ZonePlantingRow[] = []
+  const startIdx = headerLineIdx >= 0 ? headerLineIdx + 1 : 0
+
+  // 把後續所有行合成一大字串，依分區 pattern 切割
+  const dataText = lines.slice(startIdx).join('\n')
+  const zoneSegments = dataText.split(/(?=(?:[A-Ia-i][區\s]|第[一二三四五六七八九]區))/g)
+
+  const splitPlants = (text: string): string[] =>
+    text
+      .split(/[、，,\n\/・•]+/)
+      .map(s => s.replace(/[（(][^)）]*[）)]/g, '').replace(/[×xX]\s*\d+/g, '').trim())
+      .filter(s => s.length >= 2 && /[一-鿿]/.test(s) && !/^\d+$/.test(s))
+
+  for (const seg of zoneSegments) {
+    const zoneMatch = seg.match(/^([A-Ia-i]\s*區|第[一二三四五六七八九]區)/)
+    if (!zoneMatch) continue
+    const zoneName = zoneMatch[1].replace(/\s/g, '')
+    const rest = seg.slice(zoneMatch[0].length).trim()
+
+    // 嘗試依「灌木」「喬木」關鍵字切分
+    const shrubMatch = rest.match(/灌木[配置]*[\s:：]*([^喬木]*)/s)
+    const treeMatch  = rest.match(/喬木[配置]*[\s:：]*([^灌木]*)/s)
+
+    let shrubs: string[] = []
+    let trees:  string[] = []
+
+    if (shrubMatch || treeMatch) {
+      shrubs = shrubMatch ? splitPlants(shrubMatch[1]) : []
+      trees  = treeMatch  ? splitPlants(treeMatch[1])  : []
+    } else {
+      // fallback：把所有中文植物名稱全部列出（無法分類）
+      const allPlants = splitPlants(rest)
+      // 無法區分灌木/喬木，全放到 shrubs
+      shrubs = allPlants
+    }
+
+    if (shrubs.length > 0 || trees.length > 0) {
+      rows.push({ zoneName, shrubs, trees })
+    }
+  }
+
+  if (rows.length === 0) {
+    return {
+      rows: [], parseSuccess: false,
+      headerDetected: headerText || undefined,
+      failReason: '已偵測植物名稱，但未成功解析分區表格，請確認 PDF 表格欄位是否包含：分區、灌木配置、喬木配置。',
+    }
+  }
+
+  return { rows, parseSuccess: true, headerDetected: headerText || undefined }
+}
+
+// parsePdfZonePlantingTable 已移至 @/utils/parsePdfZones（避免 Vite Fast Refresh export 衝突）
+
 // ── 植栽擷取與資料庫比對 ──────────────────────────────────────────────────────────
 
 interface ExtractResult {
@@ -121,6 +236,7 @@ interface ExtractResult {
   possible: Array<{ text: string; reason: string }>   // 疑似植物但找不到
   excluded: Array<{ text: string; reason: string }>   // 非植栽被排除
   rawLines: string[]
+  zoneTable?: ZoneTableResult   // 新增：分區表格解析結果
 }
 
 function extractQuantity(line: string): number | undefined {
@@ -128,6 +244,9 @@ function extractQuantity(line: string): number | undefined {
   if (m) return parseInt(m[1] ?? m[2])
   return undefined
 }
+
+// 分區名稱（A區～Z區）靜默跳過，不進任何列表
+const ZONE_NAME_RE = /^[A-Za-z一二三四五六七八九十]\s*區$/
 
 function extractPlants(rawText: string, db: CsvPlantRecord[]): ExtractResult {
   const lines = rawText.split(/\n+/).map(l => l.trim()).filter(Boolean)
@@ -137,6 +256,10 @@ function extractPlants(rawText: string, db: CsvPlantRecord[]): ExtractResult {
   const seen = new Set<string>()
 
   for (const line of lines) {
+    // 分區名稱或表格欄位標頭：靜默跳過，不進任何列表
+    if (ZONE_NAME_RE.test(line) ||
+        /^(分區|灌木配置|喬木配置|灌木|喬木|區域|區別)$/.test(line)) continue
+
     const { excluded: isExcl, reason } = isNonPlantLine(line)
     if (isExcl) { excluded.push({ text: line, reason: reason! }); continue }
 
@@ -168,7 +291,21 @@ function extractPlants(rawText: string, db: CsvPlantRecord[]): ExtractResult {
     }
   }
 
-  return { matched, possible, excluded, rawLines: lines }
+  // 優先用三欄群組解析；若取不到 5 區才 fallback 到 parseZoneTable
+  const newRows = parsePdfZonePlantingTable(rawText)
+  const zoneTable: ZoneTableResult = newRows.length >= 2
+    ? { rows: newRows, parseSuccess: true }
+    : parseZoneTable(rawText)
+
+  if (zoneTable.parseSuccess && zoneTable.rows.length > 0) {
+    console.table(zoneTable.rows.map(r => ({
+      分區: r.zoneName,
+      灌木配置: r.shrubs.join('、'),
+      喬木配置: r.trees.join('、'),
+    })))
+  }
+
+  return { matched, possible, excluded, rawLines: lines, zoneTable }
 }
 
 // ── PDF 文字提取 ──────────────────────────────────────────────────────────────────
@@ -214,10 +351,14 @@ export default function PdfReviewPage({
   activeTab = 'pdf',
   onTabChange,
   onImport,
+  onZoneParsed,
+  onZoneReviewed,
 }: {
   activeTab?: AppTab
   onTabChange?: (tab: AppTab) => void
-  onImport?: (plantNames: string[]) => void
+  onImport?: (plantNames: string[], zoneTable?: ZonePlantingRow[]) => void
+  onZoneParsed?: (rows: ZonePlantingRow[]) => void
+  onZoneReviewed?: (results: ZoneReviewResult[]) => void
 } = {}) {
   type Stage = 'upload' | 'processing' | 'confirm'
 
@@ -230,6 +371,7 @@ export default function PdfReviewPage({
   const [procMsg, setProcMsg]     = useState('')
   const [showDebug, setShowDebug] = useState(false)
   const [manualText, setManualText] = useState('')
+  const [activeZone, setActiveZone] = useState<string>('全案')
   const fileRef = useRef<HTMLInputElement>(null)
 
   const db = loadPlantsFromStorage() ?? []
@@ -246,8 +388,26 @@ export default function PdfReviewPage({
       try {
         setProcMsg('正在解析 PDF 文字…')
         const text = await extractPdfText(file)
-        setProcMsg('正在比對植栽資料庫…')
-        setExtractResult(extractPlants(text, db))
+        // 印出 PDF 原始文字前 3000 字，供 debug parser 問題
+        console.log('PDF RAW TEXT (first 3000):', text.slice(0, 3000))
+        setProcMsg('正在比對植栽資料庫及分區表格…')
+        const result = extractPlants(text, db)
+        setExtractResult(result)
+        // 立刻通知父層，不等 handleImport
+        const zRows = result.zoneTable?.rows ?? []
+        console.table(zRows)
+        onZoneParsed?.(zRows)
+        // 同時計算並傳遞分區審查結果
+        if (zRows.length > 0) {
+          const reviews = zRows.map(z => evaluateZone(z, db))
+          onZoneReviewed?.(reviews)
+        }
+        // 若成功解析分區，預設選第一個分區
+        if (result.zoneTable?.parseSuccess && result.zoneTable.rows.length > 0) {
+          setActiveZone(result.zoneTable.rows[0].zoneName)
+        } else {
+          setActiveZone('全案')
+        }
         setStage('confirm')
       } catch { setParseError('PDF 解析失敗'); setStage('upload') }
     } else {
@@ -261,12 +421,17 @@ export default function PdfReviewPage({
   const handleManualParse = () => {
     const result = extractPlants(manualText, db)
     setExtractResult(result)
+    if (result.zoneTable?.parseSuccess && result.zoneTable.rows.length > 0) {
+      setActiveZone(result.zoneTable.rows[0].zoneName)
+    }
   }
 
   const handleImport = () => {
     if (!extractResult) return
     const names = extractResult.matched.map(m => m.plantName)
-    onImport?.(names)
+    // 永遠傳 rows（空陣列代表解析失敗），讓 LandscapeAdvisorPage 顯示驗收訊息
+    const zoneRows = extractResult.zoneTable?.rows ?? []
+    onImport?.(names, zoneRows)
   }
 
   // ── Upload stage ──────────────────────────────────────────────────────────────
@@ -274,7 +439,7 @@ export default function PdfReviewPage({
   if (stage === 'upload') {
     return (
       <div className="min-h-screen" style={{ background: 'radial-gradient(circle at 85% 15%, rgba(121,190,140,0.16) 0%, transparent 30%), radial-gradient(circle at 20% 85%, rgba(183,220,190,0.18) 0%, transparent 35%), linear-gradient(135deg, #f7faf5 0%, #eef6ef 48%, #e5f1e8 100%)' }}>
-        <main className="max-w-[1536px] mx-auto px-8 py-8 flex flex-col items-center">
+        <main className="max-w-[1536px] mx-auto px-4 md:px-8 py-6 md:py-8 flex flex-col items-center">
           <div
             onDragOver={e => { e.preventDefault(); setDragOver(true) }}
             onDragLeave={() => setDragOver(false)}
@@ -328,17 +493,21 @@ export default function PdfReviewPage({
   const possible  = result?.possible ?? []
   const excluded  = result?.excluded ?? []
 
+  // 分區審查結果（從 zonePlantingTable 對照 DB 逐區評分）
+  const zoneRows = result?.zoneTable?.rows ?? []
+  const zoneReviewResults: ZoneReviewResult[] = zoneRows.map(z => evaluateZone(z, db))
+
   return (
     <div className="min-h-screen" style={{ background: 'radial-gradient(circle at 85% 15%, rgba(121,190,140,0.16) 0%, transparent 30%), radial-gradient(circle at 20% 85%, rgba(183,220,190,0.18) 0%, transparent 35%), linear-gradient(135deg, #f7faf5 0%, #eef6ef 48%, #e5f1e8 100%)' }}>
-      <div className="max-w-[1536px] mx-auto px-8 pt-3 pb-1 flex items-center justify-between">
-        <p className="text-xs text-stone-500 truncate">{fileName}</p>
+      <div className="max-w-[1536px] mx-auto px-4 md:px-8 pt-3 pb-1 flex items-center justify-between gap-2">
+        <p className="text-xs text-stone-500 truncate min-w-0">{fileName}</p>
         <button onClick={() => { setStage('upload'); setFileName(''); setExtractResult(null); setImageSrc('') }}
-          className="flex items-center gap-2 px-3 py-1 rounded-lg border border-stone-300 text-xs text-stone-600 hover:bg-stone-100 transition-colors flex-shrink-0 ml-4">
+          className="flex items-center gap-1.5 px-3 py-1 rounded-lg border border-stone-300 text-xs text-stone-600 hover:bg-stone-100 transition-colors flex-shrink-0 whitespace-nowrap">
           <X size={12} />重新上傳
         </button>
       </div>
-      <main className="max-w-[1536px] mx-auto px-8 py-4">
-        <div className="grid gap-6 items-start" style={{ gridTemplateColumns: imageSrc ? '1fr 1fr' : '480px 1fr' }}>
+      <main className="max-w-[1536px] mx-auto px-4 md:px-8 py-4">
+        <div className={`grid gap-4 md:gap-6 items-start ${imageSrc ? 'md:grid-cols-2' : 'md:grid-cols-[480px_1fr]'}`}>
 
           {/* 左側：圖面預覽 或 植栽清單 */}
           <div className="space-y-5">
@@ -393,30 +562,247 @@ export default function PdfReviewPage({
               </div>
             )}
 
-            {/* 疑似植栽（待確認） */}
-            {possible.length > 0 && (
-              <div className="border border-amber-200 rounded-2xl overflow-hidden bg-white">
-                <div className="px-5 py-3.5 bg-amber-50 border-b border-amber-100">
-                  <p className="text-sm font-semibold text-amber-800">
-                    疑似植栽，請確認（{possible.length} 筆）
-                  </p>
-                  <p className="text-xs text-amber-600 mt-0.5">以下文字符合植物名稱格式，但找不到對應資料庫記錄</p>
+            {/* ── PDF 分區植栽審查結果（含評分）─────────────────────────── */}
+            {zoneRows.length > 0 && (
+              <div className="border-2 border-blue-500 rounded-2xl overflow-hidden bg-white">
+                <div className="px-5 py-3.5 bg-blue-600 border-b border-blue-400">
+                  <p className="text-sm font-bold text-white">PDF 分區植栽審查結果</p>
+                  <p className="text-xs text-blue-100 mt-0.5">共 {zoneRows.length} 個分區獨立審查</p>
                 </div>
                 <div className="divide-y divide-stone-100">
-                  {possible.map((p, i) => (
-                    <div key={i} className="flex items-center gap-3 px-5 py-2.5">
-                      <AlertTriangle size={13} className="text-amber-400 flex-shrink-0" />
-                      <span className="text-stone-700 text-sm flex-1">{p.text}</span>
-                      <span className="text-xs text-stone-400">{p.reason}</span>
+                  {zoneRows.map((z, idx) => {
+                    const r = zoneReviewResults[idx]
+                    return (
+                      <div key={z.zoneName} className="px-5 py-4">
+                        {/* 區名 + 分數 + 風險 */}
+                        <div className="flex items-center justify-between mb-2">
+                          <p className="text-base font-bold text-stone-800">{z.zoneName}</p>
+                          {r && (
+                            <div className="flex items-center gap-2">
+                              <span className={`text-xs px-2 py-0.5 rounded-full font-bold ${
+                                r.riskLevel === '低' ? 'bg-green-100 text-green-800' :
+                                r.riskLevel === '中' ? 'bg-amber-100 text-amber-800' :
+                                'bg-red-100 text-red-800'
+                              }`}>風險：{r.riskLevel}</span>
+                              <span className="text-sm font-bold text-stone-700">{r.score} / 100</span>
+                            </div>
+                          )}
+                        </div>
+                        {/* 植栽 */}
+                        <p className="text-xs text-stone-600 mb-0.5">
+                          <span className="font-semibold">灌木配置：</span>{z.shrubs.join('、') || '—'}
+                        </p>
+                        <p className="text-xs text-stone-600 mb-3">
+                          <span className="font-semibold">喬木配置：</span>{z.trees.join('、') || '—'}
+                        </p>
+                        {/* 問題與建議 */}
+                        {r && r.issues.map((issue, i) => (
+                          <div key={i} className="mb-1.5 bg-stone-50 rounded-lg px-3 py-2">
+                            <p className="text-xs font-semibold text-stone-700">
+                              {i + 1}. [{issue.type}] {issue.description}
+                            </p>
+                            <p className="text-xs text-blue-700 mt-0.5">→ {issue.suggestion}</p>
+                          </div>
+                        ))}
+                        {r && (
+                          <p className="text-xs text-stone-500 mt-2 leading-relaxed">{r.summary}</p>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* 疑似植栽（待確認）— 過濾掉分區名稱和表格欄位標頭 */}
+            {(() => {
+              const ZONE_FILTER = /^[A-Za-z一二三四五六七八九十]\s*區$|^(分區|灌木配置|喬木配置|灌木|喬木)$/
+              const filteredPossible = possible.filter(p => !ZONE_FILTER.test(p.text.trim()))
+              return filteredPossible.length > 0 ? (
+                <div className="border border-amber-200 rounded-2xl overflow-hidden bg-white">
+                  <div className="px-5 py-3.5 bg-amber-50 border-b border-amber-100">
+                    <p className="text-sm font-semibold text-amber-800">
+                      疑似植栽，請確認（{filteredPossible.length} 筆）
+                    </p>
+                    <p className="text-xs text-amber-600 mt-0.5">以下文字符合植物名稱格式，但找不到對應資料庫記錄</p>
+                  </div>
+                  <div className="divide-y divide-stone-100">
+                    {filteredPossible.map((p, i) => (
+                      <div key={i} className="flex items-center gap-3 px-5 py-2.5">
+                        <AlertTriangle size={13} className="text-amber-400 flex-shrink-0" />
+                        <span className="text-stone-700 text-sm flex-1">{p.text}</span>
+                        <span className="text-xs text-stone-400">{p.reason}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null
+            })()}
+          </div>
+
+          {/* 右側：操作區 */}
+          <div className="space-y-5">
+
+            {/* ── PDF 分區解析結果（驗收區塊）──────────────────────────────────── */}
+            {result?.zoneTable && (() => {
+              const rows = result.zoneTable!.rows
+              const ok = rows.length === 5
+              return (
+                <div className={`border rounded-xl px-4 py-3 text-sm ${ok ? 'border-blue-200 bg-blue-50' : 'border-red-200 bg-red-50'}`}>
+                  <p className={`font-semibold mb-2 ${ok ? 'text-blue-800' : 'text-red-800'}`}>
+                    PDF 分區解析結果
+                  </p>
+                  {ok ? (
+                    <div className="space-y-1">
+                      {rows.map(r => (
+                        <div key={r.zoneName} className="text-xs text-blue-700">
+                          <span className="font-medium">{r.zoneName}</span>
+                          　灌木：{r.shrubs.join('、') || '—'}　喬木：{r.trees.join('、') || '—'}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-red-700">
+                      PDF 分區表格解析失敗（偵測到 {rows.length} 區，需 5 區）
+                    </p>
+                  )}
+                </div>
+              )
+            })()}
+
+            {/* ── 分區植栽表格解析結果 ─────────────────────────────────────────── */}
+            {result?.zoneTable && (() => {
+              const zt = result.zoneTable!
+              return zt.parseSuccess ? (
+                <div className="border border-emerald-200 rounded-2xl overflow-hidden bg-white">
+                  <div className="px-5 py-3.5 bg-emerald-50 border-b border-emerald-100 flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-semibold text-emerald-800">✅ 分區植栽表格已解析</p>
+                      <p className="text-xs text-emerald-600 mt-0.5">偵測到 {zt.rows.length} 個分區，AI 審查將以分區為單位進行</p>
+                    </div>
+                  </div>
+                  {/* 分區 tabs */}
+                  <div className="px-4 py-3 flex gap-2 flex-wrap border-b border-stone-100">
+                    <button
+                      onClick={() => setActiveZone('全案')}
+                      className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${activeZone === '全案' ? 'bg-emerald-700 text-white' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'}`}>
+                      全案總覽
+                    </button>
+                    {zt.rows.map(r => (
+                      <button key={r.zoneName}
+                        onClick={() => setActiveZone(r.zoneName)}
+                        className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${activeZone === r.zoneName ? 'bg-emerald-700 text-white' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'}`}>
+                        {r.zoneName}
+                      </button>
+                    ))}
+                  </div>
+                  {/* 分區內容 */}
+                  <div className="px-5 py-4 space-y-3">
+                    {activeZone === '全案' ? (
+                      <div className="space-y-2">
+                        {zt.rows.map(r => (
+                          <div key={r.zoneName} className="p-3 bg-stone-50 rounded-xl">
+                            <p className="text-xs font-semibold text-stone-700 mb-1">{r.zoneName}</p>
+                            {r.trees.length > 0 && <p className="text-xs text-stone-500">喬木：{r.trees.join('、')}</p>}
+                            {r.shrubs.length > 0 && <p className="text-xs text-stone-500">灌木／地被：{r.shrubs.join('、')}</p>}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (() => {
+                      const row = zt.rows.find(r => r.zoneName === activeZone)
+                      if (!row) return null
+                      return (
+                        <div className="space-y-3">
+                          {row.trees.length > 0 && (
+                            <div>
+                              <p className="text-xs font-semibold text-stone-500 mb-1.5">喬木配置</p>
+                              <div className="flex flex-wrap gap-1.5">
+                                {row.trees.map((t, i) => (
+                                  <span key={i} className="px-2.5 py-1 bg-green-50 border border-green-200 text-green-800 rounded-lg text-xs font-medium">{t}</span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {row.shrubs.length > 0 && (
+                            <div>
+                              <p className="text-xs font-semibold text-stone-500 mb-1.5">灌木／地被配置</p>
+                              <div className="flex flex-wrap gap-1.5">
+                                {row.shrubs.map((s, i) => (
+                                  <span key={i} className="px-2.5 py-1 bg-lime-50 border border-lime-200 text-lime-800 rounded-lg text-xs font-medium">{s}</span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })()}
+                  </div>
+                </div>
+              ) : (
+                <div className="border border-amber-200 rounded-2xl px-5 py-4 bg-amber-50">
+                  <div className="flex items-start gap-3">
+                    <AlertTriangle size={16} className="text-amber-500 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <p className="text-sm font-semibold text-amber-800">分區表格解析失敗</p>
+                      <p className="text-xs text-amber-700 mt-1">{zt.failReason}</p>
+                      {zt.headerDetected && <p className="text-xs text-amber-600 mt-0.5">偵測到表頭：{zt.headerDetected}</p>}
+                      <p className="text-xs text-amber-600 mt-1.5">AI 審查將以全案植栽清單模式進行，不分區評估。</p>
+                    </div>
+                  </div>
+                </div>
+              )
+            })()}
+
+            {/* ── PDF 分區植栽審查結果 ───────────────────────────────────────── */}
+            {zoneReviewResults.length > 0 && (
+              <div className="border border-blue-200 rounded-2xl overflow-hidden bg-white">
+                <div className="px-5 py-3.5 bg-blue-50 border-b border-blue-100">
+                  <p className="text-sm font-semibold text-blue-900">PDF 分區植栽審查結果</p>
+                  <p className="text-xs text-blue-600 mt-0.5">共 {zoneReviewResults.length} 個分區獨立審查</p>
+                </div>
+                <div className="divide-y divide-stone-100">
+                  {zoneReviewResults.map(r => (
+                    <div key={r.zoneName} className="px-5 py-4">
+                      {/* 區名 + 分數 + 風險 */}
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="text-base font-bold text-stone-800">{r.zoneName}審查結果</p>
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs px-2 py-0.5 rounded-full font-semibold ${
+                            r.riskLevel === '低' ? 'bg-green-100 text-green-800' :
+                            r.riskLevel === '中' ? 'bg-amber-100 text-amber-800' :
+                            'bg-red-100 text-red-800'
+                          }`}>風險：{r.riskLevel}</span>
+                          <span className="text-sm font-bold text-stone-700">{r.score} 分</span>
+                        </div>
+                      </div>
+                      {/* 植栽組成 */}
+                      <p className="text-xs text-stone-500 mb-1">
+                        <span className="font-medium text-stone-600">灌木配置：</span>{r.shrubs.join('、') || '—'}
+                      </p>
+                      <p className="text-xs text-stone-500 mb-3">
+                        <span className="font-medium text-stone-600">喬木配置：</span>{r.trees.join('、') || '—'}
+                      </p>
+                      {/* 問題分析 */}
+                      <p className="text-xs font-semibold text-stone-600 mb-1.5">主要問題：</p>
+                      <div className="space-y-2 mb-3">
+                        {r.issues.map((issue, i) => (
+                          <div key={i} className="bg-stone-50 rounded-lg px-3 py-2">
+                            <p className="text-xs font-semibold text-stone-700 mb-0.5">
+                              {i + 1}. [{issue.type}] {issue.description}
+                            </p>
+                            <p className="text-xs text-stone-500">→ {issue.suggestion}</p>
+                          </div>
+                        ))}
+                      </div>
+                      {/* 審查摘要 */}
+                      <p className="text-xs font-semibold text-stone-600 mb-1">審查摘要：</p>
+                      <p className="text-xs text-stone-500 leading-relaxed">{r.summary}</p>
                     </div>
                   ))}
                 </div>
               </div>
             )}
-          </div>
 
-          {/* 右側：操作區 */}
-          <div className="space-y-5">
             <div className="border border-stone-200 rounded-2xl overflow-hidden bg-white">
               <div className="px-5 py-3.5 bg-stone-50 border-b border-stone-100">
                 <p className="text-sm font-semibold text-stone-700">下一步</p>
@@ -429,18 +815,23 @@ export default function PdfReviewPage({
                       <div>
                         <p className="text-sm font-semibold text-green-800">
                           成功識別 {matched.length} 種植栽
+                          {result?.zoneTable?.parseSuccess && ` · 已解析 ${result.zoneTable.rows.length} 個分區`}
                         </p>
                         <p className="text-xs text-green-600 mt-0.5">
-                          已自動排除圖框、標題欄、尺寸文字等非植栽資訊
+                          {result?.zoneTable?.parseSuccess
+                            ? 'AI 審查將以分區為單位，個別評估各區植栽配置。'
+                            : '已自動排除圖框、標題欄、尺寸文字等非植栽資訊'}
                         </p>
                       </div>
                     </div>
                     <button onClick={handleImport}
                       className="w-full flex items-center justify-center gap-2 py-4 rounded-xl bg-green-700 text-white text-base font-bold hover:bg-green-800 transition-colors">
-                      <ArrowRight size={18} />進行 AI 景觀審查
+                      <ArrowRight size={18} />{result?.zoneTable?.parseSuccess ? '進行分區 AI 景觀審查' : '進行 AI 景觀審查'}
                     </button>
                     <p className="text-xs text-stone-400 text-center">
-                      點擊後自動進入「AI 配植評估」頁面，顯示相容性分析與風險評估結果
+                      {result?.zoneTable?.parseSuccess
+                        ? '點擊後進入「AI 配植評估」，可切換 A/B/C/D/E 區個別審查'
+                        : '點擊後自動進入「AI 配植評估」頁面，顯示相容性分析與風險評估結果'}
                     </p>
                   </>
                 ) : (
@@ -457,25 +848,43 @@ export default function PdfReviewPage({
                   </div>
                 )}
 
-                {/* 除錯區（預設收合） */}
-                {result && (
-                  <div className="border border-stone-100 rounded-xl overflow-hidden">
-                    <button onClick={() => setShowDebug(v => !v)}
-                      className="w-full flex items-center justify-between px-4 py-3 bg-stone-50 text-xs text-stone-400 hover:bg-stone-100">
-                      <span>除錯區（已排除 {excluded.length} 筆非植栽文字）</span>
-                      {showDebug ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-                    </button>
-                    {showDebug && (
-                      <div className="px-4 py-3 max-h-60 overflow-y-auto space-y-1">
-                        {excluded.map((e, i) => (
-                          <div key={i} className="flex gap-2 text-xs text-stone-400">
-                            <span className="flex-shrink-0 text-stone-300">✕</span>
-                            <span className="flex-1 truncate">{e.text}</span>
-                            <span className="text-stone-300 whitespace-nowrap">{e.reason}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
+                {/* ── PDF 分區解析結果（在除錯區上方）────────────────── */}
+                {zoneRows.length > 0 && (
+                  <div className="border-2 border-blue-500 rounded-xl overflow-hidden">
+                    <div className="px-4 py-3 bg-blue-600">
+                      <p className="text-sm font-bold text-white">PDF 分區解析結果</p>
+                    </div>
+                    <div className="divide-y divide-stone-100">
+                      {zoneRows.map(zone => (
+                        <div key={zone.zoneName} className="px-4 py-3">
+                          <h4 className="text-sm font-bold text-stone-800 mb-1">{zone.zoneName}</h4>
+                          <p className="text-xs text-stone-600">灌木配置：{zone.shrubs.join('、') || '—'}</p>
+                          <p className="text-xs text-stone-600">喬木配置：{zone.trees.join('、') || '—'}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* PDF 分區解析結果（取代舊除錯區）*/}
+                {zoneRows.length > 0 ? (
+                  <div className="border-2 border-blue-500 rounded-xl overflow-hidden">
+                    <div className="px-4 py-3 bg-blue-600">
+                      <p className="text-sm font-bold text-white">PDF 分區解析結果</p>
+                    </div>
+                    <div className="divide-y divide-stone-100">
+                      {zoneRows.map(zone => (
+                        <div key={zone.zoneName} className="px-4 py-3">
+                          <h4 className="text-sm font-bold text-stone-800 mb-1">{zone.zoneName}</h4>
+                          <p className="text-xs text-stone-600">灌木配置：{zone.shrubs.join('、') || '—'}</p>
+                          <p className="text-xs text-stone-600">喬木配置：{zone.trees.join('、') || '—'}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="px-4 py-3 text-xs text-stone-400 border border-stone-100 rounded-xl">
+                    尚未解析到 PDF 分區表格。
                   </div>
                 )}
               </div>

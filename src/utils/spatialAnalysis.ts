@@ -342,7 +342,11 @@ export function buildZonePlantList(
           vertexCount: n,
           centerX: cx,
           centerY: cy,
-          hatchPattern: poly.hatchPattern,  // 傳遞 HATCH pattern name 供圖例對照
+          hatchPattern: poly.hatchPattern,
+          hatchScale: poly.hatchScale,
+          hatchAngle: poly.hatchAngle,
+          hatchColor: poly.hatchColor,
+          vertices: poly.vertices,
         }
         switch (poly.zoneType) {
           case 'shrub':

@@ -334,7 +334,7 @@ interface BlockDef {
   baseY: number
   texts: Array<{ content: string; layer: string; localX: number; localY: number; type: 'TEXT' | 'MTEXT' }>
   inserts: Array<{ blockName: string; layer: string; localX: number; localY: number }>
-  polygons: Array<{ layer: string; vertices: Array<{x:number;y:number}>; closed: boolean; source: 'LWPOLYLINE'|'HATCH'|'POLYLINE' }>
+  polygons: Array<{ layer: string; vertices: Array<{x:number;y:number}>; closed: boolean; source: 'LWPOLYLINE'|'HATCH'|'POLYLINE'; hatchPattern?: string; hatchScale?: number; hatchAngle?: number; hatchColor?: number }>
   // 本地 bbox（以 block origin 為原點），供計算世界座標 bbox 中心使用
   localBBox?: { minX: number; maxX: number; minY: number; maxY: number; cx: number; cy: number }
 }
@@ -424,15 +424,24 @@ function parseBlockDefs(groups: GroupCode[]): Map<string, BlockDef> {
 
         // HATCH
         } else if (groups[i].code === 0 && eVal === 'HATCH') {
-          let layer = ''
+          let layer = ''; let hatchPattern = ''; let hatchColor: number | undefined
           i++
           while (i < groups.length && groups[i].code !== 0 && groups[i].code !== 91) {
-            if (groups[i].code === 8) layer = groups[i].value
+            if (groups[i].code === 8)  layer = groups[i].value
+            if (groups[i].code === 2)  hatchPattern = groups[i].value
+            if (groups[i].code === 62) hatchColor = parseInt(groups[i].value) || undefined
             i++
           }
           const { vertices: hv, end: he } = parseHatchBoundary(groups, i)
-          i = he
-          if (hv.length >= 3) blockPolygons.push({ layer, vertices: hv, closed: true, source: 'HATCH' })
+          let hatchScale: number | undefined; let hatchAngle: number | undefined
+          let bj = he
+          while (bj < groups.length && groups[bj].code !== 0) {
+            if (groups[bj].code === 41 && hatchScale === undefined) hatchScale = parseFloat(groups[bj].value) || undefined
+            if (groups[bj].code === 52 && hatchAngle === undefined) hatchAngle = parseFloat(groups[bj].value)
+            bj++
+          }
+          i = bj
+          if (hv.length >= 3) blockPolygons.push({ layer, vertices: hv, closed: true, source: 'HATCH', hatchPattern: hatchPattern || undefined, hatchScale, hatchAngle, hatchColor })
 
         // CIRCLE（樹木圓形圖案最常見的幾何元素）
         } else if (groups[i].code === 0 && eVal === 'CIRCLE') {
@@ -504,7 +513,7 @@ export function parseDxf(text: string): DxfParseResult {
       }
       // 幾何（HATCH / LWPOLYLINE）
       for (const bp of bdef.polygons) {
-        polygons.push({ layer: bp.layer, vertices: bp.vertices, closed: bp.closed, zoneType: classifyZone(bp.layer), source: bp.source })
+        polygons.push({ layer: bp.layer, vertices: bp.vertices, closed: bp.closed, zoneType: classifyZone(bp.layer), source: bp.source, hatchPattern: bp.hatchPattern, hatchScale: bp.hatchScale, hatchAngle: bp.hatchAngle, hatchColor: bp.hatchColor })
       }
     }
   }
@@ -521,58 +530,122 @@ export function parseDxf(text: string): DxfParseResult {
     const g = groups[i]
     if (g.code === 0 && g.value === 'ENDSEC') break
 
-    // ── INSERT, TEXT, MTEXT, ATTRIB, ATTDEF ─────────────────────────────────
-    // ATTRIB  = INSERT 後接的屬性值（植物名稱、代號等）
-    // ATTDEF  = 屬性定義模板（通常在 BLOCK 段，但舊版 CAD 有時出現在 ENTITIES）
-    // SEQEND  = ATTRIB 序列結束標記，直接跳過
-    if (g.code === 0 && g.value === 'SEQEND') { i++; continue }
-
-    if (g.code === 0 && (
-      g.value === 'INSERT' || g.value === 'TEXT' ||
-      g.value === 'MTEXT'  || g.value === 'ATTRIB' || g.value === 'ATTDEF'
-    )) {
-      const type = g.value as 'INSERT' | 'TEXT' | 'MTEXT' | 'ATTRIB' | 'ATTDEF'
-      let layer = ''; let blockName = ''; let content = ''; let altContent = ''
-      let attribTag = ''   // ATTRIB / ATTDEF 的屬性名稱（group code 2）
+    // ── INSERT（含緊接的 ATTRIB/SEQEND）────────────────────────────────────
+    // DXF 結構：INSERT → ATTRIB* → SEQEND
+    // 必須在同一個分支裡一次讀完，才能把 ATTRIB 連結到父 INSERT。
+    if (g.code === 0 && g.value === 'INSERT') {
+      let layer = ''; let blockName = ''
       let x = 0; let y = 0
       let scaleX = 1; let scaleY = 1; let rotDeg = 0
       i++
       while (i < groups.length && groups[i].code !== 0) {
         const eg = groups[i]
-        if (eg.code === 8)  layer = eg.value
-        if (eg.code === 2 && type === 'INSERT')               blockName = eg.value
-        if (eg.code === 2 && (type === 'ATTRIB' || type === 'ATTDEF')) attribTag = eg.value
-        // code 1 = 文字內容；code 3 = MTEXT 續接段落
-        if (eg.code === 1) content    = type === 'MTEXT' ? stripMtextCodes(eg.value) : eg.value
-        if (eg.code === 3) altContent = type === 'MTEXT' ? stripMtextCodes(eg.value) : eg.value
-        if (eg.code === 10) x      = parseFloat(eg.value) || 0
-        if (eg.code === 20) y      = parseFloat(eg.value) || 0
-        if (eg.code === 41) scaleX = parseFloat(eg.value) || 1
-        if (eg.code === 42) scaleY = parseFloat(eg.value) || 1
-        if (eg.code === 50) rotDeg = parseFloat(eg.value) || 0
+        if (eg.code === 8)  layer     = eg.value
+        if (eg.code === 2)  blockName = eg.value
+        if (eg.code === 10) x         = parseFloat(eg.value) || 0
+        if (eg.code === 20) y         = parseFloat(eg.value) || 0
+        if (eg.code === 41) scaleX    = parseFloat(eg.value) || 1
+        if (eg.code === 42) scaleY    = parseFloat(eg.value) || 1
+        if (eg.code === 50) rotDeg    = parseFloat(eg.value) || 0
         i++
       }
-      // 合併 MTEXT 多段
-      const fullContent = (altContent + content).trim() || content.trim()
-      if (type === 'INSERT' && blockName) {
-        inserts.push({ type: 'INSERT', layer, blockName, x, y, scaleX, scaleY, rotation: rotDeg })
 
-        // 把 block 定義內的文字以世界座標輸出（讓分區標籤可以被偵測到）
+      // 緊接收集 ATTRIB / ATTDEF 實體（連結到此 INSERT）
+      const attribs: import('@/types/dxf').DxfAttrib[] = []
+      while (i < groups.length && groups[i].code === 0 &&
+             (groups[i].value === 'ATTRIB' || groups[i].value === 'ATTDEF')) {
+        let atag = ''; let aval = ''; let altVal = ''; let ax = x; let ay = y
+        i++
+        while (i < groups.length && groups[i].code !== 0) {
+          const eg = groups[i]
+          if (eg.code === 2)  atag   = eg.value
+          if (eg.code === 1)  aval   = eg.value
+          if (eg.code === 3)  altVal = eg.value
+          if (eg.code === 10) ax     = parseFloat(eg.value) || 0
+          if (eg.code === 20) ay     = parseFloat(eg.value) || 0
+          i++
+        }
+        const finalVal = (altVal + aval).trim() || aval.trim()
+        if (atag && finalVal) attribs.push({ tag: atag, value: finalVal })
+        // 同時送入 texts，讓舊有的 nearby text 搜尋仍可命中
+        if (finalVal) texts.push({ type: 'TEXT', layer, content: finalVal, x: ax, y: ay })
+      }
+      // 跳過 SEQEND（ATTRIB 序列結束標記）
+      if (i < groups.length && groups[i].code === 0 && groups[i].value === 'SEQEND') {
+        i++
+        while (i < groups.length && groups[i].code !== 0) i++
+      }
+
+      if (blockName) {
+        inserts.push({ type: 'INSERT', layer, blockName, x, y, scaleX, scaleY, rotation: rotDeg, attributes: attribs })
+
         const bdef = blockDefs.get(blockName)
-        if (bdef && bdef.texts.length > 0) {
+        if (bdef) {
           const rad = rotDeg * Math.PI / 180
           const cos = Math.cos(rad); const sin = Math.sin(rad)
+
+          // 展開 block 內的文字（世界座標）
           for (const bt of bdef.texts) {
             const dx = bt.localX - bdef.baseX; const dy = bt.localY - bdef.baseY
             const wx = x + dx * scaleX * cos - dy * scaleY * sin
             const wy = y + dx * scaleX * sin + dy * scaleY * cos
             texts.push({ type: bt.type, layer: bt.layer || layer, content: bt.content, x: wx, y: wy })
           }
+
+          // 展開 block 內的 HATCH / LWPOLYLINE（世界座標）
+          // 目的：讓索引表 block 內的 HATCH sample 能被 Legend Mapping 讀到
+          for (const bp of bdef.polygons) {
+            const worldVerts = bp.vertices.map(v => {
+              const dx = v.x - bdef.baseX; const dy = v.y - bdef.baseY
+              return {
+                x: x + dx * scaleX * cos - dy * scaleY * sin,
+                y: y + dx * scaleX * sin + dy * scaleY * cos,
+              }
+            })
+            if (worldVerts.length >= 3) {
+              polygons.push({
+                layer: bp.layer || layer,
+                vertices: worldVerts,
+                closed: bp.closed,
+                zoneType: classifyZone(bp.layer || layer),
+                source: bp.source,
+                hatchPattern: bp.hatchPattern,
+                hatchScale: bp.hatchScale,
+                hatchAngle: bp.hatchAngle,
+                hatchColor: bp.hatchColor,
+              })
+            }
+          }
         }
-      } else if (fullContent) {
-        // ATTRIB / ATTDEF 的屬性名稱（tag）也一併輸出為文字，供植物名稱比對使用
-        // 例如 ATTRIB tag="植物名稱" value="樟樹" → 輸出 "樟樹"（value 已在 fullContent）
-        // 若 tag 本身也含有用資訊（如「灌木區」），也會被輸出
+      }
+
+    // ── TEXT, MTEXT, 孤立的 ATTRIB/ATTDEF，SEQEND ────────────────────────
+    } else if (g.code === 0 && g.value === 'SEQEND') {
+      // 孤立的 SEQEND（例如在 *Model_Space block 展開後殘留），直接略過
+      i++
+      while (i < groups.length && groups[i].code !== 0) i++
+
+    } else if (g.code === 0 && (
+      g.value === 'TEXT' || g.value === 'MTEXT' ||
+      g.value === 'ATTRIB' || g.value === 'ATTDEF'
+    )) {
+      const type = g.value as 'TEXT' | 'MTEXT' | 'ATTRIB' | 'ATTDEF'
+      let layer = ''; let content = ''; let altContent = ''
+      let attribTag = ''
+      let x = 0; let y = 0
+      i++
+      while (i < groups.length && groups[i].code !== 0) {
+        const eg = groups[i]
+        if (eg.code === 8)  layer = eg.value
+        if (eg.code === 2 && (type === 'ATTRIB' || type === 'ATTDEF')) attribTag = eg.value
+        if (eg.code === 1) content    = type === 'MTEXT' ? stripMtextCodes(eg.value) : eg.value
+        if (eg.code === 3) altContent = type === 'MTEXT' ? stripMtextCodes(eg.value) : eg.value
+        if (eg.code === 10) x = parseFloat(eg.value) || 0
+        if (eg.code === 20) y = parseFloat(eg.value) || 0
+        i++
+      }
+      const fullContent = (altContent + content).trim() || content.trim()
+      if (fullContent) {
         if ((type === 'ATTRIB' || type === 'ATTDEF') && attribTag && attribTag !== fullContent) {
           const tagNorm = attribTag.trim()
           if (tagNorm && /[一-鿿A-Za-z]/.test(tagNorm)) {
@@ -611,23 +684,33 @@ export function parseDxf(text: string): DxfParseResult {
     // ── HATCH ────────────────────────────────────────────────────────────────
     } else if (g.code === 0 && g.value === 'HATCH') {
       let layer = ''
-      let hatchPattern = ''  // group code 2：HATCH 填充樣式名稱，用於索引表圖例對照
+      let hatchPattern = ''  // code 2：pattern name
+      let hatchColor: number | undefined  // code 62：ACI color
       i++
-      // Read layer (8) and pattern name (2) before boundary data starts (91)
       while (i < groups.length && groups[i].code !== 0 && groups[i].code !== 91) {
-        if (groups[i].code === 8) layer = groups[i].value
-        if (groups[i].code === 2) hatchPattern = groups[i].value
+        if (groups[i].code === 8)  layer = groups[i].value
+        if (groups[i].code === 2)  hatchPattern = groups[i].value
+        if (groups[i].code === 62) hatchColor = parseInt(groups[i].value) || undefined
         i++
       }
       const { vertices, end } = parseHatchBoundary(groups, i)
-      i = end
+      // Read scale/angle after boundary data
+      let hatchScale: number | undefined; let hatchAngle: number | undefined
+      let ej = end
+      while (ej < groups.length && groups[ej].code !== 0) {
+        if (groups[ej].code === 41 && hatchScale === undefined) hatchScale = parseFloat(groups[ej].value) || undefined
+        if (groups[ej].code === 52 && hatchAngle === undefined) hatchAngle = parseFloat(groups[ej].value)
+        ej++
+      }
+      i = ej
       if (vertices.length >= 3) {
         polygons.push({
           layer, vertices,
-          closed: true,  // HATCH is always closed
+          closed: true,
           zoneType: classifyZone(layer),
           source: 'HATCH',
           hatchPattern: hatchPattern || undefined,
+          hatchScale, hatchAngle, hatchColor,
         })
       }
 
@@ -666,16 +749,22 @@ export function parseDxf(text: string): DxfParseResult {
     }
   }
 
-  // Group INSERTs: store ALL positions (no limit, for spatial analysis)
+  // Group INSERTs: store ALL positions + aggregate ATTRIBs (no limit, for spatial analysis)
   const groupMap = new Map<string, BlockGroup>()
   for (const ins of inserts) {
     const key = `${ins.blockName}||${ins.layer}`
     if (!groupMap.has(key)) {
-      groupMap.set(key, { blockName: ins.blockName, layer: ins.layer, count: 0, positions: [] })
+      groupMap.set(key, { blockName: ins.blockName, layer: ins.layer, count: 0, positions: [], attributes: [] })
     }
     const grp = groupMap.get(key)!
     grp.count++
     grp.positions.push({ x: ins.x, y: ins.y })
+    // 聚合 ATTRIB：以 tag 去重，保留第一次出現的 value
+    for (const attr of ins.attributes) {
+      if (!grp.attributes.some(a => a.tag === attr.tag)) {
+        grp.attributes.push(attr)
+      }
+    }
   }
 
   const blockGroups = Array.from(groupMap.values()).sort((a, b) => b.count - a.count)

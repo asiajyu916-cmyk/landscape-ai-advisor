@@ -26,6 +26,11 @@ export interface PlantSchedule {
   textCount: number
 }
 
+export interface DxfAttrib {
+  tag: string    // ATTRIB group code 2（屬性名稱，如 "植物名稱"、"CODE"）
+  value: string  // ATTRIB group code 1（屬性值，如 "蔓花生"）
+}
+
 export interface DxfInsert {
   type: 'INSERT'
   layer: string
@@ -35,6 +40,7 @@ export interface DxfInsert {
   scaleX: number    // default 1
   scaleY: number    // default 1
   rotation: number  // degrees, default 0
+  attributes: DxfAttrib[]   // 緊接在 INSERT 後的 ATTRIB 實體，已連結
 }
 
 export interface DxfText {
@@ -52,6 +58,7 @@ export interface BlockGroup {
   layer: string
   count: number
   positions: Array<{ x: number; y: number }>  // 全部位置（不限筆數）
+  attributes: DxfAttrib[]  // 聚合自每個 INSERT 實例的 ATTRIB（以 tag 去重）
 }
 
 // ── 幾何區域 ─────────────────────────────────────────────────────────────────
@@ -71,7 +78,10 @@ export interface DxfPolygon {
   closed: boolean
   zoneType: ZoneType
   source: 'LWPOLYLINE' | 'POLYLINE' | 'HATCH'
-  hatchPattern?: string   // HATCH pattern name (DXF group code 2)，用於圖例對照
+  hatchPattern?: string   // code 2：pattern name，圖例對照主鍵
+  hatchScale?: number     // code 41：pattern scale
+  hatchAngle?: number     // code 52：pattern angle（degrees）
+  hatchColor?: number     // code 62：color number（ACI）
 }
 
 // block 定義的本地 bbox（以 block origin 為原點的本地座標系）
@@ -122,6 +132,8 @@ export interface MappedItem {
   detectedType?: string              // '喬木圖塊' / '灌木圖塊' 等（由 block/layer 名稱推斷）
   possiblePlantCode?: string         // 從 block name 提取的數字代號（如 '994'）
   evidence?: string[]                // 對應依據清單
+  sourceType?: 'saved_rule' | 'block' | 'attribute' | 'legend' | 'text' | 'unidentified'
+  attributes?: DxfAttrib[]           // 對應 BlockGroup.attributes（供 restoreExcluded 重新比對用）
 }
 
 // ── 分區空間識別 ──────────────────────────────────────────────────────────────
@@ -148,9 +160,13 @@ export interface ZonePlantArea {
   zoneType: ZoneType
   source: 'HATCH' | 'LWPOLYLINE' | 'POLYLINE'
   vertexCount: number
-  centerX: number   // HATCH/polygon 的幾何中心 X
-  centerY: number   // HATCH/polygon 的幾何中心 Y
-  hatchPattern?: string  // HATCH pattern name，供索引表圖例對照
+  centerX: number
+  centerY: number
+  hatchPattern?: string
+  hatchScale?: number
+  hatchAngle?: number
+  hatchColor?: number
+  vertices?: Array<{ x: number; y: number }>
 }
 
 export interface ZonePlantList {
