@@ -285,6 +285,7 @@ export function classifyZone(layerName: string): ZoneType {
 
 function parseHatchBoundary(groups: GroupCode[], startIdx: number): {
   vertices: Array<{ x: number; y: number }>; end: number
+  hatchScale?: number; hatchAngle?: number
 } {
   const vertices: Array<{ x: number; y: number }> = []
   let i = startIdx
@@ -321,10 +322,17 @@ function parseHatchBoundary(groups: GroupCode[], startIdx: number): {
     i++
   }
 
-  // 跳過剩餘 HATCH 資料（填充線、seed points 等）到下一個 entity
-  while (i < groups.length && groups[i].code !== 0) i++
+  // 跳過剩餘 HATCH 資料到下一個 entity — 途中捕捉 pattern scale(41) / angle(52)
+  // （41/52 出現在 boundary 之後、pattern def lines 之前；def lines 用 43-49/53 不衝突）
+  let hatchScale: number | undefined
+  let hatchAngle: number | undefined
+  while (i < groups.length && groups[i].code !== 0) {
+    if (groups[i].code === 41 && hatchScale === undefined) hatchScale = parseFloat(groups[i].value) || undefined
+    if (groups[i].code === 52 && hatchAngle === undefined) hatchAngle = parseFloat(groups[i].value)
+    i++
+  }
 
-  return { vertices, end: i }
+  return { vertices, end: i, hatchScale, hatchAngle }
 }
 
 // ── Block definition parser ───────────────────────────────────────────────────
@@ -432,15 +440,8 @@ function parseBlockDefs(groups: GroupCode[]): Map<string, BlockDef> {
             if (groups[i].code === 62) hatchColor = parseInt(groups[i].value) || undefined
             i++
           }
-          const { vertices: hv, end: he } = parseHatchBoundary(groups, i)
-          let hatchScale: number | undefined; let hatchAngle: number | undefined
-          let bj = he
-          while (bj < groups.length && groups[bj].code !== 0) {
-            if (groups[bj].code === 41 && hatchScale === undefined) hatchScale = parseFloat(groups[bj].value) || undefined
-            if (groups[bj].code === 52 && hatchAngle === undefined) hatchAngle = parseFloat(groups[bj].value)
-            bj++
-          }
-          i = bj
+          const { vertices: hv, end: he, hatchScale, hatchAngle } = parseHatchBoundary(groups, i)
+          i = he
           if (hv.length >= 3) blockPolygons.push({ layer, vertices: hv, closed: true, source: 'HATCH', hatchPattern: hatchPattern || undefined, hatchScale, hatchAngle, hatchColor })
 
         // CIRCLE（樹木圓形圖案最常見的幾何元素）
@@ -714,16 +715,8 @@ export function parseDxf(text: string): DxfParseResult {
         if (groups[i].code === 62) hatchColor = parseInt(groups[i].value) || undefined
         i++
       }
-      const { vertices, end } = parseHatchBoundary(groups, i)
-      // Read scale/angle after boundary data
-      let hatchScale: number | undefined; let hatchAngle: number | undefined
-      let ej = end
-      while (ej < groups.length && groups[ej].code !== 0) {
-        if (groups[ej].code === 41 && hatchScale === undefined) hatchScale = parseFloat(groups[ej].value) || undefined
-        if (groups[ej].code === 52 && hatchAngle === undefined) hatchAngle = parseFloat(groups[ej].value)
-        ej++
-      }
-      i = ej
+      const { vertices, end, hatchScale, hatchAngle } = parseHatchBoundary(groups, i)
+      i = end
       if (vertices.length >= 3) {
         polygons.push({
           layer, vertices,
