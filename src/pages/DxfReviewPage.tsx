@@ -496,6 +496,14 @@ interface ZoneBlockEntry {
   matchStatus: 'db-matched' | 'name-only' | 'unmatched'
 }
 
+// 地被/鋪面 HATCH 判讀結果（正式 UI 資料來源）
+interface HatchPlantItem {
+  plantName: string
+  legendCode: string | null    // 索引表代號（990 等）
+  confidence: number           // matchScore 0~100
+  source: string               // 'HATCH 圖例比對' 等
+}
+
 interface ZoneReviewResult {
   zoneName: string
   plants: SelectedCsvPlant[]         // 完整 DB 資料（可評分）
@@ -506,6 +514,11 @@ interface ZoneReviewResult {
   status: ZoneReviewStatus
   evalResult?: EvalResult
   finalReviewResults: FinalReviewResult[]  // 最終審查結果（UI/PDF 唯一來源）
+  hatchPlants: {
+    confirmed: HatchPlantItem[]      // score >= 70
+    candidates: HatchPlantItem[]     // score 40~69
+    unmatchedCount: number           // score < 40 的 HATCH 數
+  }
 }
 
 function uid() { return Math.random().toString(36).slice(2) }
@@ -1586,6 +1599,36 @@ function buildZoneReviews(
     })))
     console.groupEnd()
 
+    // ── hatchPlants 組裝：blockEntries 的 HATCH 條目 → confirmed / candidates ──
+    const scoreOf = (b: ZoneBlockEntry): number => {
+      const m = b.blockName.match(/score:(\d+)/)
+      if (m) return parseInt(m[1])
+      // exact key match（無 score: 前綴）視為高信心
+      return b.matchStatus === 'db-matched' ? 95 : 75
+    }
+    const legendCodeOf = (name: string): string | null =>
+      legendItems.find(li => li.plantName === name)?.rowNo ?? null
+    const hatchEntries = blockEntries.filter(b =>
+      b.plantName && (b.blockName.startsWith('[HATCH') || b.blockName.startsWith('[面狀')))
+    const hatchConfirmed: HatchPlantItem[] = []
+    const hatchCandidates: HatchPlantItem[] = []
+    for (const b of hatchEntries) {
+      const sc = scoreOf(b)
+      const item: HatchPlantItem = {
+        plantName: b.plantName!,
+        legendCode: legendCodeOf(b.plantName!),
+        confidence: sc,
+        source: b.blockName.startsWith('[HATCH候選]') ? 'HATCH 圖例比對（候選）' : 'HATCH 圖例比對',
+      }
+      if (b.blockName.startsWith('[HATCH候選]') || sc < 70) hatchCandidates.push(item)
+      else hatchConfirmed.push(item)
+    }
+    const hatchUnmatchedCount = blockEntries.filter(b =>
+      !b.plantName && b.blockName.startsWith('[未辨識 HATCH')).length
+
+    console.log(`📊 ${zpl.zone.name} hatchPlants: confirmed=${hatchConfirmed.length} candidates=${hatchCandidates.length} unmatched=${hatchUnmatchedCount}`,
+      { confirmed: hatchConfirmed, candidates: hatchCandidates })
+
     return {
       zoneName: zpl.zone.name,
       plants: confirmed,
@@ -1595,6 +1638,7 @@ function buildZoneReviews(
       areaLayerNotes,
       status,
       evalResult,
+      hatchPlants: { confirmed: hatchConfirmed, candidates: hatchCandidates, unmatchedCount: hatchUnmatchedCount },
       finalReviewResults: zoneResults,
     }
   })
@@ -3219,6 +3263,56 @@ function ZoneReviewTab({ reviews }: { reviews: ZoneReviewResult[] }) {
                 {cautionCnt > 0 && <span className="text-xs px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 font-semibold">注意 {cautionCnt} 項</span>}
               </div>
 
+              {/* ── 地被 / 鋪面 HATCH（正式資料來源：hatchPlants）── */}
+              {(() => {
+                const hp = r.hatchPlants
+                if (!hp) return null
+                const allItems = [...hp.confirmed, ...hp.candidates]
+                const totalHatch = allItems.length + hp.unmatchedCount
+                if (allItems.length > 0) {
+                  return (
+                    <div className="rounded-xl border border-emerald-300 overflow-hidden">
+                      <div className="px-4 py-2.5 bg-emerald-600">
+                        <p className="text-xs font-bold text-white">{r.zoneName}｜地被 / 鋪面 HATCH（{allItems.length} 種）</p>
+                      </div>
+                      <div className="divide-y divide-stone-100">
+                        {hp.confirmed.map((h, i) => (
+                          <div key={`c${i}`} className="px-4 py-2.5 flex items-center gap-2 flex-wrap">
+                            <span className="font-semibold text-stone-800 text-sm">{h.plantName}</span>
+                            {h.legendCode && <span className="text-xs text-stone-500">索引表 {h.legendCode}</span>}
+                            <span className="text-xs text-emerald-700">信心度 {h.confidence}%</span>
+                            <span className="text-xs text-stone-400">來源：{h.source}</span>
+                          </div>
+                        ))}
+                        {hp.candidates.map((h, i) => (
+                          <div key={`k${i}`} className="px-4 py-2.5 flex items-center gap-2 flex-wrap bg-amber-50/40">
+                            <span className="font-semibold text-stone-800 text-sm">{h.plantName}</span>
+                            {h.legendCode && <span className="text-xs text-stone-500">索引表 {h.legendCode}</span>}
+                            <span className="text-xs text-amber-700">信心度 {h.confidence}%（候選，需人工確認）</span>
+                            <span className="text-xs text-stone-400">來源：{h.source}</span>
+                          </div>
+                        ))}
+                      </div>
+                      {hp.unmatchedCount > 0 && (
+                        <div className="px-4 py-1.5 bg-stone-50 border-t border-stone-100 text-xs text-stone-400">
+                          另有 {hp.unmatchedCount} 個 HATCH 未能穩定對應索引表圖例
+                        </div>
+                      )}
+                    </div>
+                  )
+                }
+                if (totalHatch > 0) {
+                  return (
+                    <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+                      <p className="text-sm font-semibold text-amber-800">
+                        本區有 HATCH {totalHatch} 個，但尚未能穩定對應索引表圖例
+                      </p>
+                    </div>
+                  )
+                }
+                return null
+              })()}
+
               {/* 本區已辨識植物（只顯示有植物名稱的條目）*/}
               {(() => {
                 const plantMap = new Map(r.plants.map(p => [p.name, p]))
@@ -4007,25 +4101,20 @@ function ZonePlanTab({
                             )
                             return e?.plantName ?? null
                           }
-                          const matchedPlants: string[] = []
-                          const allAreas = [...zpl.shrubAreas, ...zpl.lawnAreas, ...zpl.groundcoverAreas, ...zpl.unknownAreas]
-                          for (const [a, label] of [
-                            ...zpl.shrubAreas.map(a => [a, '灌木區'] as const),
-                            ...zpl.lawnAreas.map(a => [a, '草皮區'] as const),
-                            ...zpl.groundcoverAreas.map(a => [a, '地被區'] as const),
-                            ...zpl.unknownAreas.map(a => [a, '待確認範圍'] as const),
-                          ]) {
-                            const plant = resolvedPlantForArea(a, label)
-                            if (plant && !matchedPlants.includes(plant)) matchedPlants.push(plant)
-                          }
-                          const unmatchedCount = allAreas.length - matchedPlants.length
-                          return matchedPlants.length > 0 ? (
+                          // 直接讀 review.hatchPlants（與分區審查 tab 同一資料來源）
+                          const hp = review?.hatchPlants
+                          const items = hp ? [...hp.confirmed, ...hp.candidates] : []
+                          return items.length > 0 ? (
                             <>
-                              {matchedPlants.map((p, i) => (
-                                <p key={i} className="text-xs text-green-700 font-medium">{p}</p>
+                              {items.map((h, i) => (
+                                <p key={i} className="text-xs text-green-700 font-medium">
+                                  {h.plantName}
+                                  {h.legendCode && <span className="text-stone-400 font-normal ml-1">索引表 {h.legendCode}</span>}
+                                  <span className="text-stone-400 font-normal ml-1">{h.confidence}%</span>
+                                </p>
                               ))}
-                              {unmatchedCount > 0 && (
-                                <p className="text-xs text-stone-400">＋{unmatchedCount} 個未對應索引表</p>
+                              {(hp?.unmatchedCount ?? 0) > 0 && (
+                                <p className="text-xs text-stone-400">＋{hp!.unmatchedCount} 個未對應索引表</p>
                               )}
                             </>
                           ) : (
