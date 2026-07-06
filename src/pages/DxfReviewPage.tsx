@@ -1040,6 +1040,36 @@ function buildZoneReviews(
       const layerName = (area.layer || '').trim()
       let matched = false
 
+      // ── D-1. 喬木圖層的 HATCH = 樹冠裝飾填充，不是地被 → 靜默跳過 ─────────
+      // （喬木已由 INSERT 圖塊計數；樹冠 ANSI31 若進圖例比對會錯配成別的植物）
+      if (area.source === 'HATCH' && /喬木|TREE|乔木/i.test(layerName)) {
+        matched = true
+        continue
+      }
+
+      // ── D-2. 圖層名稱直接含植物名（最高優先，如圖層「腎蕨(灌木)」）──────
+      if (!matched && area.source === 'HATCH' && layerName) {
+        const layerPlant =
+          schedule.find(e => e.plantName && e.plantName.length >= 2 && layerName.includes(e.plantName))?.plantName
+          ?? plantDB.find(p => p.name.length >= 2 && layerName.includes(p.name))?.name
+        if (layerPlant) {
+          console.log(`✅ [HATCH LayerName] zone="${zpl.zone.name}" layer="${layerName}" → "${layerPlant}"（圖層名直接含植物名）`)
+          if (!seenNames.has(layerPlant)) {
+            seenNames.add(layerPlant)
+            const dbP = findInDB(layerPlant, plantDB)
+            if (dbP) {
+              const ps = dbP.wetTolerance === '不耐積水' && dbP.droughtTolerance === '不耐旱' ? '需注意' as const : '可用' as const
+              confirmed.push({ ...dbP, instanceId: uid(), status: ps })
+              blockEntries.push({ blockName: `[HATCH圖例] layer:${layerName}`, plantName: dbP.name, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'db-matched' })
+            } else {
+              blockEntries.push({ blockName: `[HATCH圖例] layer:${layerName}`, plantName: layerPlant, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'name-only' })
+            }
+          }
+          matched = true
+          continue
+        }
+      }
+
       // ── D. HATCH pattern 圖例對照（最優先：pattern name → 索引表植物名稱）──
       // 即使植栽不在 DB，也要標記為 matched，不讓 Layer 名稱覆蓋辨識結果
       if (!matched && area.source === 'HATCH') {
