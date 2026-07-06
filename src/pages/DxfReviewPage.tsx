@@ -714,8 +714,9 @@ function buildZoneReviews(
       quantity: entry.quantity, unit: entry.unit,
       hatchPattern: bPat,
       hatchScale: bSc ?? null,
-      hatchAngle: bSc !== undefined ? bAng : null,
-      hatchColor: bSc !== undefined ? bClr : null,
+      // color / angle 不依賴 scale 存在與否 — 只要有找到圖例符號就保存（供 composite 比對）
+      hatchAngle: bPoly ? bAng : null,
+      hatchColor: bPoly ? bClr : null,
       compositeKey: compositeKeyFull ?? compositeKey,
       symbolBBox: bestH ? `(${Math.min(...hxs).toFixed(0)},${Math.min(...hys).toFixed(0)})~(${Math.max(...hxs).toFixed(0)},${Math.max(...hys).toFixed(0)})` : null,
       candidatesCount: candidates.length,
@@ -1002,7 +1003,7 @@ function buildZoneReviews(
           center:    `(${a.centerX.toFixed(0)},${a.centerY.toFixed(0)})`,
         }
       })
-      console.group(`🗺 Debug Table 2: zoneHatches — ${zpl.zone.name}（共 ${zoneHatchRows.length} 筆）`)
+      console.group(`🗺 Debug Table 2: zoneHatches — ${zpl.zone.name}（rawHatchesInZone=${zoneHatchRows.length}，legendHatchItems=${legendItems.filter(li => li.hatchPattern !== null || li.hatchColor !== null).length}）`)
       if (zoneHatchRows.length > 0) console.table(zoneHatchRows)
       else console.log('（此分區無面狀圖元）')
       console.groupEnd()
@@ -1095,33 +1096,55 @@ function buildZoneReviews(
           console.log('  hatchPatternToPlant keys:', [...hatchPatternToPlant.keys()].filter(k => !k.startsWith('__')))
           if (legendItems.length === 0) console.warn('  ⚠️ legendItems 為空 — legend parser 未成功建立索引表')
 
-          // ── Score-based fallback：exact key 失敗時，用分數比對補救 ───────────
-          // 只要 pattern 相同且總分 ≥ 60（允許 scale/angle/color 有差異），就 match。
-          // 這確保即使 CAD 圖層改名、color 不同，仍能透過索引表 HATCH 圖例辨識植物。
-          if (area.hatchPattern) {
-            let bestScore = 0; let bestPlant: string | null = null
+          // ── Composite score matching：不要求 pattern 完全相同 ─────────────
+          // 權重：pattern +25 / color +30（最強特徵）/ layer +10 / angle +10 / scale +10
+          // score >= 70 → confirmed；40~69 → candidate（需人工確認）；< 40 → unmatched
+          {
+            let bestScore = 0; let bestPlant: string | null = null; let bestCode: string | null = null
             for (const li of legendItems) {
-              if (!li.hatchPattern || li.hatchPattern !== area.hatchPattern.trim()) continue
-              // pattern 相同，評估 scale/angle/color 接近程度
-              const sc = li.hatchScale !== null && area.hatchScale !== undefined
-                ? (Math.abs(li.hatchScale - area.hatchScale) < 0.05 ? 1 : 0)
-                : 0.5   // 無法比對 → 給一半分
-              const an = li.hatchAngle !== null && area.hatchAngle !== undefined
-                ? (Math.abs(li.hatchAngle - (area.hatchAngle ?? 0)) < 1 ? 1 : 0)
-                : 0.5
-              const cl = li.hatchColor !== null
-                ? (li.hatchColor === (area.hatchColor ?? 0) ? 1 : 0)
-                : 0.5
-              const score = (1 + sc + an + cl) / 4 * 100  // pattern 算 1，其他各 0~1
-              if (score > bestScore && score >= 60) { bestScore = score; bestPlant = li.plantName }
+              // 圖例列完全沒有任何 HATCH 特徵 → 無法比對
+              if (li.hatchPattern === null && li.hatchColor === null) continue
+              let score = 0
+              // pattern name（+25）
+              if (li.hatchPattern && area.hatchPattern &&
+                  li.hatchPattern === area.hatchPattern.trim()) score += 25
+              // color（+30，最強特徵 — 同 pattern 不同 color 是常見圖例區分法）
+              if (li.hatchColor !== null && li.hatchColor === (area.hatchColor ?? 0)) score += 30
+              // angle（+10）
+              if (li.hatchAngle !== null && area.hatchAngle !== undefined &&
+                  Math.abs(li.hatchAngle - (area.hatchAngle ?? 0)) < 1) score += 10
+              // scale（+10）
+              if (li.hatchScale !== null && area.hatchScale !== undefined &&
+                  Math.abs(li.hatchScale - area.hatchScale) < 0.05) score += 10
+              // layer 相近（+10）：分區 HATCH 圖層名含植物名或圖例列代號
+              if (layerName && (layerName.includes(li.plantName) ||
+                  (li.rowNo && layerName.includes(li.rowNo)))) score += 10
+              if (score > bestScore) { bestScore = score; bestPlant = li.plantName; bestCode = li.rowNo }
             }
-            if (bestPlant) {
+            if (bestPlant && bestScore >= 70) {
               legendPlant = bestPlant
-              matchedLookupKey = `score:${bestScore.toFixed(0)}`
-              console.log(`✅ [HATCH ScoreMatch] zone="${zpl.zone.name}"  pattern="${area.hatchPattern}"  →  "${legendPlant}"  score=${bestScore.toFixed(0)}`)
+              matchedLookupKey = `score:${bestScore}`
+              console.log(`✅ [HATCH ScoreMatch] zone="${zpl.zone.name}" pattern="${area.hatchPattern ?? '(無)'}" color=${area.hatchColor ?? 0} → "${bestPlant}"(${bestCode}) score=${bestScore}`)
+            } else if (bestPlant && bestScore >= 40) {
+              // 候選：進 blockEntries 但標記需人工確認，不進 confirmed
+              if (!seenNames.has(bestPlant)) {
+                seenNames.add(bestPlant)
+                blockEntries.push({
+                  blockName: `[HATCH候選] score:${bestScore} ${bestCode ?? ''}`,
+                  plantName: bestPlant,
+                  detectedType: zoneLabel(area.zoneType),
+                  count: 1,
+                  matchStatus: 'name-only',
+                })
+              }
+              matched = true
+              console.log(`🟡 [HATCH Candidate] zone="${zpl.zone.name}" pattern="${area.hatchPattern ?? '(無)'}" color=${area.hatchColor ?? 0} → "${bestPlant}"(${bestCode}) score=${bestScore}（40~69 需人工確認）`)
+            } else {
+              console.log(`❌ [HATCH unmatch] zone="${zpl.zone.name}" pattern="${area.hatchPattern ?? '(無)'}" color=${area.hatchColor ?? 0} scale=${area.hatchScale ?? '?'} angle=${area.hatchAngle ?? '?'} layer="${layerName}" bestScore=${bestScore}${bestPlant ? ` (最接近: ${bestPlant})` : ''}`)
             }
           }
           console.groupEnd()
+          if (matched) continue
         } else {
           const whichKey = drawingCompositeKeyFull && hatchPatternToPlant.has(drawingCompositeKeyFull) ? 'composite+color'
             : drawingCompositeKey && hatchPatternToPlant.has(drawingCompositeKey) ? 'composite'
@@ -3110,6 +3133,7 @@ function ZoneReviewTab({ reviews }: { reviews: ZoneReviewResult[] }) {
           // 清理後的 source 標籤（替代 blockName）
           const sourceLabel = (b: ZoneBlockEntry): string => {
             if (b.blockName.startsWith('[HATCH圖例]'))    return `索引表 HATCH 圖例比對`
+            if (b.blockName.startsWith('[HATCH候選]'))    return `HATCH 圖例候選（信心 40~69%，需人工確認）`
             if (b.blockName.startsWith('[HATCH繼承]'))    return `LWPOLYLINE 繼承 HATCH 圖例`
             if (b.blockName.startsWith('[面狀代號]'))     return `索引表代號`
             if (b.blockName.startsWith('[面狀文字]'))     return `附近文字標注`
