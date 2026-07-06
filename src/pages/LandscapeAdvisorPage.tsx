@@ -713,7 +713,8 @@ function SelectedPlantCard({ plant, onRemove, imageStore }: {
   plant: SelectedCsvPlant; onRemove: () => void; imageStore?: ImageStore
 }) {
   const imgData = imageStore?.[plant.name]
-  const imgSrc = imgData?.uploadedDataUrl ?? imgData?.imageUrl ?? `/plant-images/${encodeURIComponent(plant.name)}.jpg`
+  // || 而非 ??：空字串的壞資料不得蓋掉靜態圖片路徑
+  const imgSrc = imgData?.uploadedDataUrl || imgData?.imageUrl || `/plant-images/${encodeURIComponent(plant.name)}.jpg`
   const [imgErr, setImgErr] = useState(false)
 
   return (
@@ -783,18 +784,23 @@ function Section({ title, children, action }: { title: string; children: React.R
 
 // ── PlantImage with error fallback ───────────────────────────────────────────
 
-function PlantImage({ src, alt, fallbackClass, iconColor }: {
+function PlantImage({ src, alt, fallbackClass, iconColor, staticFallback }: {
   src: string; alt: string; fallbackClass: string; iconColor: string
+  staticFallback?: string   // 外部網址失敗時改試靜態圖（/plant-images/名稱.jpg）
 }) {
-  // 若 src 是靜態路徑（/plant-images/名稱.jpg），失敗時依序嘗試 avif → webp → placeholder
+  // 載入鏈：外部 src 失敗 → 靜態 .jpg → .avif → .webp → placeholder
   const isStatic = src.startsWith('/plant-images/')
-  const baseName = isStatic ? src.replace(/\.[^.]+$/, '') : null
-  const [tryIdx, setTryIdx] = useState(0)
+  const staticBase = (isStatic ? src : staticFallback ?? '').replace(/\.[^.]+$/, '')
   const exts = ['.jpg', '.avif', '.webp']
-  const currentSrc = baseName ? `${baseName}${exts[tryIdx]}` : src
-  const allFailed = tryIdx >= exts.length
+  // chain：非靜態 src 排最前，之後接靜態各副檔名
+  const chain = [
+    ...(isStatic ? [] : [src]),
+    ...(staticBase ? exts.map(e => `${staticBase}${e}`) : []),
+  ]
+  const [tryIdx, setTryIdx] = useState(0)
+  const allFailed = tryIdx >= chain.length
 
-  if (allFailed) {
+  if (allFailed || chain.length === 0) {
     return (
       <div className={`absolute inset-0 flex items-center justify-center ${fallbackClass}`}>
         <Leaf size={40} className={`opacity-30 ${iconColor}`} />
@@ -803,12 +809,9 @@ function PlantImage({ src, alt, fallbackClass, iconColor }: {
   }
   return (
     <img
-      src={currentSrc} alt={alt}
+      src={chain[tryIdx]} alt={alt}
       className="absolute inset-0 w-full h-full object-cover"
-      onError={() => {
-        if (isStatic && tryIdx < exts.length - 1) setTryIdx(i => i + 1)
-        else setTryIdx(exts.length) // mark all failed
-      }}
+      onError={() => setTryIdx(i => i + 1)}
     />
   )
 }
@@ -966,7 +969,8 @@ function PlantCardItem({ plant, imageData, added, fresh, isActive, onDetail, onA
     ? imageData?.imageUrl : undefined
   // 優先 jpg，fallback 到 avif / webp（由 <img> onError 自動切換）
   const staticUrl = `/plant-images/${encodeURIComponent(plant.name)}.jpg`
-  const imgSrc = imageData?.uploadedDataUrl ?? approvedUrl ?? staticUrl
+  // || 而非 ??：空字串的壞資料不得蓋掉靜態圖片路徑
+  const imgSrc = imageData?.uploadedDataUrl || approvedUrl || staticUrl
   const bgGrad = CARD_BG[plant.subCategory] ?? CARD_BG[plant.category] ?? 'from-stone-100 to-stone-50'
   const iconColor = CARD_ICON_COLOR[plant.subCategory] ?? CARD_ICON_COLOR[plant.category] ?? 'text-stone-400'
   const suitability = getSuitability(plant)
@@ -983,7 +987,7 @@ function PlantCardItem({ plant, imageData, added, fresh, isActive, onDetail, onA
       {/* ① Image */}
       <div className={`h-36 relative overflow-hidden ${!imgSrc ? `bg-gradient-to-b ${bgGrad}` : 'bg-stone-100'} flex items-center justify-center flex-shrink-0`}>
         {imgSrc
-          ? <PlantImage src={imgSrc} alt={plant.name} fallbackClass={`bg-gradient-to-b ${bgGrad}`} iconColor={iconColor} />
+          ? <PlantImage src={imgSrc} alt={plant.name} fallbackClass={`bg-gradient-to-b ${bgGrad}`} iconColor={iconColor} staticFallback={staticUrl} />
           : <Leaf size={36} className={`opacity-25 ${iconColor}`} />
         }
         {/* Overlay badges */}
@@ -1097,7 +1101,7 @@ function PlantDetailDrawer({ plant, onClose, onAdd, added, imageData, onSaveImag
 
   const staticImgUrl = `/plant-images/${encodeURIComponent(plant.name)}.jpg`
   const effectiveImg = !imgError
-    ? (imageData?.uploadedDataUrl ?? imageData?.imageUrl ?? (urlInput.trim() || undefined) ?? staticImgUrl)
+    ? (imageData?.uploadedDataUrl || imageData?.imageUrl || urlInput.trim() || staticImgUrl)
     : undefined
 
   const handleSaveUrl = () => {
