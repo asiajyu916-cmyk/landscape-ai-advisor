@@ -3106,12 +3106,15 @@ function ZoneReviewTab({ reviews }: { reviews: ZoneReviewResult[] }) {
           }
           // 清理後的 source 標籤（替代 blockName）
           const sourceLabel = (b: ZoneBlockEntry): string => {
-            if (b.blockName.startsWith('[HATCH圖例]'))  return `HATCH 面狀植栽`
-            if (b.blockName.startsWith('[面狀代號]'))   return `索引表代號`
-            if (b.blockName.startsWith('[面狀文字]'))   return `文字標注`
-            if (b.blockName.startsWith('[面狀]'))       return `HATCH 面狀植栽`
-            if (b.blockName.startsWith('[未辨識 HATCH]')) return `HATCH 未辨識`
-            if (isPolyBoundary(b))                      return `範圍邊界`
+            if (b.blockName.startsWith('[HATCH圖例]'))    return `索引表 HATCH 圖例比對`
+            if (b.blockName.startsWith('[HATCH繼承]'))    return `LWPOLYLINE 繼承 HATCH 圖例`
+            if (b.blockName.startsWith('[面狀代號]'))     return `索引表代號`
+            if (b.blockName.startsWith('[面狀文字]'))     return `附近文字標注`
+            if (b.blockName.startsWith('[面狀]'))         return `HATCH 面狀植栽`
+            if (b.blockName.startsWith('[m²候選]'))       return `索引表 m² 候選（需確認）`
+            if (b.blockName.startsWith('[未辨識 HATCH]')) return `未能與索引表圖例穩定對應`
+            if (b.blockName.startsWith('[未辨識面狀'))    return `未能辨識的面狀範圍`
+            if (isPolyBoundary(b))                        return `空間範圍邊界`
             return b.blockName  // INSERT：直接顯示圖塊名稱
           }
 
@@ -3168,7 +3171,7 @@ function ZoneReviewTab({ reviews }: { reviews: ZoneReviewResult[] }) {
                                   {displayName
                                     ? displayName
                                     : isHatch
-                                      ? <span className="text-stone-400 italic text-xs">未辨識 {b.detectedType || 'HATCH'}</span>
+                                      ? <span className="text-stone-400 italic text-xs">未能與索引表圖例穩定對應</span>
                                       : <span className="text-stone-400 italic text-xs">未對應</span>
                                   }
                                 </span>
@@ -3310,7 +3313,7 @@ function ZoneReviewTab({ reviews }: { reviews: ZoneReviewResult[] }) {
                           <td className="px-3 py-1.5 font-medium text-stone-800">
                             {b.plantName
                               ?? (isHatchEntry(b)
-                                ? <span className="text-stone-400 italic text-xs">未辨識 {b.detectedType || 'HATCH'}</span>
+                                ? <span className="text-stone-400 italic text-xs">未能與索引表圖例穩定對應</span>
                                 : <span className="text-stone-400 italic text-xs">未對應</span>)}
                           </td>
                           <td className="px-3 py-1.5 text-stone-500">{b.detectedType ?? '—'}</td>
@@ -3403,8 +3406,8 @@ function ZonePlanTab({
   return (
     <div className="space-y-5">
 
-      {/* ── 0. 原始資料 DEBUG（預設收合）──────────────────────────────── */}
-      <details className="rounded-xl border border-stone-200 bg-stone-50 overflow-hidden">
+      {/* ── 0. 原始資料 DEBUG（隱藏於正式版，需要時可在此展開）──────── */}
+      {false && <details className="rounded-xl border border-stone-200 bg-stone-50 overflow-hidden">
         <summary className="px-4 py-2.5 text-xs font-semibold text-stone-500 cursor-pointer select-none hover:bg-stone-100 transition-colors">
           🔍 原始資料 Debug（資料流驗證）— 點擊展開
         </summary>
@@ -3489,7 +3492,7 @@ function ZonePlanTab({
           </div>
         )}
       </div>
-      </details>
+      </details>}
 
       {/* ── 1. 分區辨識狀態摘要 ───────────────────────────────────────────── */}
       <div className="rounded-2xl border border-stone-200 bg-white p-5">
