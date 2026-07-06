@@ -3096,8 +3096,11 @@ function ZoneReviewTab({ reviews }: { reviews: ZoneReviewResult[] }) {
           // blockName / layerName / entityType 只用於 debug，不作為植物名稱。
           const isHatchEntry    = (b: ZoneBlockEntry) => b.blockName.startsWith('[HATCH') || b.blockName.startsWith('[面狀') || b.blockName.startsWith('[未辨識 HATCH')
           const isPolyBoundary  = (b: ZoneBlockEntry) => b.blockName.startsWith('[未辨識 LWPOLYLINE') || b.blockName.startsWith('[未辨識 POLYLINE')
-          // LWPOLYLINE boundary 沒有植物名稱時隱藏（它是空間邊界，不是植栽）
-          const visibleEntries  = r.blockEntries.filter(b => b.plantName || !isPolyBoundary(b))
+          // 正式版只顯示「有植物名稱」的條目；未知灌木/HATCH(ANSI31) 全部隱藏
+          const visibleEntries  = r.blockEntries.filter(b => !!b.plantName)
+          // debug 用：統計未辨識條目數
+          const unmatchedHatch  = r.blockEntries.filter(b => !b.plantName && isHatchEntry(b)).length
+          const unmatchedPoly   = r.blockEntries.filter(b => !b.plantName && isPolyBoundary(b)).length
           // 清理後的植物顯示名稱（供主列表使用）
           const plantDisplayName = (b: ZoneBlockEntry): string | null => {
             if (b.plantName) return b.plantName
@@ -3192,82 +3195,84 @@ function ZoneReviewTab({ reviews }: { reviews: ZoneReviewResult[] }) {
                 {cautionCnt > 0 && <span className="text-xs px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 font-semibold">注意 {cautionCnt} 項</span>}
               </div>
 
-              {/* 本區植栽一覽（置頂，預設展開）*/}
-              {r.blockEntries.length > 0 && (() => {
-                // 合併 blockEntries（數量）與 plants（DB 詳細資料）
+              {/* 本區已辨識植物（只顯示有植物名稱的條目）*/}
+              {(() => {
                 const plantMap = new Map(r.plants.map(p => [p.name, p]))
-                return (
+                return visibleEntries.length > 0 ? (
                   <div className="rounded-xl border border-stone-200 overflow-hidden">
-                    <div className="px-4 py-2.5 bg-stone-50 border-b border-stone-100 flex items-center justify-between">
+                    <div className="px-4 py-2.5 bg-stone-50 border-b border-stone-100">
                       <p className="text-xs font-semibold text-stone-700">
-                        本區植栽一覽（{r.blockEntries.reduce((s, b) => s + b.count, 0)} 株 / {r.blockEntries.length} 種）
+                        {r.zoneName}｜已判讀植物（{visibleEntries.length} 種）
                       </p>
                     </div>
                     <div className="divide-y divide-stone-100">
                       {visibleEntries.map((b, i) => {
                         const dbPlant = b.plantName ? plantMap.get(b.plantName) : undefined
-                        const displayName = plantDisplayName(b)
-                        const isHatch = isHatchEntry(b)
+                        const legendRow = r.finalReviewResults.find(fr => fr.matchedPlantName === b.plantName)
                         return (
-                          <div key={i} className={`flex items-start gap-3 px-4 py-2.5 ${
-                            b.matchStatus === 'db-matched' ? '' :
-                            b.matchStatus === 'name-only'  ? 'bg-amber-50/40' : 'bg-red-50/20'
-                          }`}>
-                            {/* 左：植物名稱 + 數量 */}
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2 flex-wrap">
-                                <span className="font-semibold text-stone-800 text-sm">
-                                  {displayName
-                                    ? displayName
-                                    : isHatch
-                                      ? <span className="text-stone-400 italic text-xs">未能與索引表圖例穩定對應</span>
-                                      : <span className="text-stone-400 italic text-xs">未對應</span>
-                                  }
-                                </span>
-                                {dbPlant?.scientificName && (
-                                  <span className="text-xs text-stone-400 italic">{dbPlant.scientificName}</span>
-                                )}
-                                <span className={`text-xs px-1.5 py-0.5 rounded-full border font-medium ${
-                                  b.matchStatus === 'db-matched' ? 'bg-emerald-50 border-emerald-200 text-emerald-700' :
-                                  b.matchStatus === 'name-only'  ? 'bg-amber-50 border-amber-200 text-amber-600' :
-                                                                    'bg-red-50 border-red-200 text-red-500'
-                                }`}>
-                                  {b.matchStatus === 'db-matched'
-                                    ? (dbPlant?.subCategory || dbPlant?.category || b.detectedType || '—')
-                                    : b.matchStatus === 'name-only'
-                                      ? (isHatch ? `面狀植栽｜${b.detectedType || 'HATCH'}` : '索引表名稱')
-                                      : (isHatch ? `未辨識 ${b.detectedType || 'HATCH'}` : '未對應')}
-                                </span>
-                              </div>
-                              {/* DB 詳細資訊列 */}
-                              {dbPlant && (
-                                <div className="flex flex-wrap gap-x-4 gap-y-0.5 mt-1 text-xs text-stone-500">
-                                  {dbPlant.height       && <span>樹高 {dbPlant.height}</span>}
-                                  {dbPlant.crownWidth   && <span>冠幅 {dbPlant.crownWidth}</span>}
-                                  {dbPlant.sunRequirement && <span>日照 {dbPlant.sunRequirement}</span>}
-                                  {dbPlant.waterRequirement && <span>需水 {dbPlant.waterRequirement}</span>}
-                                  {dbPlant.droughtTolerance && <span>耐旱 {dbPlant.droughtTolerance}</span>}
-                                  {dbPlant.nativeStatus && <span>原生 {dbPlant.nativeStatus}</span>}
-                                  {dbPlant.flowerColor  && dbPlant.flowerMonth && (
-                                    <span>花期 {dbPlant.flowerMonth}（{dbPlant.flowerColor}）</span>
+                          <div key={i} className="px-4 py-2.5">
+                            <div className="flex items-start gap-3">
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="font-semibold text-stone-800 text-sm">{b.plantName}</span>
+                                  {legendRow?.matchedLegendRow && (
+                                    <span className="text-xs text-stone-500">索引表 {legendRow.matchedLegendRow}</span>
                                   )}
-                                  {dbPlant.maintenanceLevel && <span>維護 {dbPlant.maintenanceLevel}</span>}
+                                  {legendRow?.matchScore != null && legendRow.matchScore > 0 && (
+                                    <span className="text-xs text-stone-400">信心度 {legendRow.matchScore}%</span>
+                                  )}
+                                  <span className={`text-xs px-1.5 py-0.5 rounded-full border font-medium ${
+                                    b.matchStatus === 'db-matched' ? 'bg-emerald-50 border-emerald-200 text-emerald-700' :
+                                    'bg-amber-50 border-amber-200 text-amber-600'
+                                  }`}>
+                                    {dbPlant?.subCategory || dbPlant?.category || b.detectedType || '面狀植栽'}
+                                  </span>
                                 </div>
-                              )}
-                              {/* source label（替代 blockName）— 僅在有植物名稱時顯示，供對照 DXF 原圖 */}
-                              {b.plantName && (
+                                {dbPlant && (
+                                  <div className="flex flex-wrap gap-x-4 gap-y-0.5 mt-1 text-xs text-stone-500">
+                                    {dbPlant.height && <span>樹高 {dbPlant.height}</span>}
+                                    {dbPlant.sunRequirement && <span>日照 {dbPlant.sunRequirement}</span>}
+                                    {dbPlant.waterRequirement && <span>需水 {dbPlant.waterRequirement}</span>}
+                                    {dbPlant.maintenanceLevel && <span>維護 {dbPlant.maintenanceLevel}</span>}
+                                  </div>
+                                )}
                                 <p className="text-xs text-stone-400 mt-0.5">{sourceLabel(b)}</p>
-                              )}
-                            </div>
-                            {/* 右：數量 */}
-                            <div className="flex-shrink-0 text-right">
-                              <span className="text-base font-bold text-stone-700">{b.count}</span>
-                              <span className="text-xs text-stone-400 ml-0.5">株</span>
+                              </div>
+                              <div className="flex-shrink-0 text-right">
+                                <span className="text-base font-bold text-stone-700">{b.count}</span>
+                                <span className="text-xs text-stone-400 ml-0.5">株</span>
+                              </div>
                             </div>
                           </div>
                         )
                       })}
                     </div>
+                    {/* 未辨識統計（預設收合，供除錯）*/}
+                    {(unmatchedHatch > 0 || unmatchedPoly > 0) && (
+                      <details className="border-t border-stone-100">
+                        <summary className="px-4 py-2 text-xs text-stone-400 cursor-pointer hover:text-stone-600">
+                          顯示技術資料（未辨識：HATCH × {unmatchedHatch}，邊界 × {unmatchedPoly}）
+                        </summary>
+                        <div className="px-4 py-2 text-xs text-stone-400">
+                          <p>• 未能與索引表圖例穩定對應的 HATCH：{unmatchedHatch} 個</p>
+                          <p>• 空間邊界線（非植栽）：{unmatchedPoly} 個</p>
+                          <p className="mt-1 text-stone-300">以上物件已排除於審查結果外，若需確認請查閱 DXF 原圖索引表。</p>
+                        </div>
+                      </details>
+                    )}
+                  </div>
+                ) : (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+                    <p className="text-sm font-semibold text-amber-800">本區尚未偵測到可穩定對應索引表的 HATCH 圖例。</p>
+                    {(unmatchedHatch > 0 || unmatchedPoly > 0) && (
+                      <details className="mt-2">
+                        <summary className="text-xs text-amber-600 cursor-pointer">顯示技術資料</summary>
+                        <div className="mt-1 text-xs text-amber-600 space-y-0.5">
+                          <p>• 未辨識 HATCH：{unmatchedHatch} 個</p>
+                          <p>• 空間邊界線：{unmatchedPoly} 個</p>
+                        </div>
+                      </details>
+                    )}
                   </div>
                 )
               })()}
@@ -3978,22 +3983,30 @@ function ZonePlanTab({
                             )
                             return e?.plantName ?? null
                           }
-                          const areaRow = (a: import('@/types/dxf').ZonePlantArea, typeLabel: string, cls: string, key: string) => {
-                            const plant = resolvedPlantForArea(a, typeLabel)
-                            const srcLabel = a.source === 'HATCH' ? `HATCH${a.hatchPattern ? ` (${a.hatchPattern})` : ''}` : a.source
-                            return (
-                              <p key={key} className={`text-xs ${plant ? 'text-green-700 font-medium' : cls}`}>
-                                {plant ?? `未辨識 ${typeLabel}`}
-                                <span className="text-stone-400 font-normal ml-1">· {srcLabel}</span>
-                              </p>
-                            )
+                          const matchedPlants: string[] = []
+                          const allAreas = [...zpl.shrubAreas, ...zpl.lawnAreas, ...zpl.groundcoverAreas, ...zpl.unknownAreas]
+                          for (const [a, label] of [
+                            ...zpl.shrubAreas.map(a => [a, '灌木區'] as const),
+                            ...zpl.lawnAreas.map(a => [a, '草皮區'] as const),
+                            ...zpl.groundcoverAreas.map(a => [a, '地被區'] as const),
+                            ...zpl.unknownAreas.map(a => [a, '待確認範圍'] as const),
+                          ]) {
+                            const plant = resolvedPlantForArea(a, label)
+                            if (plant && !matchedPlants.includes(plant)) matchedPlants.push(plant)
                           }
-                          return <>
-                            {zpl.shrubAreas.map((a, i)       => areaRow(a, '灌木區', 'text-green-600', `s${i}`))}
-                            {zpl.lawnAreas.map((a, i)        => areaRow(a, '草皮區', 'text-lime-600', `l${i}`))}
-                            {zpl.groundcoverAreas.map((a, i) => areaRow(a, '地被區', 'text-emerald-600', `g${i}`))}
-                            {zpl.unknownAreas.map((a, i)     => areaRow(a, '待確認範圍', 'text-amber-600', `u${i}`))}
-                          </>
+                          const unmatchedCount = allAreas.length - matchedPlants.length
+                          return matchedPlants.length > 0 ? (
+                            <>
+                              {matchedPlants.map((p, i) => (
+                                <p key={i} className="text-xs text-green-700 font-medium">{p}</p>
+                              ))}
+                              {unmatchedCount > 0 && (
+                                <p className="text-xs text-stone-400">＋{unmatchedCount} 個未對應索引表</p>
+                              )}
+                            </>
+                          ) : (
+                            <p className="text-xs text-stone-400">尚未對應索引表圖例</p>
+                          )
                         })()}
                   </div>
                 </div>
