@@ -578,7 +578,15 @@ function buildZoneReviews(
   texts: DxfText[] = [],
   drawingRadius = 1000,
   polygons: import('@/types/dxf').DxfPolygon[] = [],
+  layerColors: Record<string, number> = {},
 ): ZoneReviewResult[] {
+  // ── effectiveColor：ByLayer(256)/ByBlock(0)/null 時改讀 LAYER 表顏色 ─────
+  // 回傳 null = 真正無法取得顏色（colorUnknown）
+  const effectiveColor = (rawColor: number | null | undefined, layerName: string | undefined): number | null => {
+    if (rawColor !== null && rawColor !== undefined && rawColor !== 0 && rawColor !== 256) return rawColor
+    const lc = layerName ? layerColors[layerName.trim()] : undefined
+    return lc !== undefined ? lc : null
+  }
   // ── 建立 HATCH pattern → 植物名稱 對照表 ──────────────────────────────────
   //
   // 策略：從「植物名稱文字位置」出發找鄰近的 HATCH（圖例格子），取得 pattern name。
@@ -714,7 +722,9 @@ function buildZoneReviews(
     const bPat  = bPoly?.hatchPattern?.trim() ?? null
     const bSc   = bPoly?.hatchScale
     const bAng  = bPoly?.hatchAngle ?? 0
-    const bClr  = bPoly?.hatchColor ?? 0
+    // effectiveColor：ByLayer/ByBlock 時 fallback 到 LAYER 表顏色
+    const bEffClr = bPoly ? effectiveColor(bPoly.hatchColor, bPoly.layer) : null
+    const bClr  = bEffClr ?? 0
     // compositeKey 有兩個版本：含 color（最精確）和不含（fallback）
     const compositeKeyFull = bPat && bSc !== undefined
       ? `${bPat}@${bSc.toFixed(2)}@${bAng.toFixed(1)}@c${bClr}`
@@ -728,8 +738,9 @@ function buildZoneReviews(
       hatchPattern: bPat,
       hatchScale: bSc ?? null,
       // color / angle 不依賴 scale 存在與否 — 只要有找到圖例符號就保存（供 composite 比對）
+      // hatchColor 存 effectiveColor（ByLayer 已解析為圖層色；null = colorUnknown）
       hatchAngle: bPoly ? bAng : null,
-      hatchColor: bPoly ? bClr : null,
+      hatchColor: bEffClr,
       compositeKey: compositeKeyFull ?? compositeKey,
       symbolBBox: bestH ? `(${Math.min(...hxs).toFixed(0)},${Math.min(...hys).toFixed(0)})~(${Math.max(...hxs).toFixed(0)},${Math.max(...hys).toFixed(0)})` : null,
       candidatesCount: candidates.length,
@@ -1121,17 +1132,16 @@ function buildZoneReviews(
               // pattern name（+25）
               if (li.hatchPattern && area.hatchPattern &&
                   li.hatchPattern === area.hatchPattern.trim()) score += 25
-              // color（+30，最強特徵 — 同 pattern 不同 color 是常見圖例區分法）
-              // ByLayer(256)/ByBlock(0)/null 視為「顏色未知」給半分 +15，不因取不到顏色而歸零
+              // color（+30，最強特徵）— 使用 effectiveColor：
+              // ByLayer/ByBlock 已透過 LAYER 表解析成實際圖層色，只有真正取不到才算未知
               {
-                const colorKnown = (c: number | null | undefined) =>
-                  c !== null && c !== undefined && c !== 0 && c !== 256
-                const liC = li.hatchColor; const arC = area.hatchColor
-                if (colorKnown(liC) && colorKnown(arC)) {
+                const liC = li.hatchColor  // 圖例 effectiveColor（建表時已解析）
+                const arC = effectiveColor(area.hatchColor, area.layer)
+                if (liC !== null && arC !== null) {
                   if (liC === arC) score += 30
                   // 明確不同色 → 0 分（這是區分植物的關鍵特徵）
                 } else {
-                  score += 15  // 任一側顏色未知（ByLayer/ByBlock）→ 半分
+                  score += 15  // 任一側 colorUnknown → 半分
                 }
               }
               // angle（+10；未知給半分 +5）
@@ -1147,10 +1157,16 @@ function buildZoneReviews(
                   (li.rowNo && layerName.includes(li.rowNo)))) score += 10
               if (score > bestScore) { bestScore = score; bestPlant = li.plantName; bestCode = li.rowNo }
             }
+            const _dbgColor = () => {
+              const raw = area.hatchColor ?? null
+              const lc = area.layer ? layerColors[area.layer.trim()] ?? null : null
+              const eff = effectiveColor(area.hatchColor, area.layer)
+              return `rawColor=${raw ?? 'null'} layer="${area.layer ?? ''}" layerColor=${lc ?? 'null'} effectiveColor=${eff ?? 'unknown'}`
+            }
             if (bestPlant && bestScore >= 70) {
               legendPlant = bestPlant
               matchedLookupKey = `score:${bestScore}`
-              console.log(`✅ [HATCH ScoreMatch] zone="${zpl.zone.name}" pattern="${area.hatchPattern ?? '(無)'}" color=${area.hatchColor ?? 0} → "${bestPlant}"(${bestCode}) score=${bestScore}`)
+              console.log(`✅ [HATCH ScoreMatch] zone="${zpl.zone.name}" pattern="${area.hatchPattern ?? '(無)'}" ${_dbgColor()} → "${bestPlant}"(${bestCode}) score=${bestScore}`)
             } else if (bestPlant && bestScore >= 40) {
               // 候選：進 blockEntries 但標記需人工確認，不進 confirmed
               if (!seenNames.has(bestPlant)) {
@@ -1164,9 +1180,9 @@ function buildZoneReviews(
                 })
               }
               matched = true
-              console.log(`🟡 [HATCH Candidate] zone="${zpl.zone.name}" pattern="${area.hatchPattern ?? '(無)'}" color=${area.hatchColor ?? 0} → "${bestPlant}"(${bestCode}) score=${bestScore}（40~69 需人工確認）`)
+              console.log(`🟡 [HATCH Candidate] zone="${zpl.zone.name}" pattern="${area.hatchPattern ?? '(無)'}" ${_dbgColor()} → "${bestPlant}"(${bestCode}) score=${bestScore}（40~69 需人工確認）`)
             } else {
-              console.log(`❌ [HATCH unmatch] zone="${zpl.zone.name}" pattern="${area.hatchPattern ?? '(無)'}" color=${area.hatchColor ?? 0} scale=${area.hatchScale ?? '?'} angle=${area.hatchAngle ?? '?'} layer="${layerName}" bestScore=${bestScore}${bestPlant ? ` (最接近: ${bestPlant})` : ''}`)
+              console.log(`❌ [HATCH unmatch] zone="${zpl.zone.name}" pattern="${area.hatchPattern ?? '(無)'}" ${_dbgColor()} scale=${area.hatchScale ?? '?'} angle=${area.hatchAngle ?? '?'} bestScore=${bestScore}${bestPlant ? ` (最接近: ${bestPlant})` : ''}`)
             }
           }
           console.groupEnd()
@@ -1631,7 +1647,9 @@ function buildZoneReviews(
         plantName: b.plantName!,
         legendCode: legendCodeOf(b.plantName!),
         confidence: sc,
-        source: b.blockName.startsWith('[HATCH候選]') ? 'HATCH 圖例比對（候選）' : 'HATCH 圖例比對',
+        source: b.blockName.startsWith('[HATCH候選]')
+          ? 'HATCH 圖例比對（候選），使用 effectiveColor / pattern / layer 綜合判斷'
+          : 'HATCH 圖例比對，使用 effectiveColor / pattern / layer 綜合判斷',
       }
       if (b.blockName.startsWith('[HATCH候選]') || sc < 70) hatchCandidates.push(item)
       else hatchConfirmed.push(item)
@@ -1845,7 +1863,7 @@ export default function DxfReviewPage({
   useEffect(() => {
     if (zonePlantLists.length === 0 || plants.length === 0) return
     saveZoneReviews(
-      buildZoneReviews(zonePlantLists, plants, plantSchedule.entries, parseResult?.texts ?? [], drawingRadius, parseResult?.polygons ?? []),
+      buildZoneReviews(zonePlantLists, plants, plantSchedule.entries, parseResult?.texts ?? [], drawingRadius, parseResult?.polygons ?? [], parseResult?.layerColors ?? {}),
       `useEffect [polygons=${parseResult?.polygons?.length ?? 0} texts=${parseResult?.texts?.length ?? 0}]`
     )
   }, [plants, zonePlantLists, plantSchedule.entries])
@@ -1896,7 +1914,7 @@ export default function DxfReviewPage({
       setDetectedZones(zones)
       const zpl = buildZonePlantList(zones, active, result.polygons, result.inserts, result.blockExtents)
       setZonePlantLists(zpl)
-      saveZoneReviews(buildZoneReviews(zpl, loaded, sched.entries, result.texts, radius, result.polygons), 'handleFile [polygons=' + result.polygons.length + ']')
+      saveZoneReviews(buildZoneReviews(zpl, loaded, sched.entries, result.texts, radius, result.polygons, result.layerColors ?? {}), 'handleFile [polygons=' + result.polygons.length + ']')
       setZoneDebug(buildZoneAssignDebug(zones, zpl, active, result.inserts, result.blockExtents))
 
       // ── Debug：資料流追蹤 ──────────────────────────────────────────────────
@@ -1957,7 +1975,7 @@ export default function DxfReviewPage({
     setExcluded(exc)
     const zpl2 = buildZonePlantList(detectedZones, active, parseResult.polygons, parseResult.inserts, parseResult.blockExtents)
     setZonePlantLists(zpl2)
-    saveZoneReviews(buildZoneReviews(zpl2, plantList, plantSchedule.entries, parseResult.texts, drawingRadius, parseResult.polygons), 'rebuildMappings [polygons=' + parseResult.polygons.length + ']')
+    saveZoneReviews(buildZoneReviews(zpl2, plantList, plantSchedule.entries, parseResult.texts, drawingRadius, parseResult.polygons, parseResult.layerColors ?? {}), 'rebuildMappings [polygons=' + parseResult.polygons.length + ']')
     setZoneDebug(buildZoneAssignDebug(detectedZones, zpl2, active, parseResult.inserts, parseResult.blockExtents))
   }
 

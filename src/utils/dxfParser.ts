@@ -491,11 +491,32 @@ function parseBlockDefs(groups: GroupCode[]): Map<string, BlockDef> {
 
 // ── Main parser ───────────────────────────────────────────────────────────────
 
+// ── LAYER 表顏色解析：0 LAYER → 2 name → 62 color（ACI）──────────────────
+// 供 ByLayer(256)/ByBlock(0) HATCH 解析 effectiveColor 用
+function parseLayerColors(groups: GroupCode[]): Record<string, number> {
+  const colors: Record<string, number> = {}
+  for (let i = 0; i < groups.length; i++) {
+    if (groups[i].code === 0 && groups[i].value === 'LAYER') {
+      let name = ''; let color: number | undefined
+      let j = i + 1
+      while (j < groups.length && groups[j].code !== 0) {
+        if (groups[j].code === 2)  name  = groups[j].value.trim()
+        if (groups[j].code === 62) color = Math.abs(parseInt(groups[j].value)) || undefined  // 負值=圖層關閉，取絕對值
+        j++
+      }
+      if (name && color !== undefined) colors[name] = color
+      i = j - 1
+    }
+  }
+  return colors
+}
+
 export function parseDxf(text: string): DxfParseResult {
   const groups = parseGroupCodes(text)
   const inserts: DxfInsert[] = []
   const texts: DxfText[] = []
   const polygons: DxfPolygon[] = []
+  const layerColors = parseLayerColors(groups)
 
   // 預先解析 BLOCKS section（block 定義內的文字）
   const blockDefs = parseBlockDefs(groups)
@@ -790,7 +811,7 @@ export function parseDxf(text: string): DxfParseResult {
   }
 
   return {
-    inserts, texts, blockGroups, polygons, allLayers, blockExtents,
+    inserts, texts, blockGroups, polygons, allLayers, blockExtents, layerColors,
     stats: {
       totalInserts: inserts.length,
       totalTexts: texts.length,

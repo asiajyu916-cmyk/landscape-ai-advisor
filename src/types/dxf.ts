@@ -103,6 +103,8 @@ export interface DxfParseResult {
   allLayers: string[]
   // block 定義的幾何 bbox，key = blockName
   blockExtents: Record<string, BlockExtent>
+  // LAYER 表顏色（ACI），key = layerName，供 ByLayer/ByBlock HATCH 解析 effectiveColor
+  layerColors: Record<string, number>
   stats: {
     totalInserts: number
     totalTexts: number
