@@ -1122,13 +1122,26 @@ function buildZoneReviews(
               if (li.hatchPattern && area.hatchPattern &&
                   li.hatchPattern === area.hatchPattern.trim()) score += 25
               // color（+30，最強特徵 — 同 pattern 不同 color 是常見圖例區分法）
-              if (li.hatchColor !== null && li.hatchColor === (area.hatchColor ?? 0)) score += 30
-              // angle（+10）
-              if (li.hatchAngle !== null && area.hatchAngle !== undefined &&
-                  Math.abs(li.hatchAngle - (area.hatchAngle ?? 0)) < 1) score += 10
-              // scale（+10）
-              if (li.hatchScale !== null && area.hatchScale !== undefined &&
-                  Math.abs(li.hatchScale - area.hatchScale) < 0.05) score += 10
+              // ByLayer(256)/ByBlock(0)/null 視為「顏色未知」給半分 +15，不因取不到顏色而歸零
+              {
+                const colorKnown = (c: number | null | undefined) =>
+                  c !== null && c !== undefined && c !== 0 && c !== 256
+                const liC = li.hatchColor; const arC = area.hatchColor
+                if (colorKnown(liC) && colorKnown(arC)) {
+                  if (liC === arC) score += 30
+                  // 明確不同色 → 0 分（這是區分植物的關鍵特徵）
+                } else {
+                  score += 15  // 任一側顏色未知（ByLayer/ByBlock）→ 半分
+                }
+              }
+              // angle（+10；未知給半分 +5）
+              if (li.hatchAngle !== null && area.hatchAngle !== undefined) {
+                if (Math.abs(li.hatchAngle - (area.hatchAngle ?? 0)) < 1) score += 10
+              } else score += 5
+              // scale（+10；未知給半分 +5）
+              if (li.hatchScale !== null && area.hatchScale !== undefined) {
+                if (Math.abs(li.hatchScale - area.hatchScale) < 0.05) score += 10
+              } else score += 5
               // layer 相近（+10）：分區 HATCH 圖層名含植物名或圖例列代號
               if (layerName && (layerName.includes(li.plantName) ||
                   (li.rowNo && layerName.includes(li.rowNo)))) score += 10
