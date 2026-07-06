@@ -2693,30 +2693,9 @@ tfoot{display:table-footer-group}
 
   const activeIssues = result?.issues.filter(i => i.level !== 'ok') ?? []
 
-  console.log('LandscapeAdvisorPage received zonePlantingTable:', zonePlantingTable)
 
   return (
     <>
-      {/* ── PDF 分區解析結果 DEBUG（紅框）────────────────────────────────── */}
-      <div style={{ border: '2px solid red', padding: 16, marginBottom: 16, background: '#fff5f5' }}>
-        <h2 style={{ margin: '0 0 8px', fontSize: 16 }}>PDF 分區解析結果 DEBUG</h2>
-        <p style={{ margin: '0 0 4px', fontSize: 13 }}>zonePlantingTable length: {zonePlantingTable?.length ?? 'undefined'}</p>
-        <pre style={{ whiteSpace: 'pre-wrap', fontSize: 12, background: '#fee', padding: 8 }}>
-          {JSON.stringify(zonePlantingTable, null, 2)}
-        </pre>
-        {Array.isArray(zonePlantingTable) && zonePlantingTable.length > 0 ? (
-          zonePlantingTable.map(zone => (
-            <div key={zone.zoneName} style={{ borderTop: '1px solid #ccc', paddingTop: 8, marginTop: 8 }}>
-              <h3 style={{ margin: '0 0 4px', fontSize: 14 }}>{zone.zoneName}</h3>
-              <p style={{ margin: '0 0 2px', fontSize: 12 }}>灌木配置：{zone.shrubs?.join('、')}</p>
-              <p style={{ margin: 0, fontSize: 12 }}>喬木配置：{zone.trees?.join('、')}</p>
-            </div>
-          ))
-        ) : (
-          <p style={{ color: '#c00', fontSize: 13, margin: '8px 0 0' }}>目前沒有 PDF 分區資料</p>
-        )}
-      </div>
-
       {/* Header — 永遠顯示，所有分頁共用 */}
       <header className="bg-[#1a4731] sticky top-0 z-40 shadow-md">
         <div className="max-w-[1536px] mx-auto px-4 md:px-8 h-14 md:h-[68px] flex items-center justify-between">
@@ -2872,25 +2851,6 @@ tfoot{display:table-footer-group}
 
       {/* 主體內容 — 只在 AI 配植評估分頁顯示 */}
       {activeTab === 'landscape' && <div className="min-h-screen" style={{ background: 'radial-gradient(circle at 85% 15%, rgba(121,190,140,0.16) 0%, transparent 30%), radial-gradient(circle at 20% 85%, rgba(183,220,190,0.18) 0%, transparent 35%), linear-gradient(135deg, #f7faf5 0%, #eef6ef 48%, #e5f1e8 100%)' }}>
-
-      {/* ── PDF 分區解析結果 DEBUG（fixed，永遠貼在右下角）── */}
-      <div style={{ position: 'fixed', bottom: 16, right: 16, width: 340, maxHeight: 320, overflowY: 'auto', border: '3px solid red', background: '#fff5f5', padding: 12, zIndex: 99999, borderRadius: 8, boxShadow: '0 4px 20px rgba(0,0,0,0.3)', fontSize: 12 }}>
-        <b style={{ fontSize: 13 }}>PDF 分區解析結果 DEBUG</b>
-        <p style={{ margin: '4px 0' }}>zonePlantingTable length: {zonePlantingTable?.length ?? 'undefined'}</p>
-        <pre style={{ whiteSpace: 'pre-wrap', background: '#fee', padding: 6, margin: 0 }}>
-          {JSON.stringify(zonePlantingTable, null, 2)}
-        </pre>
-        {Array.isArray(zonePlantingTable) && zonePlantingTable.length > 0
-          ? zonePlantingTable.map(zone => (
-            <div key={zone.zoneName} style={{ borderTop: '1px solid #ccc', paddingTop: 6, marginTop: 6 }}>
-              <b>{zone.zoneName}</b>
-              <p style={{ margin: '2px 0' }}>灌木：{zone.shrubs?.join('、')}</p>
-              <p style={{ margin: 0 }}>喬木：{zone.trees?.join('、')}</p>
-            </div>
-          ))
-          : <p style={{ color: '#c00', margin: '6px 0 0' }}>目前沒有 PDF 分區資料</p>
-        }
-      </div>
 
       {/* No DB banner (outside main grid so it stays at top) */}
       {dbStatus === 'empty' && (

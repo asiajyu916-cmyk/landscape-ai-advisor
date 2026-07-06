@@ -9,10 +9,7 @@ export interface ZonePlantingRow {
  * 每個分區以 [zone, shrubs, trees] 三行為一組
  */
 export function parsePdfZonePlantingTable(rawText: string): ZonePlantingRow[] {
-  console.log('[parsePdfZonePlantingTable] called, rawText length:', rawText.length)
-
   const lines = rawText.split(/\n+/).map(l => l.trim()).filter(Boolean)
-  console.log('[parsePdfZonePlantingTable] lines:', lines.slice(0, 12))
 
   const splitPlants = (text: string): string[] =>
     text.split(/[、，,\/・•]+/)
@@ -30,7 +27,6 @@ export function parsePdfZonePlantingTable(rawText: string): ZonePlantingRow[] {
       if (win.includes('灌木') || win.includes('喬木')) { headerIdx = i; break }
     }
   }
-  console.log('[parsePdfZonePlantingTable] headerIdx:', headerIdx)
   if (headerIdx === -1) return []
 
   // 跳過所有表頭欄位行（含分區/灌木/喬木的行）
@@ -42,7 +38,6 @@ export function parsePdfZonePlantingTable(rawText: string): ZonePlantingRow[] {
       dataStart++
     } else break
   }
-  console.log('[parsePdfZonePlantingTable] dataStart:', dataStart, '→', lines[dataStart])
 
   const rows: ZonePlantingRow[] = []
   let i = dataStart
@@ -63,6 +58,5 @@ export function parsePdfZonePlantingTable(rawText: string): ZonePlantingRow[] {
     }
     i++
   }
-  console.log('[parsePdfZonePlantingTable] result rows:', rows.length)
   return rows
 }

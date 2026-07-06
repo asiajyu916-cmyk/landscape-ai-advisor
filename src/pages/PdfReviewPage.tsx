@@ -389,8 +389,7 @@ export default function PdfReviewPage({
         setProcMsg('正在解析 PDF 文字…')
         const text = await extractPdfText(file)
         // 印出 PDF 原始文字前 3000 字，供 debug parser 問題
-        console.log('PDF RAW TEXT (first 3000):', text.slice(0, 3000))
-        setProcMsg('正在比對植栽資料庫及分區表格…')
+setProcMsg('正在比對植栽資料庫及分區表格…')
         const result = extractPlants(text, db)
         setExtractResult(result)
         // 立刻通知父層，不等 handleImport
