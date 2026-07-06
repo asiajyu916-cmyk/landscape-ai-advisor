@@ -3129,6 +3129,55 @@ function ZoneReviewTab({ reviews }: { reviews: ZoneReviewResult[] }) {
               {/* 分區標題列 */}
               <div className="flex items-center gap-3 flex-wrap">
                 <span className="text-2xl font-bold text-stone-800">{r.zoneName}</span>
+
+              {/* ── 索引表 HATCH 圖例對照結果（最優先顯示）── */}
+              {r.finalReviewResults.length > 0 && (
+                <div className="rounded-xl border border-blue-200 overflow-hidden bg-white">
+                  <div className="px-4 py-2.5 bg-blue-50 border-b border-blue-100">
+                    <p className="text-xs font-bold text-blue-900">植栽索引表判讀結果</p>
+                  </div>
+                  <div className="divide-y divide-stone-100">
+                    {r.finalReviewResults.map((fr, i) => (
+                      <div key={i} className={`px-4 py-3 ${fr.matchedPlantName ? '' : 'bg-amber-50/40'}`}>
+                        {fr.matchedPlantName ? (
+                          <>
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="text-sm font-bold text-stone-800">
+                                偵測到{fr.detectedPatternType === 'INSERT' ? '植栽圖塊' : '鋪面/地被'}：{fr.matchedPlantName}
+                              </span>
+                              <span className={`text-xs px-1.5 py-0.5 rounded-full border font-medium ${
+                                fr.confidence === 'high'   ? 'bg-emerald-50 border-emerald-200 text-emerald-700' :
+                                fr.confidence === 'medium' ? 'bg-amber-50 border-amber-200 text-amber-700' :
+                                                              'bg-red-50 border-red-200 text-red-600'
+                              }`}>
+                                {fr.confidence === 'high' ? '高信心' : fr.confidence === 'medium' ? '中信心' : '低信心'}
+                              </span>
+                            </div>
+                            {fr.matchedLegendRow && (
+                              <p className="text-xs text-stone-500">對應索引表：{fr.matchedLegendRow}</p>
+                            )}
+                            <p className="text-xs text-stone-500">
+                              判讀依據：{fr.matchReason || '索引表 HATCH 圖例比對'}
+                              {fr.matchScore > 0 && `（相似度 ${fr.matchScore}%）`}
+                            </p>
+                          </>
+                        ) : (
+                          <>
+                            <p className="text-xs font-semibold text-amber-700">未能與索引表圖例穩定對應</p>
+                            {fr.noMatchReasons && fr.noMatchReasons.length > 0 && (
+                              <ul className="mt-1 space-y-0.5">
+                                {fr.noMatchReasons.map((reason, j) => (
+                                  <li key={j} className="text-xs text-amber-600">• {reason}</li>
+                                ))}
+                              </ul>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
                 <span className={`text-xs px-2.5 py-1 rounded-full border font-medium ${
                   r.status === '可審查'     ? 'bg-emerald-50 border-emerald-200 text-emerald-700' :
                   r.status === '植物待確認' ? 'bg-amber-50 border-amber-200 text-amber-700' :
