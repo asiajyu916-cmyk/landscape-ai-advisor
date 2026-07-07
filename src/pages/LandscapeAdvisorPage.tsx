@@ -785,7 +785,94 @@ function Section({ title, children, action }: { title: string; children: React.R
 
 interface ChatMsg { role: 'user' | 'assistant'; text?: string; reply?: AdvisorReply }
 
+// ── condition_search 卡片式回覆 ───────────────────────────────────────────────
+
+const COND_CAT_STYLE: Record<string, { bg: string; border: string; text: string; icon: string }> = {
+  '喬木': { bg: 'bg-teal-50/60',    border: 'border-teal-100',    text: 'text-teal-800',    icon: '🌳' },
+  '灌木': { bg: 'bg-green-50/60',   border: 'border-green-100',   text: 'text-green-800',   icon: '🌿' },
+  '地被': { bg: 'bg-emerald-50/60', border: 'border-emerald-100', text: 'text-emerald-800', icon: '🍀' },
+  '草皮': { bg: 'bg-lime-50/60',    border: 'border-lime-100',    text: 'text-lime-800',    icon: '🌱' },
+}
+
+function ConditionSearchCard({ r }: { r: AdvisorReply }) {
+  const hasFallback = r.pairCategories?.some(c => c.picks.some(p => p.fromFallback)) ?? false
+  return (
+    <div className="space-y-3 text-sm">
+      {/* 1. 查詢條件 */}
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#1a4731] text-white">條件查詢</span>
+        <p className="font-bold text-stone-800">{r.queryCondition ?? ''}建議清單</p>
+      </div>
+
+      {/* 2. 推薦植栽清單（喬木/灌木/地被/草皮 卡片）*/}
+      {r.pairCategories && r.pairCategories.length > 0 && (
+        <div className="space-y-2">
+          {r.pairCategories.map((c, i) => {
+            const st = COND_CAT_STYLE[c.label] ?? COND_CAT_STYLE['灌木']
+            return (
+              <div key={i} className={`${st.bg} border ${st.border} rounded-xl px-3 py-2.5`}>
+                <p className={`text-xs font-bold ${st.text} mb-1.5`}>{st.icon} {c.label}（{c.picks.length} 種）</p>
+                <div className="space-y-1.5">
+                  {c.picks.map((p, j) => (
+                    <div key={j} className="bg-white/70 border border-white rounded-lg px-2.5 py-1.5">
+                      <p className="text-xs font-bold text-stone-800 flex items-center gap-1.5">
+                        {p.name}
+                        {p.fromFallback && (
+                          <span className="text-[9px] font-normal px-1.5 py-px rounded-full bg-stone-100 text-stone-400 border border-stone-200">系統預設</span>
+                        )}
+                      </p>
+                      {p.why ? (
+                        <div className="mt-0.5 space-y-px">
+                          <p className="text-[11px] text-stone-600"><span className="text-emerald-700 font-semibold">符合原因</span>　{p.why}</p>
+                          {p.use && <p className="text-[11px] text-stone-600"><span className="text-blue-700 font-semibold">使用建議</span>　{p.use}</p>}
+                          {p.caution && p.caution !== '無特殊注意事項' && (
+                            <p className="text-[11px] text-stone-600"><span className="text-amber-700 font-semibold">注意事項</span>　{p.caution}</p>
+                          )}
+                        </div>
+                      ) : (
+                        <p className="text-[11px] text-stone-600 mt-0.5">{p.reason}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* 3. 使用建議 */}
+      {r.fixes.length > 0 && (
+        <div className="bg-blue-50/50 border border-blue-100 rounded-xl px-3 py-2">
+          <p className="text-xs font-bold text-blue-700 mb-1">→ 使用建議</p>
+          <ul className="space-y-0.5">
+            {r.fixes.map((x, i) => <li key={i} className="text-[11px] text-stone-600 leading-relaxed">・{x}</li>)}
+          </ul>
+        </div>
+      )}
+
+      {/* 4. 注意事項 */}
+      {r.risks.length > 0 && (
+        <div className="bg-amber-50/50 border border-amber-100 rounded-xl px-3 py-2">
+          <p className="text-xs font-bold text-amber-700 mb-1">⚠ 注意事項</p>
+          <ul className="space-y-0.5">
+            {r.risks.map((x, i) => <li key={i} className="text-[11px] text-stone-600 leading-relaxed">・{x}</li>)}
+          </ul>
+        </div>
+      )}
+
+      {/* 5. 系統預設標註（底部）*/}
+      {(hasFallback || r.disclaimer) && (
+        <p className="text-[11px] text-stone-400 border-t border-stone-100 pt-2">
+          {r.disclaimer ?? '部分植栽為系統預設建議，建議後續補入資料庫完整欄位。'}
+        </p>
+      )}
+    </div>
+  )
+}
+
 function AdvisorReplyCard({ r }: { r: AdvisorReply }) {
+  if (r.kind === 'condition_search') return <ConditionSearchCard r={r} />
   return (
     <div className="space-y-2.5 text-sm">
       {r.disclaimer && (

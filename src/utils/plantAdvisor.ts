@@ -18,8 +18,15 @@ export interface AdvisorReply {
   score?: number                                         // 配置評分（如適用）
   disclaimer?: string                                    // 資料庫缺植物提示
   // ── 配植顧問模式（分類搭配 + 完整方案）─────────────────────────────────
-  pairCategories?: Array<{ label: string; picks: Array<{ name: string; reason: string }> }>
+  pairCategories?: Array<{ label: string; picks: Array<{
+    name: string; reason: string
+    // condition_search 結構化欄位（卡片式排版用）
+    why?: string; use?: string; caution?: string; fromFallback?: boolean
+  }> }>
   plans?: Array<{ title: string; lines: string[] }>      // 完整搭配方案（方案A/B）
+  // ── condition_search 卡片式排版用 ───────────────────────────────────────
+  kind?: 'condition_search'
+  queryCondition?: string                                // 查詢條件標題（如「耐旱植物」）
 }
 
 export interface AdvisorContext {
@@ -413,9 +420,10 @@ function conditionSearchReply(q: string, conds: PlantCondition[], db: CsvPlantRe
       .filter(p => catFilter(p) && conds.every(c => c.test(p)))
       .sort((a, b) => (b.maintenanceLevel === '低' ? 1 : 0) - (a.maintenanceLevel === '低' ? 1 : 0))
       .slice(0, 5)
-    const picks = matches.map(p => {
+    const picks: NonNullable<AdvisorReply['pairCategories']>[number]['picks'] = matches.map(p => {
       const { use, caution } = usageAdvice(p, cat)
-      return { name: p.name, reason: `${conds.map(c => c.why(p)).join('・')}｜${use}｜注意：${caution}` }
+      const why = conds.map(c => c.why(p)).join('・')
+      return { name: p.name, reason: `${why}｜${use}｜注意：${caution}`, why, use, caution, fromFallback: false }
     })
     // 內建清單補足到 3 — 只補「特性標籤符合所有條件」的預設植物
     if (picks.length < 3) {
@@ -425,7 +433,8 @@ function conditionSearchReply(q: string, conds: PlantCondition[], db: CsvPlantRe
         if (!conds.every(c => f.traits.includes(c.key))) continue
         usedFallback = true
         const { use } = usageAdvice(null, cat)
-        picks.push({ name: f.name, reason: `${conds.map(c => c.fallbackNote).join('・')}（系統預設）｜${use}` })
+        const why = `${conds.map(c => c.fallbackNote).join('・')}・${f.reason}`
+        picks.push({ name: f.name, reason: `${why}（系統預設）｜${use}`, why, use, fromFallback: true })
       }
     }
     return { label: CAT_LABEL[cat], picks }
@@ -435,6 +444,8 @@ function conditionSearchReply(q: string, conds: PlantCondition[], db: CsvPlantRe
   const dbHits = pairCategories.reduce((s, c) => s + c.picks.filter(p => !p.reason.includes('系統預設')).length, 0)
 
   return {
+    kind: 'condition_search',
+    queryCondition: condLabel,
     verdict: `${condLabel}建議清單（資料庫符合 ${dbHits} 筆${usedFallback ? '，不足部分以系統預設補足' : ''}）：`,
     goodPairs: [],
     badPairs: [],
