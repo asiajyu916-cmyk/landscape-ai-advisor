@@ -2228,7 +2228,10 @@ export default function DxfReviewPage({
 
         {/* ── Zone review tab ── */}
         {tab === 'zonereview' && (
-          <ZoneReviewTab reviews={zoneReviews} />
+          <ZoneReviewTab reviews={zoneReviews} onAskAI={q => {
+            try { sessionStorage.setItem('advisor-prefill', q) } catch { /* ignore */ }
+            onTabChange?.('landscape')
+          }} />
         )}
 
         {/* ── Zone plan tab ── */}
@@ -2985,7 +2988,7 @@ const ISSUE_CLS: Record<string, string> = {
   ok:      'border-l-4 border-emerald-300 bg-emerald-50',
 }
 
-function ZoneReviewTab({ reviews }: { reviews: ZoneReviewResult[] }) {
+function ZoneReviewTab({ reviews, onAskAI }: { reviews: ZoneReviewResult[]; onAskAI?: (q: string) => void }) {
   const [activeTab, setActiveTab] = useState<string>('overview')
 
   if (reviews.length === 0) return (
@@ -3261,6 +3264,17 @@ function ZoneReviewTab({ reviews }: { reviews: ZoneReviewResult[] }) {
               {/* 分區標題列 */}
               <div className="flex items-center gap-3 flex-wrap">
                 <span className="text-2xl font-bold text-stone-800">{r.zoneName}</span>
+                {onAskAI && (
+                  <button
+                    onClick={() => {
+                      const trees = r.blockEntries.filter(b => b.plantName && !b.blockName.startsWith('[HATCH') && !b.blockName.startsWith('[面狀')).map(b => b.plantName)
+                      const hatchP = (r.hatchPlants ? [...r.hatchPlants.confirmed, ...r.hatchPlants.candidates] : []).map(h => h.plantName)
+                      onAskAI(`請分析 ${r.zoneName} 目前配置：喬木：${[...new Set(trees)].join('、') || '無'}；灌木/地被：${[...new Set(hatchP)].join('、') || '無'}。請判斷是否合理並提出修正建議。`)
+                    }}
+                    className="text-xs px-2.5 py-1 rounded-lg bg-[#1a4731] text-white font-medium hover:bg-[#2d6a4f] transition-colors">
+                    詢問 AI
+                  </button>
+                )}
 
               {/* ── 索引表 HATCH 圖例對照結果（最優先顯示）── */}
               {r.finalReviewResults.length > 0 && (

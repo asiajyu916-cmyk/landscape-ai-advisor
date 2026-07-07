@@ -13,6 +13,7 @@ import {
 import {
   parsePlantCsv, waterScore, sunConflictLevel, drainageConflictLevel,
 } from '@/utils/csvParser'
+import { getAdvisorReply, type AdvisorReply } from '@/utils/plantAdvisor'
 import type {
   CsvPlantRecord, SelectedCsvPlant, ImportResult, PlantStatus,
   PlantImageData, ImageStore, CandidatePhoto, ImageReviewStatus,
@@ -776,6 +777,189 @@ function Section({ title, children, action }: { title: string; children: React.R
         {action}
       </div>
       <div className="p-5">{children}</div>
+    </div>
+  )
+}
+
+// ── AI 配植助理（規則引擎，預留 API 升級接口）─────────────────────────────────
+
+interface ChatMsg { role: 'user' | 'assistant'; text?: string; reply?: AdvisorReply }
+
+function AdvisorReplyCard({ r }: { r: AdvisorReply }) {
+  return (
+    <div className="space-y-2.5 text-sm">
+      {r.disclaimer && (
+        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">{r.disclaimer}</p>
+      )}
+      <div>
+        <p className="text-xs font-bold text-stone-500 mb-0.5">配置判斷</p>
+        <p className="text-stone-800 leading-relaxed">{r.verdict}</p>
+        {r.score !== undefined && (
+          <span className={`inline-block mt-1 text-xs px-2 py-0.5 rounded-full font-bold ${
+            r.score >= 80 ? 'bg-emerald-100 text-emerald-800' :
+            r.score >= 65 ? 'bg-amber-100 text-amber-800' : 'bg-red-100 text-red-700'
+          }`}>配置評分 {r.score} / 100</span>
+        )}
+      </div>
+      {r.goodPairs.length > 0 && (
+        <div>
+          <p className="text-xs font-bold text-emerald-700 mb-1">✓ 適合搭配</p>
+          <div className="space-y-1">
+            {r.goodPairs.map((g, i) => (
+              <p key={i} className="text-xs text-stone-600">
+                <span className="font-semibold text-stone-800">{g.name}</span>　{g.reason}
+              </p>
+            ))}
+          </div>
+        </div>
+      )}
+      {r.badPairs.length > 0 && (
+        <div>
+          <p className="text-xs font-bold text-red-600 mb-1">✕ 不建議搭配</p>
+          <div className="space-y-1">
+            {r.badPairs.map((b, i) => (
+              <p key={i} className="text-xs text-stone-600">
+                <span className="font-semibold text-stone-800">{b.name}</span>　{b.reason}
+              </p>
+            ))}
+          </div>
+        </div>
+      )}
+      {r.risks.length > 0 && (
+        <div>
+          <p className="text-xs font-bold text-amber-700 mb-1">⚠ 可能風險</p>
+          <ul className="space-y-1">
+            {r.risks.map((x, i) => <li key={i} className="text-xs text-stone-600 leading-relaxed">・{x}</li>)}
+          </ul>
+        </div>
+      )}
+      {r.fixes.length > 0 && (
+        <div>
+          <p className="text-xs font-bold text-blue-700 mb-1">→ 修正建議</p>
+          <ul className="space-y-1">
+            {r.fixes.map((x, i) => <li key={i} className="text-xs text-stone-600 leading-relaxed">・{x}</li>)}
+          </ul>
+        </div>
+      )}
+      {r.alternatives.length > 0 && (
+        <div>
+          <p className="text-xs font-bold text-purple-700 mb-1">⇄ 替代方案</p>
+          <div className="space-y-1">
+            {r.alternatives.map((a, i) => (
+              <p key={i} className="text-xs text-stone-600">
+                {a.original} → <span className="font-semibold text-stone-800">{a.alt}</span>　{a.reason}
+              </p>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AdvisorChat({ db, zones, prefill, onPrefillConsumed }: {
+  db: CsvPlantRecord[]
+  zones?: Array<{ zoneName: string; shrubs: string[]; trees: string[] }>
+  prefill?: string
+  onPrefillConsumed?: () => void
+}) {
+  const [msgs, setMsgs] = useState<ChatMsg[]>([])
+  const [input, setInput] = useState('')
+  const [busy, setBusy] = useState(false)
+  const bottomRef = useRef<HTMLDivElement>(null)
+
+  const ask = useCallback(async (q: string) => {
+    const question = q.trim()
+    if (!question || busy) return
+    setMsgs(m => [...m, { role: 'user', text: question }])
+    setInput('')
+    setBusy(true)
+    try {
+      const reply = await getAdvisorReply(question, { db, zones })
+      setMsgs(m => [...m, { role: 'assistant', reply }])
+    } finally {
+      setBusy(false)
+    }
+  }, [db, zones, busy])
+
+  // 外部帶入問題（詢問 AI 按鈕 / DXF 頁跳轉）
+  useEffect(() => {
+    if (prefill) {
+      ask(prefill)
+      onPrefillConsumed?.()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefill])
+
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [msgs])
+
+  const QUICK = [
+    '黃花風鈴木有沒有建議搭配？',
+    '樹下草皮長不好可以換什麼？',
+    '入口區想做低維護植栽有什麼建議？',
+  ]
+
+  return (
+    <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden flex flex-col" style={{ minHeight: 420 }}>
+      <div className="px-5 py-3 bg-[#f0f7f1] border-b border-stone-100 flex items-center justify-between">
+        <div>
+          <p className="text-sm font-bold text-stone-800">AI 配植助理</p>
+          <p className="text-xs text-stone-400 mt-0.5">依植栽資料庫（{db.length} 筆）即時分析配植組合、風險與替代方案</p>
+        </div>
+        <span className="text-[10px] px-2 py-0.5 rounded-full bg-stone-100 text-stone-400 border border-stone-200">規則引擎 v1</span>
+      </div>
+
+      {/* 訊息區 */}
+      <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3" style={{ maxHeight: 480 }}>
+        {msgs.length === 0 && (
+          <div className="text-center py-6">
+            <p className="text-sm text-stone-400 mb-3">輸入植物名稱或分區組合，我會依資料庫欄位分析日照、水分、維護相容性。</p>
+            <div className="flex flex-col gap-1.5 items-center">
+              {QUICK.map((q, i) => (
+                <button key={i} onClick={() => ask(q)}
+                  className="text-xs px-3 py-1.5 rounded-full border border-green-200 text-green-700 hover:bg-green-50 transition-colors">
+                  {q}
+                </button>
+              ))}
+              {zones && zones.length > 0 && zones.slice(0, 5).map(z => (
+                <button key={z.zoneName}
+                  onClick={() => ask(`請分析 ${z.zoneName} 目前配置：喬木：${z.trees.join('、') || '無'}；灌木/地被：${z.shrubs.join('、') || '無'}。請判斷是否合理並提出修正建議。`)}
+                  className="text-xs px-3 py-1.5 rounded-full border border-blue-200 text-blue-700 hover:bg-blue-50 transition-colors">
+                  分析 {z.zoneName} 目前配置
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {msgs.map((m, i) => m.role === 'user' ? (
+          <div key={i} className="flex justify-end">
+            <div className="max-w-[85%] bg-[#1a4731] text-white text-sm rounded-2xl rounded-br-md px-4 py-2.5">{m.text}</div>
+          </div>
+        ) : (
+          <div key={i} className="flex justify-start">
+            <div className="max-w-[95%] bg-stone-50 border border-stone-100 rounded-2xl rounded-bl-md px-4 py-3">
+              {m.reply && <AdvisorReplyCard r={m.reply} />}
+            </div>
+          </div>
+        ))}
+        {busy && <p className="text-xs text-stone-400">分析中…</p>}
+        <div ref={bottomRef} />
+      </div>
+
+      {/* 輸入區 */}
+      <div className="border-t border-stone-100 px-3 py-2.5 flex gap-2">
+        <input
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) ask(input) }}
+          placeholder="例：A區用黃花風鈴木、蔓花生、台北草合理嗎？"
+          className="flex-1 px-3.5 py-2 border border-stone-200 rounded-xl text-sm focus:outline-none focus:border-green-400"
+        />
+        <button onClick={() => ask(input)} disabled={!input.trim() || busy}
+          className="px-4 py-2 rounded-xl bg-[#1a4731] text-white text-sm font-semibold hover:bg-[#2d6a4f] disabled:bg-stone-200 disabled:text-stone-400 transition-colors">
+          送出
+        </button>
+      </div>
     </div>
   )
 }
@@ -2206,7 +2390,9 @@ export default function LandscapeAdvisorPage({
   const [showDb, setShowDb] = useState(false)
   const [showCsvImport, setShowCsvImport] = useState(false)
   const [copyDone, setCopyDone] = useState(false)
-  const [activeReviewTab, setActiveReviewTab] = useState<'overview'|'categories'|'issues'|'alternatives'|'summary'>('overview')
+  const [activeReviewTab, setActiveReviewTab] = useState<'overview'|'categories'|'issues'|'alternatives'|'summary'|'assistant'>('overview')
+  // AI 配植助理：外部帶入的問題（詢問 AI 按鈕 / DXF 頁跳轉）
+  const [advisorPrefill, setAdvisorPrefill] = useState<string | undefined>(undefined)
   const [pdfHtml, setPdfHtml] = useState<string | null>(null)
   const [pdfError, setPdfError] = useState<string | null>(null)
   const [showMobileTools, setShowMobileTools] = useState(false)
@@ -2246,6 +2432,19 @@ export default function LandscapeAdvisorPage({
   }, [activeTab, dxfZonesLinked])
   const [activeZoneId, setActiveZoneId] = useState<string | null>(null)
   const activeZone = storedZones.find(z => z.zoneName === activeZoneId) ?? null
+
+  // ── DXF 頁「詢問 AI」跳轉：讀取 sessionStorage 帶入的問題 ────────────────────
+  useEffect(() => {
+    if (activeTab !== 'landscape') return
+    try {
+      const q = sessionStorage.getItem('advisor-prefill')
+      if (q) {
+        sessionStorage.removeItem('advisor-prefill')
+        setAdvisorPrefill(q)
+        setActiveReviewTab('assistant')
+      }
+    } catch { /* ignore */ }
+  }, [activeTab])
 
   // ── Split pane ──────────────────────────────────────────────────────────────
   const SPLIT_MIN_LEFT  = 320
@@ -3024,23 +3223,31 @@ tfoot{display:table-footer-group}
         {/* ── Right: 評估結果 ── */}
         <div className="flex-1 overflow-y-auto p-4 md:p-5 bg-[#f7f5f0] min-w-0">
           {!result ? (
-            /* Empty state */
-            <div className="border border-stone-200/80 rounded-2xl flex flex-col items-center justify-center py-28 text-center px-8 shadow-sm h-full max-h-[600px]" style={{ background: 'radial-gradient(circle at top right, rgba(111,168,120,0.10) 0%, transparent 32%), linear-gradient(145deg, #ffffff 0%, #fbfdfb 55%, #f3faf5 100%)' }}>
-              <div className="w-20 h-20 rounded-full bg-[#d8f3dc] flex items-center justify-center mb-6">
-                <Leaf size={36} className="text-[#2d6a4f]" />
+            /* Empty state + AI 配植助理（未執行評估也能提問）*/
+            <div className="space-y-4">
+              <div className="border border-stone-200/80 rounded-2xl flex flex-col items-center justify-center py-16 text-center px-8 shadow-sm" style={{ background: 'radial-gradient(circle at top right, rgba(111,168,120,0.10) 0%, transparent 32%), linear-gradient(145deg, #ffffff 0%, #fbfdfb 55%, #f3faf5 100%)' }}>
+                <div className="w-16 h-16 rounded-full bg-[#d8f3dc] flex items-center justify-center mb-4">
+                  <Leaf size={30} className="text-[#2d6a4f]" />
+                </div>
+                <p className="text-xl font-bold text-stone-800 mb-2">尚未執行評估</p>
+                <p className="text-sm text-stone-500 mt-1 max-w-sm leading-relaxed">
+                  在左側選取植栽組合後，點擊「AI 配植評估」按鈕，系統將自動分析水分、日照、排水與養護相容性，並產生審查回覆文字。
+                </p>
+                <div className="mt-6 flex items-center gap-6 text-xs text-stone-400">
+                  {[['🌿', '相容性分析'], ['⚠️', '風險識別'], ['📋', '審查回覆']].map(([icon, label]) => (
+                    <div key={label} className="flex flex-col items-center gap-1.5">
+                      <span className="text-2xl">{icon}</span>
+                      <span>{label}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
-              <p className="text-xl font-bold text-stone-800 mb-2">尚未執行評估</p>
-              <p className="text-sm text-stone-500 mt-1 max-w-sm leading-relaxed">
-                在左側選取植栽組合後，點擊「AI 配植評估」按鈕，系統將自動分析水分、日照、排水與養護相容性，並產生審查回覆文字。
-              </p>
-              <div className="mt-8 flex items-center gap-6 text-xs text-stone-400">
-                {[['🌿', '相容性分析'], ['⚠️', '風險識別'], ['📋', '審查回覆']].map(([icon, label]) => (
-                  <div key={label} className="flex flex-col items-center gap-1.5">
-                    <span className="text-2xl">{icon}</span>
-                    <span>{label}</span>
-                  </div>
-                ))}
-              </div>
+              <AdvisorChat
+                db={allPlants}
+                zones={zonePlantingTable.length > 0 ? zonePlantingTable : undefined}
+                prefill={advisorPrefill}
+                onPrefillConsumed={() => setAdvisorPrefill(undefined)}
+              />
             </div>
           ) : (
             /* Result tabs */
@@ -3052,6 +3259,7 @@ tfoot{display:table-footer-group}
                 { id: 'issues'       as const, label: `問題明細${activeIssues.length > 0 ? ` (${activeIssues.length})` : ''}` },
                 { id: 'alternatives' as const, label: `替代植栽${result.alternatives.length > 0 ? ` (${result.alternatives.length})` : ''}` },
                 { id: 'summary'      as const, label: '總結建議' },
+                { id: 'assistant'    as const, label: 'AI 配植助理' },
               ]
               return (
                 <div className="space-y-4">
@@ -3094,6 +3302,14 @@ tfoot{display:table-footer-group}
                                       'bg-red-100 text-red-800'
                                     }`}>風險：{r.riskLevel}</span>
                                     <span className="text-sm font-bold text-stone-700">{r.score} 分</span>
+                                    <button
+                                      onClick={() => {
+                                        setAdvisorPrefill(`請分析 ${r.zoneName} 目前配置：喬木：${r.trees.join('、') || '無'}；灌木/地被：${r.shrubs.join('、') || '無'}。請判斷是否合理並提出修正建議。`)
+                                        setActiveReviewTab('assistant')
+                                      }}
+                                      className="text-xs px-2.5 py-1 rounded-lg bg-[#1a4731] text-white font-medium hover:bg-[#2d6a4f] transition-colors">
+                                      詢問 AI
+                                    </button>
                                   </div>
                                 </div>
                                 <p className="text-xs text-stone-500 mb-1">
@@ -3391,6 +3607,16 @@ tfoot{display:table-footer-group}
                     </div>
                     )
                   })()}
+
+                  {/* ── AI 配植助理 ── */}
+                  {activeReviewTab === 'assistant' && (
+                    <AdvisorChat
+                      db={allPlants}
+                      zones={zonePlantingTable.length > 0 ? zonePlantingTable : undefined}
+                      prefill={advisorPrefill}
+                      onPrefillConsumed={() => setAdvisorPrefill(undefined)}
+                    />
+                  )}
                 </div>
               )
             })()
