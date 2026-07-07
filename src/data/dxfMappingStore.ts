@@ -52,9 +52,10 @@ export function clearSessionRules(projectKey: string): void {
 
 // ── Non-plant exclusion patterns ──────────────────────────────────────────────
 
+// AutoCAD 系統圖層：必須「完全相等」才排除（避免 '0' 誤殺 '00-噴灌'、'0-喬木' 等圖層）
+export const NON_PLANT_LAYER_EXACT = ['defpoints', '0']
+
 export const NON_PLANT_LAYER_KEYWORDS = [
-  // AutoCAD 系統圖層
-  'defpoints', '0',
   // 圖框 / 標題欄
   '_ocad', 'paper', 'layout', 'viewport', 'vport', 'border',
   '圖框', '標題', '標題欄', 'titleblock', 'title_block',
@@ -83,6 +84,9 @@ export function isNonPlant(blockName: string, layer: string): boolean {
 
   // Empty or single char block names are likely CAD artifacts
   if (bn.length <= 1 && !bn.match(/[a-z一-鿿]/)) return true
+
+  // 系統圖層（0 / Defpoints）完全相等才排除
+  if (NON_PLANT_LAYER_EXACT.includes(ln)) return true
 
   return [
     ...NON_PLANT_LAYER_KEYWORDS.map(k => ({ key: k.toLowerCase(), src: 'layer' })),
