@@ -341,7 +341,7 @@ interface BlockDef {
   baseX: number
   baseY: number
   texts: Array<{ content: string; layer: string; localX: number; localY: number; type: 'TEXT' | 'MTEXT' }>
-  inserts: Array<{ blockName: string; layer: string; localX: number; localY: number }>
+  inserts: Array<{ blockName: string; layer: string; localX: number; localY: number; scaleX: number; scaleY: number; rotation: number }>
   polygons: Array<{ layer: string; vertices: Array<{x:number;y:number}>; closed: boolean; source: 'LWPOLYLINE'|'HATCH'|'POLYLINE'; hatchPattern?: string; hatchScale?: number; hatchAngle?: number; hatchColor?: number }>
   // 本地 bbox（以 block origin 為原點），供計算世界座標 bbox 中心使用
   localBBox?: { minX: number; maxX: number; minY: number; maxY: number; cx: number; cy: number }
@@ -391,30 +391,55 @@ function parseBlockDefs(groups: GroupCode[]): Map<string, BlockDef> {
         if (groups[i].code === 0 && (eVal === 'TEXT' || eVal === 'MTEXT' || eVal === 'ATTDEF' || eVal === 'ATTRIB')) {
           const eType = eVal as 'TEXT' | 'MTEXT' | 'ATTDEF' | 'ATTRIB'
           let layer = ''; let content = ''; let lx = 0; let ly = 0
+          let ax: number | null = null; let ay: number | null = null  // 對齊點 11/21
+          let hAlign = 0; let vAlign = 0                              // 72/73：非 0 = 使用對齊點
+          let gotXY = false; let inEmbedded = false
           i++
           while (i < groups.length && groups[i].code !== 0) {
-            if (groups[i].code === 8)  layer   = groups[i].value
-            if (groups[i].code === 1)  content = (eType === 'MTEXT') ? stripMtextCodes(groups[i].value) : groups[i].value
-            if (groups[i].code === 10) lx      = parseFloat(groups[i].value) || 0
-            if (groups[i].code === 20) ly      = parseFloat(groups[i].value) || 0
+            // MTEXT「101 Embedded Object」區段內有另一組 10/20（方向向量），
+            // 會蓋掉真實插入點 → 遇到 101 後停止解析座標
+            if (groups[i].code === 101) inEmbedded = true
+            if (!inEmbedded) {
+              if (groups[i].code === 8)  layer   = groups[i].value
+              if (groups[i].code === 1)  content = (eType === 'MTEXT') ? stripMtextCodes(groups[i].value) : groups[i].value
+              if (groups[i].code === 10 && !gotXY) lx = parseFloat(groups[i].value) || 0
+              if (groups[i].code === 20 && !gotXY) { ly = parseFloat(groups[i].value) || 0; gotXY = true }
+              if (groups[i].code === 11) ax      = parseFloat(groups[i].value)
+              if (groups[i].code === 21) ay      = parseFloat(groups[i].value)
+              if (groups[i].code === 72) hAlign  = parseInt(groups[i].value) || 0
+              if (groups[i].code === 73) vAlign  = parseInt(groups[i].value) || 0
+            }
             i++
           }
+          // TEXT 有對齊設定（72/73 非 0）時，真實位置是對齊點 11/21 而非 10/20
+          // （多個標籤 10/20 同為 (1,0) 的典型症狀）
+          const useAlign = eType !== 'MTEXT' && (hAlign !== 0 || vAlign !== 0) &&
+            ax !== null && ay !== null && isFinite(ax) && isFinite(ay)
           if (content.trim()) {
-            blockTexts.push({ content: content.trim(), layer, localX: lx, localY: ly, type: eType === 'MTEXT' ? 'MTEXT' : 'TEXT' })
+            blockTexts.push({
+              content: content.trim(), layer,
+              localX: useAlign ? ax! : lx,
+              localY: useAlign ? ay! : ly,
+              type: eType === 'MTEXT' ? 'MTEXT' : 'TEXT',
+            })
           }
 
         // INSERT（nested block）
         } else if (groups[i].code === 0 && eVal === 'INSERT') {
           let layer = ''; let bname = ''; let lx = 0; let ly = 0
+          let sx = 1; let sy = 1; let rot = 0
           i++
           while (i < groups.length && groups[i].code !== 0) {
             if (groups[i].code === 8) layer = groups[i].value
             if (groups[i].code === 2) bname = groups[i].value
             if (groups[i].code === 10) lx   = parseFloat(groups[i].value) || 0
             if (groups[i].code === 20) ly   = parseFloat(groups[i].value) || 0
+            if (groups[i].code === 41) sx   = parseFloat(groups[i].value) || 1
+            if (groups[i].code === 42) sy   = parseFloat(groups[i].value) || 1
+            if (groups[i].code === 50) rot  = parseFloat(groups[i].value) || 0
             i++
           }
-          if (bname) blockInserts.push({ blockName: bname, layer, localX: lx, localY: ly })
+          if (bname) blockInserts.push({ blockName: bname, layer, localX: lx, localY: ly, scaleX: sx, scaleY: sy, rotation: rot })
 
         // LWPOLYLINE
         } else if (groups[i].code === 0 && eVal === 'LWPOLYLINE') {
@@ -537,6 +562,69 @@ export function parseDxf(text: string): DxfParseResult {
       for (const bp of bdef.polygons) {
         polygons.push({ layer: bp.layer, vertices: bp.vertices, closed: bp.closed, zoneType: classifyZone(bp.layer), source: bp.source, hatchPattern: bp.hatchPattern, hatchScale: bp.hatchScale, hatchAngle: bp.hatchAngle, hatchColor: bp.hatchColor })
       }
+      // ── INSERT 遞迴展開（關鍵：R2004+ 所有實體常包在 Model_Space 甚至再包一層 block）──
+      // 沒展開的話：分區標籤（本身是名為「A區」的 block）停在 local 座標 (1,0)，
+      // point-in-polygon 全數失敗 → 「未找到包含 X區 的封閉邊界」
+      const expandInsert = (
+        bi: BlockDef['inserts'][0],
+        originX: number, originY: number,
+        oScaleX: number, oScaleY: number, oRotDeg: number,
+        depth: number,
+      ): void => {
+        if (depth > 5) return  // 防循環
+        const oRad = oRotDeg * Math.PI / 180
+        const oCos = Math.cos(oRad); const oSin = Math.sin(oRad)
+        // insert 點在上層座標系 → 世界座標
+        const wx = originX + bi.localX * oScaleX * oCos - bi.localY * oScaleY * oSin
+        const wy = originY + bi.localX * oScaleX * oSin + bi.localY * oScaleY * oCos
+        const wScaleX = bi.scaleX * oScaleX
+        const wScaleY = bi.scaleY * oScaleY
+        const wRot = bi.rotation + oRotDeg
+        inserts.push({ type: 'INSERT', layer: bi.layer, blockName: bi.blockName, x: wx, y: wy, scaleX: wScaleX, scaleY: wScaleY, rotation: wRot, attributes: [] })
+
+        const target = blockDefs.get(bi.blockName)
+        if (!target) return
+        const rad = wRot * Math.PI / 180
+        const cos = Math.cos(rad); const sin = Math.sin(rad)
+        for (const bt of target.texts) {
+          const dx = bt.localX - target.baseX; const dy = bt.localY - target.baseY
+          texts.push({
+            type: bt.type, layer: bt.layer || bi.layer, content: bt.content,
+            x: wx + dx * wScaleX * cos - dy * wScaleY * sin,
+            y: wy + dx * wScaleX * sin + dy * wScaleY * cos,
+          })
+        }
+        for (const bp of target.polygons) {
+          const worldVerts = bp.vertices.map(v => {
+            const dx = v.x - target.baseX; const dy = v.y - target.baseY
+            return {
+              x: wx + dx * wScaleX * cos - dy * wScaleY * sin,
+              y: wy + dx * wScaleX * sin + dy * wScaleY * cos,
+            }
+          })
+          if (worldVerts.length >= 3) {
+            polygons.push({
+              layer: bp.layer || bi.layer, vertices: worldVerts, closed: bp.closed,
+              zoneType: classifyZone(bp.layer || bi.layer), source: bp.source,
+              hatchPattern: bp.hatchPattern, hatchScale: bp.hatchScale,
+              hatchAngle: bp.hatchAngle, hatchColor: bp.hatchColor,
+            })
+          }
+        }
+        // 遞迴展開 nested INSERT（target block 座標系 → 需先扣 target.baseX/Y）
+        for (const ni of target.inserts) {
+          expandInsert(
+            { ...ni, localX: ni.localX - target.baseX, localY: ni.localY - target.baseY },
+            wx, wy, wScaleX, wScaleY, wRot, depth + 1,
+          )
+        }
+      }
+      for (const bi of bdef.inserts) {
+        expandInsert(
+          { ...bi, localX: bi.localX - bdef.baseX, localY: bi.localY - bdef.baseY },
+          0, 0, 1, 1, 0, 0,
+        )
+      }
     }
   }
 
@@ -655,16 +743,32 @@ export function parseDxf(text: string): DxfParseResult {
       let layer = ''; let content = ''; let altContent = ''
       let attribTag = ''
       let x = 0; let y = 0
+      let ax: number | null = null; let ay: number | null = null
+      let hAlign = 0; let vAlign = 0
+      let gotXY = false; let inEmbedded = false
       i++
       while (i < groups.length && groups[i].code !== 0) {
         const eg = groups[i]
-        if (eg.code === 8)  layer = eg.value
-        if (eg.code === 2 && (type === 'ATTRIB' || type === 'ATTDEF')) attribTag = eg.value
-        if (eg.code === 1) content    = type === 'MTEXT' ? stripMtextCodes(eg.value) : eg.value
-        if (eg.code === 3) altContent = type === 'MTEXT' ? stripMtextCodes(eg.value) : eg.value
-        if (eg.code === 10) x = parseFloat(eg.value) || 0
-        if (eg.code === 20) y = parseFloat(eg.value) || 0
+        // MTEXT 101 Embedded Object 內另有 10/20（方向向量）會蓋掉插入點
+        if (eg.code === 101) inEmbedded = true
+        if (!inEmbedded) {
+          if (eg.code === 8)  layer = eg.value
+          if (eg.code === 2 && (type === 'ATTRIB' || type === 'ATTDEF')) attribTag = eg.value
+          if (eg.code === 1) content    = type === 'MTEXT' ? stripMtextCodes(eg.value) : eg.value
+          if (eg.code === 3) altContent = type === 'MTEXT' ? stripMtextCodes(eg.value) : eg.value
+          if (eg.code === 10 && !gotXY) x = parseFloat(eg.value) || 0
+          if (eg.code === 20 && !gotXY) { y = parseFloat(eg.value) || 0; gotXY = true }
+          if (eg.code === 11) ax = parseFloat(eg.value)
+          if (eg.code === 21) ay = parseFloat(eg.value)
+          if (eg.code === 72) hAlign = parseInt(eg.value) || 0
+          if (eg.code === 73) vAlign = parseInt(eg.value) || 0
+        }
         i++
+      }
+      // TEXT/ATTRIB 有對齊設定時真實位置為對齊點 11/21
+      if (type !== 'MTEXT' && (hAlign !== 0 || vAlign !== 0) &&
+          ax !== null && ay !== null && isFinite(ax) && isFinite(ay)) {
+        x = ax; y = ay
       }
       const fullContent = (altContent + content).trim() || content.trim()
       if (fullContent) {
