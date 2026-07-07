@@ -801,6 +801,25 @@ function AdvisorReplyCard({ r }: { r: AdvisorReply }) {
           }`}>配置評分 {r.score} / 100</span>
         )}
       </div>
+      {r.pairCategories && r.pairCategories.length > 0 && (
+        <div>
+          <p className="text-xs font-bold text-emerald-700 mb-1.5">✓ 建議搭配植栽</p>
+          <div className="space-y-2">
+            {r.pairCategories.map((c, i) => (
+              <div key={i} className="bg-emerald-50/50 border border-emerald-100 rounded-lg px-3 py-2">
+                <p className="text-xs font-semibold text-emerald-800 mb-1">{c.label}</p>
+                <div className="space-y-0.5">
+                  {c.picks.map((p, j) => (
+                    <p key={j} className="text-xs text-stone-600">
+                      <span className="font-semibold text-stone-800">{p.name}</span>　{p.reason}
+                    </p>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {r.goodPairs.length > 0 && (
         <div>
           <p className="text-xs font-bold text-emerald-700 mb-1">✓ 適合搭配</p>
@@ -839,6 +858,21 @@ function AdvisorReplyCard({ r }: { r: AdvisorReply }) {
           <ul className="space-y-1">
             {r.fixes.map((x, i) => <li key={i} className="text-xs text-stone-600 leading-relaxed">・{x}</li>)}
           </ul>
+        </div>
+      )}
+      {r.plans && r.plans.length > 0 && (
+        <div>
+          <p className="text-xs font-bold text-purple-700 mb-1.5">⇄ 完整搭配方案</p>
+          <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
+            {r.plans.map((pl, i) => (
+              <div key={i} className="bg-purple-50/50 border border-purple-100 rounded-lg px-3 py-2">
+                <p className="text-xs font-bold text-purple-800 mb-1">{pl.title}</p>
+                {pl.lines.map((l, j) => (
+                  <p key={j} className="text-xs text-stone-700 leading-relaxed">{l}</p>
+                ))}
+              </div>
+            ))}
+          </div>
         </div>
       )}
       {r.alternatives.length > 0 && (

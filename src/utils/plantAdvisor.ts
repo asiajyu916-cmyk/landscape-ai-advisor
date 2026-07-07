@@ -13,10 +13,13 @@ export interface AdvisorReply {
   goodPairs: Array<{ name: string; reason: string }>     // 適合搭配
   badPairs: Array<{ name: string; reason: string }>      // 不建議搭配
   risks: string[]                                        // 可能風險
-  fixes: string[]                                        // 修正建議
-  alternatives: Array<{ original: string; alt: string; reason: string }>  // 替代方案
+  fixes: string[]                                        // 修正建議／配置建議
+  alternatives: Array<{ original: string; alt: string; reason: string }>  // 單植物替代
   score?: number                                         // 配置評分（如適用）
   disclaimer?: string                                    // 資料庫缺植物提示
+  // ── 配植顧問模式（分類搭配 + 完整方案）─────────────────────────────────
+  pairCategories?: Array<{ label: string; picks: Array<{ name: string; reason: string }> }>
+  plans?: Array<{ title: string; lines: string[] }>      // 完整搭配方案（方案A/B）
 }
 
 export interface AdvisorContext {
@@ -123,6 +126,176 @@ function recommend(db: CsvPlantRecord[], filter: (p: CsvPlantRecord) => boolean,
       return (bm + bn) - (am + an)
     })
     .slice(0, count)
+}
+
+// ── 內建預設植栽清單（資料庫不足時補足，台灣常用景觀植物）───────────────────
+const FALLBACK_PLANTS: Record<'tree' | 'shrub' | 'groundcover' | 'lawn', Array<{ name: string; reason: string }>> = {
+  tree: [
+    { name: '台灣欒樹', reason: '台灣原生・秋季金黃季相，與春花喬木錯開觀賞期' },
+    { name: '樟樹',     reason: '常綠遮蔭穩定，作背景襯托開花喬木' },
+    { name: '光蠟樹',   reason: '台灣原生・誘蝶誘蟲，枝葉細緻不搶主景' },
+    { name: '楓香',     reason: '原生大喬木，秋色葉與春花形成雙季相' },
+  ],
+  shrub: [
+    { name: '樹蘭',       reason: '常綠耐修剪，香花型收邊灌木' },
+    { name: '春不老',     reason: '低維護常綠，新葉紅色具景深層次' },
+    { name: '厚葉石斑木', reason: '耐旱耐風，白花系穩定型灌木' },
+    { name: '矮仙丹',     reason: '全年開花紅橙色系，入口亮點首選' },
+    { name: '七里香',     reason: '香花綠籬，耐修剪塑形' },
+    { name: '雪茄花',     reason: '紫紅色小花密集，低矮前景收邊' },
+  ],
+  groundcover: [
+    { name: '沿階草',   reason: '極耐陰，樹下地被首選' },
+    { name: '麥門冬',   reason: '耐陰耐旱，樹蔭至半日照皆穩定' },
+    { name: '蔓花生',   reason: '黃花地毯狀覆蓋，抑制雜草' },
+    { name: '蚌蘭',     reason: '紫背葉色，色彩對比前景' },
+    { name: '翠蘆莉',   reason: '紫花耐旱，日照充足處大面積覆蓋' },
+  ],
+  lawn: [
+    { name: '台北草',   reason: '質地細緻，開放草坪主流選擇（需水較高）' },
+    { name: '假儉草',   reason: '低維護耐踐踏，粗放管理首選' },
+    { name: '百慕達草', reason: '耐旱恢復力強，全日照開放區適用' },
+  ],
+}
+
+/** DB 撈同類相容植物，不足時用內建清單補到 minCount */
+function pickCategory(
+  subject: CsvPlantRecord | null,
+  db: CsvPlantRecord[],
+  cat: 'tree' | 'shrub' | 'groundcover' | 'lawn',
+  minCount = 3,
+): Array<{ name: string; reason: string; fromDB: boolean }> {
+  const isLawn = (p: CsvPlantRecord) =>
+    /草皮|草坪/.test(p.subCategory + p.category) || ['台北草', '假儉草', '百慕達草', '地毯草', '奧古斯丁草'].some(n => p.name.includes(n))
+  const catFilter = (p: CsvPlantRecord) =>
+    cat === 'lawn' ? isLawn(p) : (p.normalizedCategory === cat && !isLawn(p))
+
+  const picks: Array<{ name: string; reason: string; fromDB: boolean }> = []
+  const dbPicks = db
+    .filter(p => catFilter(p) && (!subject || p.name !== subject.name))
+    .filter(p => !subject || isCompatible(subject, p).ok)
+    .sort((a, b) => {
+      const sc = (p: CsvPlantRecord) =>
+        (p.maintenanceLevel === '低' ? 2 : 0) + (p.nativeStatus.includes('原生') ? 1 : 0) + (p.flowerColor ? 1 : 0)
+      return sc(b) - sc(a)
+    })
+  for (const p of dbPicks.slice(0, minCount + 1)) {
+    picks.push({
+      name: p.name,
+      reason: [
+        p.sunRequirement !== '待查' ? `日照${p.sunRequirement}` : null,
+        p.waterRequirement !== '待查' ? `需水${p.waterRequirement}` : null,
+        p.maintenanceLevel === '低' ? '低維護' : null,
+        p.flowerColor ? `${p.flowerColor}花${p.flowerMonth ? `(${p.flowerMonth}月)` : ''}` : null,
+        p.nativeStatus.includes('原生') ? '原生' : null,
+      ].filter(Boolean).join('・') || (p.subCategory || p.category),
+      fromDB: true,
+    })
+  }
+  // 內建清單補足
+  for (const f of FALLBACK_PLANTS[cat]) {
+    if (picks.length >= minCount) break
+    if (picks.some(x => x.name === f.name)) continue
+    if (subject && f.name === subject.name) continue
+    picks.push({ name: f.name, reason: f.reason + '（通用配植原則）', fromDB: false })
+  }
+  return picks.slice(0, Math.max(minCount, 3))
+}
+
+/** 配植顧問模式：針對單一主題植物輸出完整搭配建議 */
+function buildPairingReply(subject: CsvPlantRecord, db: CsvPlantRecord[], disclaimer?: string): AdvisorReply {
+  const isTree = subject.normalizedCategory === 'tree'
+  const hasFlower = !!subject.flowerColor
+  const deciduous = /落葉/.test(subject.category + subject.subCategory + subject.treeForm + subject.maintenanceNote)
+
+  // 1. 配植判斷
+  const roles: string[] = []
+  if (isTree) {
+    if (hasFlower) roles.push(`${subject.flowerMonth ? subject.flowerMonth + '月' : ''}${subject.flowerColor}花主景喬木、入口迎賓、道路列植`)
+    else roles.push('綠蔭背景喬木、緩衝帶列植')
+    if (subject.droughtTolerance === '耐旱') roles.push('低澆灌區位適用')
+  } else {
+    roles.push(hasFlower ? '開花灌木／前景亮點' : '結構性收邊植栽')
+  }
+  const verdict = `${subject.name}（${subject.subCategory || subject.category}｜日照${subject.sunRequirement}｜需水${subject.waterRequirement}｜維護${subject.maintenanceLevel}）——適合作為：${roles.join('；')}。`
+
+  // 2. 分類搭配
+  const trees  = pickCategory(subject, db, 'tree', 3)
+  const shrubs = pickCategory(subject, db, 'shrub', 3)
+  const gcs    = pickCategory(subject, db, 'groundcover', 3)
+  const lawns  = pickCategory(subject, db, 'lawn', 3)
+  const pairCategories = [
+    ...(isTree ? [{ label: '可搭配喬木（列植間植/背景）', picks: trees }] : [{ label: '可搭配喬木（上層）', picks: trees }]),
+    { label: '可搭配灌木', picks: shrubs },
+    { label: '可搭配地被', picks: gcs },
+    { label: '可搭配草皮', picks: lawns },
+  ]
+
+  // 3. 不建議搭配
+  const badPairs: AdvisorReply['badPairs'] = []
+  const dbConflicts = db.filter(p => p.name !== subject.name && !isCompatible(subject, p).ok).slice(0, 3)
+  for (const p of dbConflicts) badPairs.push({ name: p.name, reason: isCompatible(subject, p).reason! })
+  if (isTree) {
+    badPairs.push({ name: '全日照草皮（樹冠正下方）', reason: '成樹後樹蔭致草皮退化稀疏' })
+    if (subject.waterRequirement === '低' || subject.droughtTolerance === '耐旱')
+      badPairs.push({ name: '高需水草花（同澆灌迴路）', reason: '澆灌需求不同，同迴路必有一方受害' })
+  }
+  const highM = db.filter(p => p.maintenanceLevel === '高').slice(0, 1)
+  for (const p of highM) if (!badPairs.some(b => b.name === p.name)) badPairs.push({ name: p.name, reason: '維護量高，與低維護組合目標不符' })
+
+  // 4. 配置建議（可直接改圖）
+  const gcNames = gcs.slice(0, 2).map(g => g.name).join('或')
+  const lawnNames = lawns.slice(0, 2).map(l => l.name).join('或')
+  const shrubNames = shrubs.slice(0, 2).map(s => s.name).join('、')
+  const fixes = isTree ? [
+    `${subject.name}作為${hasFlower ? '列植主景（株距 6–8m）' : '背景列植（株距 5–6m）'}。`,
+    `樹下 1.5m 範圍內避免草皮，改用${gcNames}。`,
+    `外圈開放區用${lawnNames}作為草坪。`,
+    `前景以${shrubNames}低矮收邊（高度 40–80cm），界定動線。`,
+  ] : [
+    `${subject.name}以群植 3–5 株為單元，配置於${hasFlower ? '視線焦點處' : '邊界收邊帶'}。`,
+    `下層鋪${gcNames}銜接地面。`,
+    `後方可立喬木層（${trees.slice(0, 2).map(t => t.name).join('、')}）形成背景。`,
+  ]
+
+  // 5. 完整方案 ×2
+  const dedupe = (arr: typeof shrubs) => arr.filter((x, i) => arr.findIndex(y => y.name === x.name) === i)
+  const lowMaint = (arr: typeof shrubs) => dedupe(arr.filter(x => /低維護|通用/.test(x.reason)).concat(arr)).slice(0, 3)
+  const showy    = (arr: typeof shrubs) => dedupe(arr.filter(x => /花/.test(x.reason)).concat(arr)).slice(0, 3)
+  const plans = [
+    {
+      title: '方案 A｜低維護穩定型',
+      lines: [
+        `喬木：${subject.normalizedCategory === 'tree' ? subject.name : trees[0]?.name ?? '—'}`,
+        `灌木：${lowMaint(shrubs).map(x => x.name).join('、')}`,
+        `地被：${lowMaint(gcs).slice(0, 2).map(x => x.name).join('、')}`,
+        `草皮：${lawns.find(l => /假儉草|低維護/.test(l.name + l.reason))?.name ?? lawns[0]?.name ?? '假儉草'}`,
+      ],
+    },
+    {
+      title: '方案 B｜入口亮點型',
+      lines: [
+        `喬木：${subject.normalizedCategory === 'tree' ? subject.name : trees.find(t => /花/.test(t.reason))?.name ?? trees[0]?.name ?? '—'}`,
+        `灌木：${showy(shrubs).map(x => x.name).join('、')}`,
+        `地被：${showy(gcs).slice(0, 2).map(x => x.name).join('、')}`,
+        `草皮：${lawns.find(l => /台北草/.test(l.name))?.name ?? lawns[0]?.name ?? '台北草'}`,
+      ],
+    },
+  ]
+
+  // 6. 風險提醒
+  const risks: string[] = []
+  if (deciduous || (isTree && hasFlower)) risks.push(`${subject.name}${deciduous ? '為落葉樹種，冬季景觀空窗' : ''}${hasFlower ? '花期落花量大，鋪面與排水溝需定期清理' : ''}。`)
+  if (isTree) risks.push('成樹後樹冠擴張，樹下日照逐年減少——地被應預選耐陰品種，草皮僅配置於滴水線外。')
+  if (subject.wetTolerance === '不耐積水') risks.push(`${subject.name}不耐積水，種植穴需確保排水，避免配置於低窪匯水處。`)
+  risks.push('新植前 1–2 年為關鍵養護期，需定期澆灌至根系穩定，之後才可粗放管理。')
+
+  const dbCount = [...trees, ...shrubs, ...gcs, ...lawns].filter(x => x.fromDB).length
+  const finalDisclaimer = dbCount < 6
+    ? (disclaimer ? disclaimer + ' ' : '') + '部分建議植物取自內建通用清單（標註「通用配植原則」），建議補入資料庫以提升比對精度。'
+    : disclaimer
+
+  return { verdict, goodPairs: [], badPairs, risks, fixes, alternatives: [], pairCategories, plans, disclaimer: finalDisclaimer }
 }
 
 // ── 組合分析（多植物相容性 → 完整回覆）────────────────────────────────────────
@@ -263,36 +436,9 @@ function ruleAnswer(question: string, ctx: AdvisorContext): AdvisorReply {
     ? `目前資料庫尚未建立「${unknown.join('、')}」完整資料，以下建議為一般景觀配置原則，建議後續補入資料庫以提升審查準確度。`
     : undefined
 
-  // ── 意圖：搭配建議（單一植物 + 搭配/建議 詞）────────────────────────────
-  if (found.length === 1 && /搭配|配|建議|推薦|種什麼|加什麼/.test(q)) {
-    const t = found[0]
-    const partners = db
-      .filter(p => p.name !== t.name && p.normalizedCategory !== t.normalizedCategory)
-      .filter(p => isCompatible(t, p).ok)
-      .sort((a, b) => (b.maintenanceLevel === '低' ? 1 : 0) - (a.maintenanceLevel === '低' ? 1 : 0))
-    const shrubPicks = partners.filter(p => p.normalizedCategory === 'shrub').slice(0, 3)
-    const gcPicks = partners.filter(p => p.normalizedCategory === 'groundcover').slice(0, 3)
-    const isTree = t.normalizedCategory === 'tree'
-    return {
-      verdict: `以 ${t.name}（${t.subCategory || t.category}｜日照${t.sunRequirement}｜需水${t.waterRequirement}｜維護${t.maintenanceLevel}）為主軸的搭配分析：`,
-      goodPairs: [
-        ...shrubPicks.map(p => ({ name: p.name, reason: `灌木層｜日照${p.sunRequirement}・需水${p.waterRequirement}${p.flowerColor ? `・${p.flowerColor}花` : ''}` })),
-        ...gcPicks.map(p => ({ name: p.name, reason: `地被層｜日照${p.sunRequirement}・需水${p.waterRequirement}` })),
-      ],
-      badPairs: db
-        .filter(p => p.name !== t.name && !isCompatible(t, p).ok)
-        .slice(0, 3)
-        .map(p => ({ name: p.name, reason: isCompatible(t, p).reason! })),
-      risks: isTree && t.category.includes('喬')
-        ? [`${t.name}成樹後樹冠遮蔭增加，樹下全日照地被會逐年衰退，配置時預留耐陰過渡帶。`]
-        : [],
-      fixes: [
-        `建議三層結構：${t.name}（上層）→ 開花灌木（中層）→ 耐陰地被（下層），豐富層次並降低裸土。`,
-        isTree ? '行道式列植時株距建議 6–8 m，避免成樹後樹冠交疊互相競爭。' : '群植時注意株距與後期擴張空間。',
-      ],
-      alternatives: [],
-      disclaimer,
-    }
+  // ── 配植顧問模式：單一植物 → 完整分類搭配 + 方案（不限問法）──────────────
+  if (found.length === 1) {
+    return buildPairingReply(found[0], db, disclaimer)
   }
 
   // ── 意圖：多植物組合是否合理 ─────────────────────────────────────────────
@@ -360,20 +506,6 @@ function ruleAnswer(question: string, ctx: AdvisorContext): AdvisorReply {
         '或直接輸入植物名稱組合（例：「黃花風鈴木、蔓花生、台北草 這樣合理嗎」），我會立即分析。',
       ],
       alternatives: [],
-      disclaimer,
-    }
-  }
-
-  // ── 單一植物：給基本檔案 + 替代 ──────────────────────────────────────────
-  if (found.length === 1) {
-    const p = found[0]
-    return {
-      verdict: `${p.name}（${p.scientificName || '學名待補'}）：${p.subCategory || p.category}｜日照${p.sunRequirement}｜需水${p.waterRequirement}｜耐旱${p.droughtTolerance}｜耐濕${p.wetTolerance}｜維護${p.maintenanceLevel}${p.flowerColor ? `｜花色${p.flowerColor}（${p.flowerMonth}月）` : ''}${p.nativeStatus ? `｜${p.nativeStatus}` : ''}`,
-      goodPairs: [],
-      badPairs: [],
-      risks: p.riskTags.length > 0 ? p.riskTags.map(t => `風險標籤：${t}`) : [],
-      fixes: [p.maintenanceNote || '無特殊維護註記。'],
-      alternatives: findAlternatives(p, db, 3).map(a => ({ original: p.name, alt: a.alt, reason: a.reason })),
       disclaimer,
     }
   }
