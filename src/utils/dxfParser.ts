@@ -47,14 +47,104 @@ function inferUnit(plantName: string, spec?: string): { unit: string; note?: str
   return { unit: '株', note: '單位待確認' }
 }
 
+// 非植物名稱過濾（圖名/表頭/花色/樹型描述等常混入索引表區域的文字）
+const NON_PLANT_NAME_RE =
+  /(配置圖|平面圖|剖面圖|立面圖|示意圖|大樣圖|詳圖|索引圖|植栽表|圖例|項次|備註|規格|名稱|數量|單位|小計|合計|月份|樹型|密植|株距|比例|圖號|圖名|日期)|[色型]$|^(伸展|整形|飄型|圓形|橢圓形|自然形|傘形|無花|密植)$/
+
 export function detectPlantSchedule(texts: DxfText[]): PlantSchedule {
   if (texts.length === 0) return { entries: [], detected: false, textCount: 0 }
 
-  // ── 1. 依 Y 座標分群成列 ─────────────────────────────────────────────────────
   const ys = texts.map(t => t.y).sort((a, b) => a - b)
   const yRange = ys[ys.length - 1] - ys[0]
   const tolerance = Math.max(2, Math.min(50, yRange * 0.015 || 5))
 
+  // ── 0. 多表格切分：以「植物名稱」類表頭 cell 為錨點，將圖面切成獨立表格區域 ──
+  // 解決：多張植栽表（喬木表/灌木表/地被表）並排或堆疊時，Y 分列把不同表的列混在一起
+  const anchorCands = texts
+    .filter(t => headerCellRole(t.content) === 'plantName' && t.content.trim().length <= 6)
+    .sort((a, b) => b.y - a.y)
+  const anchors: DxfText[] = []
+  for (const a of anchorCands) {
+    // 多行表頭（「植物」/「名稱」上下兩列）合併為同一錨點
+    if (!anchors.some(m => Math.abs(m.x - a.x) < tolerance * 4 && Math.abs(m.y - a.y) <= tolerance * 5)) {
+      anchors.push(a)
+    }
+  }
+
+  if (anchors.length > 0) {
+    // 表頭帶：錨點上下 2 倍容差（涵蓋兩行式表頭，但不吞資料列）
+    const bandOf = (t: DxfText, a: DxfText) => Math.abs(t.y - a.y) <= tolerance * 2
+    // 表頭 cell → 依「y 在錨點帶內 + x 最近」指派給錨點
+    const nearestAnchor = (t: DxfText): DxfText | null => {
+      const inBand = anchors.filter(a => bandOf(t, a))
+      if (inBand.length === 0) return null
+      return inBand.reduce((best, a) => Math.abs(a.x - t.x) < Math.abs(best.x - t.x) ? a : best)
+    }
+
+    const allEntries: PlantScheduleEntry[] = []
+    let headerRowOut: string[] | undefined
+
+    for (const a of anchors) {
+      // 此表格的表頭 cells（含未知角色欄，供資料 cell 吸收非目標內容）
+      const roleCells = texts.filter(t => bandOf(t, a) && nearestAnchor(t) === a && headerCellRole(t.content) !== 'unknown')
+      if (roleCells.length < 2) continue
+      const xs = roleCells.map(c => c.x)
+      const pad = (Math.max(...xs) - Math.min(...xs)) * 0.1 + tolerance
+      const xMin = Math.min(...xs) - pad
+      const xMax = Math.max(...xs) + pad
+      const headerCells = texts.filter(t => bandOf(t, a) && t.x >= xMin && t.x <= xMax)
+      const colSchema = headerCells.map(t => ({ x: t.x, role: headerCellRole(t.content) }))
+
+      // 資料區：表頭最低 cell 以下，至下一個（同 x 範圍重疊的）錨點表頭帶為止
+      const yStart = Math.min(...headerCells.map(c => c.y)) - tolerance
+      const lowerAnchors = anchors.filter(b => b !== a && b.y < a.y && b.x >= xMin && b.x <= xMax)
+      const yEnd = lowerAnchors.length > 0 ? Math.max(...lowerAnchors.map(b => b.y)) + tolerance * 5 : -Infinity
+      const regionTexts = texts.filter(t => t.x >= xMin && t.x <= xMax && t.y < yStart && t.y > yEnd)
+
+      const entries = parseTableRegion(regionTexts, tolerance, colSchema)
+      allEntries.push(...entries)
+      if (!headerRowOut && headerCells.length > 0) {
+        headerRowOut = [...headerCells].sort((p, q) => p.x - q.x).map(t => t.content)
+      }
+    }
+
+    if (allEntries.length > 0) {
+      // 跨表去重（同名保留資訊較完整者）
+      const seen = new Map<string, PlantScheduleEntry>()
+      for (const e of allEntries) {
+        const prev = seen.get(e.plantName)
+        if (!prev || (e.quantity !== undefined && prev.quantity === undefined)) seen.set(e.plantName, e)
+      }
+      return {
+        entries: [...seen.values()],
+        headerRow: headerRowOut,
+        detected: true,
+        textCount: texts.length,
+      }
+    }
+  }
+
+  // ── 無錨點（或錨點解析失敗）→ 舊版單表格全圖解析 ────────────────────────────
+  return legacySingleTable(texts, tolerance)
+}
+
+/** 單一表格區域解析：Y 分列 → 依 colSchema 欄位角色抽取 */
+function parseTableRegion(
+  texts: DxfText[],
+  tolerance: number,
+  presetSchema: Array<{ x: number; role: ColRole }>,
+): PlantScheduleEntry[] {
+  const rows: DxfText[][] = []
+  for (const t of [...texts].sort((a, b) => b.y - a.y)) {
+    const row = rows.find(r => Math.abs(r[0].y - t.y) <= tolerance)
+    if (row) { row.push(t); row.sort((a, b) => a.x - b.x) }
+    else rows.push([t])
+  }
+  const tableRows = rows.filter(r => r.length >= 2)
+  return parseRows(tableRows, -1, presetSchema)
+}
+
+function legacySingleTable(texts: DxfText[], tolerance: number): PlantSchedule {
   const rows: DxfText[][] = []
   for (const t of [...texts].sort((a, b) => b.y - a.y)) {
     const row = rows.find(r => Math.abs(r[0].y - t.y) <= tolerance)
@@ -65,7 +155,7 @@ export function detectPlantSchedule(texts: DxfText[]): PlantSchedule {
   const tableRows = rows.filter(r => r.length >= 2)
   if (tableRows.length < 3) return { entries: [], detected: false, textCount: texts.length }
 
-  // ── 2. 找表頭列，建立欄位 X 座標→角色的對照 ──────────────────────────────────
+  // 找表頭列，建立欄位 X 座標→角色的對照
   let headerRowIdx = -1
   let colSchema: Array<{ x: number; role: ColRole }> = []
 
@@ -75,6 +165,22 @@ export function detectPlantSchedule(texts: DxfText[]): PlantSchedule {
     const namedCount = mapped.filter(m => m.role !== 'unknown').length
     if (namedCount >= 2) { headerRowIdx = ri; colSchema = mapped; break }
   }
+
+  const entries = parseRows(tableRows, headerRowIdx, colSchema)
+  return {
+    entries,
+    headerRow: headerRowIdx >= 0 ? tableRows[headerRowIdx].map(t => t.content) : undefined,
+    detected: entries.length > 0,
+    textCount: texts.length,
+  }
+}
+
+/** 逐列抽取植物資料（headerRowIdx = -1 表示 schema 由外部提供，全部列皆為資料列）*/
+function parseRows(
+  tableRows: DxfText[][],
+  headerRowIdx: number,
+  colSchema: Array<{ x: number; role: ColRole }>,
+): PlantScheduleEntry[] {
 
   // 依最近欄位 X 座標指派角色
   const assignRole = (cell: DxfText): ColRole => {
@@ -115,7 +221,8 @@ export function detectPlantSchedule(texts: DxfText[]): PlantSchedule {
         switch (role) {
           case 'code':     code = t; break
           case 'plantName':
-            if (/[一-鿿]/.test(t)) plantName = t
+            // 同列多個名稱欄 cell（如「銀紋」「沿階草」拆兩段）→ 取較長且非雜訊者
+            if (/[一-鿿]/.test(t) && !NON_PLANT_NAME_RE.test(t) && t.length > plantName.length) plantName = t
             break
           case 'scientificName': scientificName = t; break
           case 'spec':     spec = t; break
@@ -138,7 +245,8 @@ export function detectPlantSchedule(texts: DxfText[]): PlantSchedule {
       // ── Fallback：若欄位指派未能解析植物名稱，掃全列找中文 2-8 字 cell ──
       // 解決：灌木 / 地被欄位因 X 座標偏移被指派到錯誤角色導致 plantName 為空
       if (!plantName) {
-        const fallbackCell = row.find(c => /^[一-鿿]{2,8}$/.test(c.content.trim()))
+        const fallbackCell = row.find(c =>
+          /^[一-鿿]{2,8}$/.test(c.content.trim()) && !NON_PLANT_NAME_RE.test(c.content.trim()))
         if (fallbackCell) {
           plantName = fallbackCell.content.trim()
           // 若代號也為空，找植物名稱左側最近的純數字
@@ -150,12 +258,28 @@ export function detectPlantSchedule(texts: DxfText[]): PlantSchedule {
           }
         }
       }
+
+      // ── 數量校正：小計欄常因右對齊落在未知欄位而漏抓 ──
+      // 取植物名稱右側「最右邊」可解析為數量的 cell（列已按 x 排序）
+      const nameCell = row.find(c => c.content.trim() === plantName)
+      if (nameCell) {
+        const nums = row.filter(c =>
+          c.x > nameCell.x && /^\d+(?:\.\d+)?\s*(株|棵|本|叢|盆|㎡|m2|M2|m²)?$/.test(c.content.trim()))
+        if (nums.length > 0) {
+          const { qty, unit: u } = parseQtyUnit(nums[nums.length - 1].content.trim())
+          if (qty !== undefined) {
+            quantity = qty
+            if (u) unit = u
+            quantityNote = undefined
+          }
+        }
+      }
     } else {
       // ── 無表頭：啟發式推測 ────────────────────────────────────────────────
       // 找中文植物名稱（純中文 2-8 字，或含中文且不像規格描述）
       const plantCell =
-        row.find(t => /^[一-鿿]{2,8}$/.test(t.content.trim())) ??
-        row.find(t => /^[一-鿿]{2,}/.test(t.content.trim()) && !/\d/.test(t.content))
+        row.find(t => /^[一-鿿]{2,8}$/.test(t.content.trim()) && !NON_PLANT_NAME_RE.test(t.content.trim())) ??
+        row.find(t => /^[一-鿿]{2,}/.test(t.content.trim()) && !/\d/.test(t.content) && !NON_PLANT_NAME_RE.test(t.content.trim()))
       if (!plantCell) continue
       plantName = plantCell.content.trim()
 
@@ -179,7 +303,7 @@ export function detectPlantSchedule(texts: DxfText[]): PlantSchedule {
       spec = specCell?.content.trim()
     }
 
-    if (!plantName) continue
+    if (!plantName || NON_PLANT_NAME_RE.test(plantName)) continue
 
     // ── 4. 單位補全推測 ──────────────────────────────────────────────────────
     if (!unit) {
@@ -205,12 +329,7 @@ export function detectPlantSchedule(texts: DxfText[]): PlantSchedule {
     })
   }
 
-  return {
-    entries,
-    headerRow: headerRowIdx >= 0 ? tableRows[headerRowIdx].map(t => t.content) : undefined,
-    detected: entries.length > 0,
-    textCount: texts.length,
-  }
+  return entries
 }
 
 // ── 附近文字搜尋 ──────────────────────────────────────────────────────────────
@@ -237,8 +356,13 @@ function parseGroupCodes(text: string): GroupCode[] {
   return groups
 }
 
+/** CAD 文字 \U+XXXX Unicode 逸出碼 → 中文字（如 \U+77F3\U+83D6\U+84B2 = 石菖蒲）*/
+function decodeUnicodeEscapes(raw: string): string {
+  return raw.replace(/\\?U\+([0-9A-Fa-f]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+}
+
 function stripMtextCodes(raw: string): string {
-  return raw
+  return decodeUnicodeEscapes(raw)
     .replace(/\{\\[^}]*\}/g, '')
     .replace(/\\P/gi, ' ')
     .replace(/\\~/g, ' ')
@@ -401,7 +525,7 @@ function parseBlockDefs(groups: GroupCode[]): Map<string, BlockDef> {
             if (groups[i].code === 101) inEmbedded = true
             if (!inEmbedded) {
               if (groups[i].code === 8)  layer   = groups[i].value
-              if (groups[i].code === 1)  content = (eType === 'MTEXT') ? stripMtextCodes(groups[i].value) : groups[i].value
+              if (groups[i].code === 1)  content = (eType === 'MTEXT') ? stripMtextCodes(groups[i].value) : decodeUnicodeEscapes(groups[i].value)
               if (groups[i].code === 10 && !gotXY) lx = parseFloat(groups[i].value) || 0
               if (groups[i].code === 20 && !gotXY) { ly = parseFloat(groups[i].value) || 0; gotXY = true }
               if (groups[i].code === 11) ax      = parseFloat(groups[i].value)
@@ -669,8 +793,8 @@ export function parseDxf(text: string): DxfParseResult {
         while (i < groups.length && groups[i].code !== 0) {
           const eg = groups[i]
           if (eg.code === 2)  atag   = eg.value
-          if (eg.code === 1)  aval   = eg.value
-          if (eg.code === 3)  altVal = eg.value
+          if (eg.code === 1)  aval   = decodeUnicodeEscapes(eg.value)
+          if (eg.code === 3)  altVal = decodeUnicodeEscapes(eg.value)
           if (eg.code === 10) ax     = parseFloat(eg.value) || 0
           if (eg.code === 20) ay     = parseFloat(eg.value) || 0
           i++
@@ -754,8 +878,8 @@ export function parseDxf(text: string): DxfParseResult {
         if (!inEmbedded) {
           if (eg.code === 8)  layer = eg.value
           if (eg.code === 2 && (type === 'ATTRIB' || type === 'ATTDEF')) attribTag = eg.value
-          if (eg.code === 1) content    = type === 'MTEXT' ? stripMtextCodes(eg.value) : eg.value
-          if (eg.code === 3) altContent = type === 'MTEXT' ? stripMtextCodes(eg.value) : eg.value
+          if (eg.code === 1) content    = type === 'MTEXT' ? stripMtextCodes(eg.value) : decodeUnicodeEscapes(eg.value)
+          if (eg.code === 3) altContent = type === 'MTEXT' ? stripMtextCodes(eg.value) : decodeUnicodeEscapes(eg.value)
           if (eg.code === 10 && !gotXY) x = parseFloat(eg.value) || 0
           if (eg.code === 20 && !gotXY) { y = parseFloat(eg.value) || 0; gotXY = true }
           if (eg.code === 11) ax = parseFloat(eg.value)
