@@ -129,32 +129,35 @@ function recommend(db: CsvPlantRecord[], filter: (p: CsvPlantRecord) => boolean,
 }
 
 // ── 內建預設植栽清單（資料庫不足時補足，台灣常用景觀植物）───────────────────
-const FALLBACK_PLANTS: Record<'tree' | 'shrub' | 'groundcover' | 'lawn', Array<{ name: string; reason: string }>> = {
+const FALLBACK_PLANTS: Record<'tree' | 'shrub' | 'groundcover' | 'lawn', Array<{ name: string; reason: string; traits: string[] }>> = {
   tree: [
-    { name: '台灣欒樹', reason: '台灣原生・秋季金黃季相，與春花喬木錯開觀賞期' },
-    { name: '樟樹',     reason: '常綠遮蔭穩定，作背景襯托開花喬木' },
-    { name: '光蠟樹',   reason: '台灣原生・誘蝶誘蟲，枝葉細緻不搶主景' },
-    { name: '楓香',     reason: '原生大喬木，秋色葉與春花形成雙季相' },
+    { name: '台灣欒樹', reason: '台灣原生・秋季金黃季相，與春花喬木錯開觀賞期', traits: ['drought', 'fullsun', 'native', 'lowmaint', 'showy'] },
+    { name: '樟樹',     reason: '常綠遮蔭穩定，作背景襯托開花喬木',             traits: ['drought', 'fullsun', 'native', 'lowmaint', 'evergreen'] },
+    { name: '光蠟樹',   reason: '台灣原生・誘蝶誘蟲，枝葉細緻不搶主景',         traits: ['fullsun', 'native', 'lowmaint', 'evergreen'] },
+    { name: '楓香',     reason: '原生大喬木，秋色葉與春花形成雙季相',           traits: ['fullsun', 'native', 'showy'] },
+    { name: '大葉欖仁', reason: '層狀樹形，秋冬紅葉季相',                       traits: ['drought', 'fullsun'] },
   ],
   shrub: [
-    { name: '樹蘭',       reason: '常綠耐修剪，香花型收邊灌木' },
-    { name: '春不老',     reason: '低維護常綠，新葉紅色具景深層次' },
-    { name: '厚葉石斑木', reason: '耐旱耐風，白花系穩定型灌木' },
-    { name: '矮仙丹',     reason: '全年開花紅橙色系，入口亮點首選' },
-    { name: '七里香',     reason: '香花綠籬，耐修剪塑形' },
-    { name: '雪茄花',     reason: '紫紅色小花密集，低矮前景收邊' },
+    { name: '樹蘭',       reason: '常綠耐修剪，香花型收邊灌木',       traits: ['drought', 'fullsun', 'lowmaint', 'evergreen'] },
+    { name: '春不老',     reason: '低維護常綠，新葉紅色具景深層次',   traits: ['drought', 'shade', 'lowmaint', 'evergreen', 'native'] },
+    { name: '厚葉石斑木', reason: '耐旱耐風，白花系穩定型灌木',       traits: ['drought', 'fullsun', 'lowmaint', 'evergreen', 'native', 'showy'] },
+    { name: '矮仙丹',     reason: '全年開花紅橙色系，入口亮點首選',   traits: ['drought', 'fullsun', 'evergreen', 'showy'] },
+    { name: '七里香',     reason: '香花綠籬，耐修剪塑形',             traits: ['drought', 'fullsun', 'lowmaint', 'evergreen', 'native', 'showy'] },
+    { name: '雪茄花',     reason: '紫紅色小花密集，低矮前景收邊',     traits: ['fullsun', 'evergreen', 'showy', 'wet'] },
   ],
   groundcover: [
-    { name: '沿階草',   reason: '極耐陰，樹下地被首選' },
-    { name: '麥門冬',   reason: '耐陰耐旱，樹蔭至半日照皆穩定' },
-    { name: '蔓花生',   reason: '黃花地毯狀覆蓋，抑制雜草' },
-    { name: '蚌蘭',     reason: '紫背葉色，色彩對比前景' },
-    { name: '翠蘆莉',   reason: '紫花耐旱，日照充足處大面積覆蓋' },
+    { name: '沿階草',   reason: '極耐陰，樹下地被首選',               traits: ['shade', 'lowmaint', 'evergreen', 'drought'] },
+    { name: '麥門冬',   reason: '耐陰耐旱，樹蔭至半日照皆穩定',       traits: ['shade', 'lowmaint', 'evergreen', 'drought', 'native'] },
+    { name: '蔓花生',   reason: '黃花地毯狀覆蓋，抑制雜草',           traits: ['drought', 'fullsun', 'lowmaint', 'evergreen', 'showy'] },
+    { name: '蚌蘭',     reason: '紫背葉色，色彩對比前景',             traits: ['drought', 'shade', 'lowmaint', 'evergreen'] },
+    { name: '翠蘆莉',   reason: '紫花耐旱，日照充足處大面積覆蓋',     traits: ['drought', 'fullsun', 'lowmaint', 'evergreen', 'showy', 'wet'] },
+    { name: '腎蕨',     reason: '耐陰耐濕，樹下與北向牆邊適用',       traits: ['shade', 'wet', 'lowmaint', 'evergreen', 'native'] },
   ],
   lawn: [
-    { name: '台北草',   reason: '質地細緻，開放草坪主流選擇（需水較高）' },
-    { name: '假儉草',   reason: '低維護耐踐踏，粗放管理首選' },
-    { name: '百慕達草', reason: '耐旱恢復力強，全日照開放區適用' },
+    { name: '台北草',   reason: '質地細緻，開放草坪主流選擇（需水較高）', traits: ['fullsun', 'evergreen'] },
+    { name: '假儉草',   reason: '低維護耐踐踏，粗放管理首選',             traits: ['drought', 'fullsun', 'lowmaint', 'evergreen'] },
+    { name: '百慕達草', reason: '耐旱恢復力強，全日照開放區適用',         traits: ['drought', 'fullsun', 'evergreen'] },
+    { name: '地毯草',   reason: '稍耐陰稍耐旱草皮，半日照區可用',         traits: ['shade', 'lowmaint', 'evergreen', 'drought'] },
   ],
 }
 
@@ -298,6 +301,157 @@ function buildPairingReply(subject: CsvPlantRecord, db: CsvPlantRecord[], discla
   return { verdict, goodPairs: [], badPairs, risks, fixes, alternatives: [], pairCategories, plans, disclaimer: finalDisclaimer }
 }
 
+// ── Intent 分類 ───────────────────────────────────────────────────────────────
+export type QueryIntent =
+  | 'zone_review'            // 分區配置審查
+  | 'plant_pairing'          // 單一植物搭配建議
+  | 'combo_check'            // 多植物組合合理性
+  | 'condition_search'       // 依條件查詢植栽（耐旱/耐陰/低維護…）
+  | 'replacement_suggestion' // 替代植栽建議
+  | 'irrigation_advice'      // 澆灌衝突原則
+  | 'general_design_advice'  // 一般配植建議
+
+// ── 條件查詢引擎（condition_search）──────────────────────────────────────────
+
+interface PlantCondition {
+  key: string
+  label: string                                    // 「耐旱植物」
+  pattern: RegExp                                  // 問題關鍵字
+  test: (p: CsvPlantRecord) => boolean
+  why: (p: CsvPlantRecord) => string               // 為什麼符合
+  fallbackNote: string                             // 內建清單的符合說明
+}
+
+const CONDITIONS: PlantCondition[] = [
+  {
+    key: 'drought', label: '耐旱植物', pattern: /耐旱|抗旱|少澆水|不太.*澆|乾旱/,
+    test: p => p.droughtTolerance === '耐旱' || p.waterRequirement === '低',
+    why: p => `耐旱性${p.droughtTolerance}・需水${p.waterRequirement}`,
+    fallbackNote: '耐旱性佳',
+  },
+  {
+    key: 'shade', label: '耐陰植物', pattern: /耐陰|樹下|遮陰|陰暗|背光|光線不足/,
+    test: p => p.sunRequirement.includes('遮陰'),
+    why: p => `日照${p.sunRequirement}，樹蔭下仍可穩定生長`,
+    fallbackNote: '耐陰性佳，適合樹下',
+  },
+  {
+    key: 'lowmaint', label: '低維護植物', pattern: /低維護|好照顧|免維護|好養|省人力|不用管|粗放/,
+    test: p => p.maintenanceLevel === '低',
+    why: p => `維護難度${p.maintenanceLevel}${p.droughtTolerance === '耐旱' ? '・耐旱' : ''}`,
+    fallbackNote: '低維護，適合粗放管理',
+  },
+  {
+    key: 'fullsun', label: '全日照植物', pattern: /全日照|向陽|太陽大|日照充足|西曬|曝曬/,
+    test: p => p.sunRequirement.includes('全日照'),
+    why: p => `日照${p.sunRequirement}，向陽處生長旺盛`,
+    fallbackNote: '適合全日照環境',
+  },
+  {
+    key: 'wet', label: '耐濕植物', pattern: /耐濕|積水|潮濕|排水不良|低窪|水邊/,
+    test: p => p.wetTolerance === '耐濕' || p.wetTolerance === '稍耐濕',
+    why: p => `耐濕性${p.wetTolerance}`,
+    fallbackNote: '耐濕性較佳',
+  },
+  {
+    key: 'showy', label: '開花觀賞植物（入口主景適用）', pattern: /入口|主景|開花|有花|迎賓|亮點|焦點/,
+    test: p => !!p.flowerColor,
+    why: p => `${p.flowerColor}花${p.flowerMonth ? `（${p.flowerMonth}月）` : ''}，具觀賞焦點性`,
+    fallbackNote: '開花性佳，適合視覺焦點',
+  },
+  {
+    key: 'evergreen', label: '常綠植物（落葉少）', pattern: /常綠|不落葉|落葉少|不容易落葉|不掉葉/,
+    test: p => !/落葉/.test(p.category + p.subCategory + p.treeForm + p.maintenanceNote),
+    why: () => '常綠性，全年維持綠量、落葉清理負擔低',
+    fallbackNote: '常綠樹種',
+  },
+  {
+    key: 'native', label: '台灣原生植物', pattern: /原生|本土|在地種/,
+    test: p => p.nativeStatus.includes('原生'),
+    why: p => `${p.nativeStatus}，生態適應性與誘鳥誘蝶價值高`,
+    fallbackNote: '台灣原生種',
+  },
+]
+
+/** 類別使用建議與注意事項（依欄位動態組合）*/
+function usageAdvice(p: CsvPlantRecord | null, cat: 'tree' | 'shrub' | 'groundcover' | 'lawn'): { use: string; caution: string } {
+  const use = cat === 'tree' ? (p?.flowerColor ? '適合道路列植、入口主景' : '適合背景綠蔭、緩衝帶列植')
+    : cat === 'shrub' ? '適合綠籬、收邊、前景層次'
+    : cat === 'groundcover' ? '適合大面積覆蓋、抑制雜草'
+    : '適合開放草坪'
+  const cautions: string[] = []
+  if (p) {
+    if (p.wetTolerance === '不耐積水') cautions.push('不耐積水，避免低窪處')
+    if (p.maintenanceLevel === '高') cautions.push('維護需求高')
+    if (p.flowerColor && cat === 'tree') cautions.push('落花期需清理')
+    if (p.sunRequirement === '全日照') cautions.push('樹蔭下不適用')
+  }
+  return { use, caution: cautions.join('；') || '無特殊注意事項' }
+}
+
+/** condition_search：依條件篩選 DB → 喬/灌/地/草 分類清單 */
+function conditionSearchReply(q: string, conds: PlantCondition[], db: CsvPlantRecord[]): AdvisorReply {
+  const isLawn = (p: CsvPlantRecord) =>
+    /草皮|草坪/.test(p.subCategory + p.category) || ['台北草', '假儉草', '百慕達草', '地毯草', '奧古斯丁草'].some(n => p.name.includes(n))
+
+  // 問題是否限定類別（「低維護灌木有哪些」→ 只出灌木）
+  const catAsked: Array<'tree' | 'shrub' | 'groundcover' | 'lawn'> = []
+  if (/喬木|大樹|行道樹/.test(q)) catAsked.push('tree')
+  if (/灌木|綠籬/.test(q))        catAsked.push('shrub')
+  if (/地被|地披/.test(q))        catAsked.push('groundcover')
+  if (/草皮|草坪/.test(q))        catAsked.push('lawn')
+  const cats: Array<'tree' | 'shrub' | 'groundcover' | 'lawn'> =
+    catAsked.length > 0 ? catAsked : ['tree', 'shrub', 'groundcover', 'lawn']
+
+  const CAT_LABEL: Record<string, string> = { tree: '喬木', shrub: '灌木', groundcover: '地被', lawn: '草皮' }
+  let usedFallback = false
+
+  const pairCategories: AdvisorReply['pairCategories'] = cats.map(cat => {
+    const catFilter = (p: CsvPlantRecord) =>
+      cat === 'lawn' ? isLawn(p) : (p.normalizedCategory === cat && !isLawn(p))
+    const matches = db
+      .filter(p => catFilter(p) && conds.every(c => c.test(p)))
+      .sort((a, b) => (b.maintenanceLevel === '低' ? 1 : 0) - (a.maintenanceLevel === '低' ? 1 : 0))
+      .slice(0, 5)
+    const picks = matches.map(p => {
+      const { use, caution } = usageAdvice(p, cat)
+      return { name: p.name, reason: `${conds.map(c => c.why(p)).join('・')}｜${use}｜注意：${caution}` }
+    })
+    // 內建清單補足到 3 — 只補「特性標籤符合所有條件」的預設植物
+    if (picks.length < 3) {
+      for (const f of FALLBACK_PLANTS[cat]) {
+        if (picks.length >= 3) break
+        if (picks.some(x => x.name === f.name)) continue
+        if (!conds.every(c => f.traits.includes(c.key))) continue
+        usedFallback = true
+        const { use } = usageAdvice(null, cat)
+        picks.push({ name: f.name, reason: `${conds.map(c => c.fallbackNote).join('・')}（系統預設）｜${use}` })
+      }
+    }
+    return { label: CAT_LABEL[cat], picks }
+  }).filter(c => c.picks.length > 0)
+
+  const condLabel = conds.map(c => c.label).join('且')
+  const dbHits = pairCategories.reduce((s, c) => s + c.picks.filter(p => !p.reason.includes('系統預設')).length, 0)
+
+  return {
+    verdict: `${condLabel}建議清單（資料庫符合 ${dbHits} 筆${usedFallback ? '，不足部分以系統預設補足' : ''}）：`,
+    goodPairs: [],
+    badPairs: [],
+    risks: conds.some(c => c.key === 'shade')
+      ? ['樹下環境隨樹冠鬱閉度變化，新植喬木下方 2–3 年後光量會再下降，選種時預留餘裕。']
+      : conds.some(c => c.key === 'drought')
+        ? ['耐旱植物在成活期（前 1–2 年）仍需定期澆灌，根系穩定後才可減少灌溉。']
+        : [],
+    fixes: catAsked.length === 0
+      ? ['可進一步限定類別提問，例如「' + condLabel.replace('植物', '') + '灌木有哪些」。']
+      : [],
+    alternatives: [],
+    pairCategories,
+    disclaimer: usedFallback ? '部分植栽為系統預設建議，建議後續補入資料庫完整欄位。' : undefined,
+  }
+}
+
 // ── 組合分析（多植物相容性 → 完整回覆）────────────────────────────────────────
 
 function analyzeCombo(plants: CsvPlantRecord[], db: CsvPlantRecord[], zoneName?: string): AdvisorReply {
@@ -397,6 +551,12 @@ function ruleAnswer(question: string, ctx: AdvisorContext): AdvisorReply {
   const { db, zones } = ctx
   const q = question.trim()
 
+  // condition_search（耐旱/耐陰/低維護…）即使資料庫尚未載入，仍可用內建預設清單回答
+  const earlyConds = CONDITIONS.filter(c => c.pattern.test(q))
+  if (db.length === 0 && earlyConds.length > 0) {
+    return conditionSearchReply(q, earlyConds, db)
+  }
+
   if (db.length === 0) {
     return {
       verdict: '植栽資料庫尚未載入，無法進行資料庫比對分析。',
@@ -436,62 +596,43 @@ function ruleAnswer(question: string, ctx: AdvisorContext): AdvisorReply {
     ? `目前資料庫尚未建立「${unknown.join('、')}」完整資料，以下建議為一般景觀配置原則，建議後續補入資料庫以提升審查準確度。`
     : undefined
 
-  // ── 配植顧問模式：單一植物 → 完整分類搭配 + 方案（不限問法）──────────────
+  // ── intent: replacement_suggestion — 替代植栽（有植物名 + 替換詞）─────────
+  if (found.length >= 1 && /替代|換掉|取代|換什麼|可以換|改種|替換/.test(q)) {
+    const alternatives: AdvisorReply['alternatives'] = []
+    for (const p of found) {
+      for (const a of findAlternatives(p, db, 3)) {
+        alternatives.push({ original: p.name, alt: a.alt, reason: a.reason })
+      }
+    }
+    return {
+      verdict: `${found.map(p => p.name).join('、')} 的替代植栽建議（同類別、日照/水分條件相近，優先低維護與原生種）：`,
+      goodPairs: [], badPairs: [],
+      risks: ['替換時確認新植種的成熟尺寸與原設計空間相符，避免後期擁擠。'],
+      fixes: ['替換後建議重新執行「AI 配植評估」確認與同區其他植物的相容性。'],
+      alternatives, disclaimer,
+    }
+  }
+
+  // ── intent: condition_search — 條件查詢（耐旱/耐陰/低維護/全日照…）────────
+  // 無論是否有「有哪些」等疑問詞，只要命中條件關鍵字且未指定植物就走查詢
+  const matchedConds = CONDITIONS.filter(c => c.pattern.test(q))
+  if (found.length === 0 && matchedConds.length > 0) {
+    return conditionSearchReply(q, matchedConds, db)
+  }
+
+  // ── intent: plant_pairing — 單一植物 → 完整分類搭配 + 方案（不限問法）─────
   if (found.length === 1) {
     return buildPairingReply(found[0], db, disclaimer)
   }
 
-  // ── 意圖：多植物組合是否合理 ─────────────────────────────────────────────
+  // ── intent: combo_check — 多植物組合是否合理 ─────────────────────────────
   if (found.length >= 2) {
     const reply = analyzeCombo(found, db)
     reply.disclaimer = disclaimer
     return reply
   }
 
-  // ── 意圖：樹下 / 遮陰 ────────────────────────────────────────────────────
-  if (/樹下|樹蔭|遮陰|陰暗|長不好|長不起來/.test(q)) {
-    const picks = recommend(db, p =>
-      (p.normalizedCategory === 'groundcover' || p.normalizedCategory === 'shrub') &&
-      p.sunRequirement.includes('遮陰'), 5)
-    return {
-      verdict: '樹下屬半日照至遮陰環境，全日照草皮（台北草、百慕達草等）在樹蔭下必然逐年稀疏，建議改用耐陰地被。',
-      goodPairs: picks.map(p => ({ name: p.name, reason: `${p.subCategory || p.category}｜日照${p.sunRequirement}・維護${p.maintenanceLevel}` })),
-      badPairs: [{ name: '全日照草皮（台北草/百慕達草類）', reason: '樹蔭下光量不足，徒長→稀疏→裸土，補植無效' }],
-      risks: ['樹下若持續裸土，雨季易沖蝕、旱季揚塵，也影響喬木根系表土。'],
-      fixes: [
-        '樹冠滴水線內改種耐陰地被，滴水線外可維持草皮，形成自然過渡。',
-        '若樹冠鬱閉度極高（如榕樹類），可考慮透水鋪面+樹穴蓋板取代植栽。',
-      ],
-      alternatives: [],
-      disclaimer,
-    }
-  }
-
-  // ── 意圖：低維護 ─────────────────────────────────────────────────────────
-  if (/低維護|好照顧|不用管|省人力|免維護|好養/.test(q)) {
-    const isEntrance = /入口|門口|主景|迎賓/.test(q)
-    const trees = recommend(db, p => p.normalizedCategory === 'tree' && p.maintenanceLevel === '低', 3)
-    const shrubs = recommend(db, p => p.normalizedCategory === 'shrub' && p.maintenanceLevel === '低', 3)
-    const gcs = recommend(db, p => p.normalizedCategory === 'groundcover' && p.maintenanceLevel === '低', 3)
-    return {
-      verdict: isEntrance
-        ? '入口區低維護配置建議：主景喬木 1 株型態優美者 + 常綠灌木框景 + 大面積單一地被，減少修剪頻率同時維持門面。'
-        : '低維護配置原則：選常綠、生長慢、抗病蟲、原生種優先；減少草花與造型灌木比例。',
-      goodPairs: [
-        ...trees.map(p => ({ name: p.name, reason: `喬木｜維護${p.maintenanceLevel}${p.nativeStatus.includes('原生') ? '・原生' : ''}` })),
-        ...shrubs.map(p => ({ name: p.name, reason: `灌木｜維護${p.maintenanceLevel}` })),
-        ...gcs.map(p => ({ name: p.name, reason: `地被｜維護${p.maintenanceLevel}` })),
-      ],
-      badPairs: db.filter(p => p.maintenanceLevel === '高').slice(0, 3)
-        .map(p => ({ name: p.name, reason: '維護需求高，與低維護目標不符' })),
-      risks: ['低維護不等於零維護——前 1–2 年幼木期仍需定期澆灌與除草，成活後才能粗放管理。'],
-      fixes: ['大面積地被選單一品種滿植（株距密一點），壓制雜草即可大幅減少除草人力。'],
-      alternatives: [],
-      disclaimer,
-    }
-  }
-
-  // ── 意圖：澆灌衝突 ────────────────────────────────────────────────────────
+  // ── intent: irrigation_advice — 澆灌衝突原則 ─────────────────────────────
   if (/澆灌|灌溉|給水|水分.*衝突|衝突.*水/.test(q)) {
     return {
       verdict: '澆灌需求衝突判斷原則：同一噴灌迴路內植物的需水等級差距不宜超過一級（低↔低至中 OK；低↔高 = 衝突）。',
@@ -510,15 +651,15 @@ function ruleAnswer(question: string, ctx: AdvisorContext): AdvisorReply {
     }
   }
 
-  // ── 無法識別意圖 ─────────────────────────────────────────────────────────
+  // ── intent: general_design_advice — 無法識別 → 引導範例 ─────────────────
   return {
-    verdict: '請提供更具體的植物名稱或分區，我才能依資料庫進行分析。',
+    verdict: '請提供植物名稱、分區或篩選條件，我會依資料庫進行分析。',
     goodPairs: [], badPairs: [], risks: [],
     fixes: [
-      '範例問法：「黃花風鈴木有沒有建議搭配？」',
-      '「A區 用黃花風鈴木、蔓花生、台北草合理嗎？」',
-      '「樹下草皮長不好可以換什麼？」',
-      '「入口區想做低維護植栽有什麼建議？」',
+      '搭配建議：「黃花風鈴木有沒有建議搭配？」',
+      '分區審查：「A區 用黃花風鈴木、蔓花生、台北草合理嗎？」',
+      '條件查詢：「耐旱植物有哪些？」「低維護灌木有哪些？」「適合樹下的地被有哪些？」',
+      '替代植栽：「台北草可以換什麼？」',
     ],
     alternatives: [],
     disclaimer,
