@@ -320,7 +320,7 @@ export type QueryIntent =
 
 // ── 條件查詢引擎（condition_search）──────────────────────────────────────────
 
-interface PlantCondition {
+export interface PlantCondition {
   key: string
   label: string                                    // 「耐旱植物」
   pattern: RegExp                                  // 問題關鍵字
@@ -329,12 +329,18 @@ interface PlantCondition {
   fallbackNote: string                             // 內建清單的符合說明
 }
 
-const CONDITIONS: PlantCondition[] = [
+export const CONDITIONS: PlantCondition[] = [
   {
     key: 'drought', label: '耐旱植物', pattern: /耐旱|抗旱|少澆水|不太.*澆|乾旱/,
     test: p => p.droughtTolerance === '耐旱' || p.waterRequirement === '低',
     why: p => `耐旱性${p.droughtTolerance}・需水${p.waterRequirement}`,
     fallbackNote: '耐旱性佳',
+  },
+  {
+    key: 'halfsun', label: '半日照植物', pattern: /半日照/,
+    test: p => p.sunRequirement.includes('半日照'),
+    why: p => `日照${p.sunRequirement}`,
+    fallbackNote: '半日照環境適生',
   },
   {
     key: 'shade', label: '耐陰植物', pattern: /耐陰|樹下|遮陰|陰暗|背光|光線不足/,
@@ -378,6 +384,18 @@ const CONDITIONS: PlantCondition[] = [
     why: p => `${p.nativeStatus}，生態適應性與誘鳥誘蝶價值高`,
     fallbackNote: '台灣原生種',
   },
+  {
+    key: 'toxic', label: '有毒性植物', pattern: /有毒|毒性|注意誤食|兒童遊戲區慎選/,
+    test: p => !!p.toxicity && /有毒|毒性(強|中)/.test(p.toxicity),
+    why: p => `毒性：${p.toxicity}${p.plantSafetyNote ? `・${p.plantSafetyNote}` : ''}`,
+    fallbackNote: '需留意毒性資料',
+  },
+  {
+    key: 'leafdrop', label: '容易落葉植物', pattern: /容易落葉|落葉性強|落葉量大|掉葉/,
+    test: p => !!p.leafDropStatus && /落葉性強|容易落葉/.test(p.leafDropStatus),
+    why: p => `落葉性：${p.leafDropStatus}`,
+    fallbackNote: '落葉性較明顯，需留意清理',
+  },
 ]
 
 /** 類別使用建議與注意事項（依欄位動態組合）*/
@@ -397,16 +415,37 @@ function usageAdvice(p: CsvPlantRecord | null, cat: 'tree' | 'shrub' | 'groundco
 }
 
 /** condition_search：依條件篩選 DB → 喬/灌/地/草 分類清單 */
+// 是否為草皮（獨立判斷，condition_search 與新頁面共用，避免各自維護一套規則產生落差）
+export function isLawnPlant(p: CsvPlantRecord): boolean {
+  return /草皮|草坪/.test(p.subCategory + p.category) ||
+    ['台北草', '假儉草', '百慕達草', '地毯草', '奧古斯丁草'].some(n => p.name.includes(n))
+}
+
+// 依問句文字判斷使用者限定的植物類型（喬木/灌木/地被/草皮）。
+// 「樹」單獨出現也視為喬木意圖（涵蓋大喬木、小喬木——CsvPlantRecord 沒有再拆分
+// 小喬木成獨立 normalizedCategory，小喬木本來就歸在 tree 底下的 subCategory），
+// 但不會誤觸「灌木」「地被」等詞。沒有偵測到任何類型關鍵字時回傳空陣列，
+// 由呼叫端決定要不要當作「全部類型」。
+export function parseTypeIntent(q: string): Array<'tree' | 'shrub' | 'groundcover' | 'lawn'> {
+  const cats: Array<'tree' | 'shrub' | 'groundcover' | 'lawn'> = []
+  if (/喬木|大樹|行道樹|樹(?!皮|脂)/.test(q)) cats.push('tree')
+  if (/灌木|綠籬/.test(q))        cats.push('shrub')
+  if (/地被|地披/.test(q))        cats.push('groundcover')
+  if (/草皮|草坪/.test(q))        cats.push('lawn')
+  return cats
+}
+
+// 依類型篩選出 CsvPlantRecord（草皮跟其餘三類互斥，避免「地毯草」這種名字裡沒有
+// 「草皮」兩字但實際是草皮的植物被誤分到別類）。
+export function matchesCategory(p: CsvPlantRecord, cat: 'tree' | 'shrub' | 'groundcover' | 'lawn'): boolean {
+  return cat === 'lawn' ? isLawnPlant(p) : (p.normalizedCategory === cat && !isLawnPlant(p))
+}
+
 function conditionSearchReply(q: string, conds: PlantCondition[], db: CsvPlantRecord[]): AdvisorReply {
-  const isLawn = (p: CsvPlantRecord) =>
-    /草皮|草坪/.test(p.subCategory + p.category) || ['台北草', '假儉草', '百慕達草', '地毯草', '奧古斯丁草'].some(n => p.name.includes(n))
+  const isLawn = isLawnPlant
 
   // 問題是否限定類別（「低維護灌木有哪些」→ 只出灌木）
-  const catAsked: Array<'tree' | 'shrub' | 'groundcover' | 'lawn'> = []
-  if (/喬木|大樹|行道樹/.test(q)) catAsked.push('tree')
-  if (/灌木|綠籬/.test(q))        catAsked.push('shrub')
-  if (/地被|地披/.test(q))        catAsked.push('groundcover')
-  if (/草皮|草坪/.test(q))        catAsked.push('lawn')
+  const catAsked = parseTypeIntent(q)
   const cats: Array<'tree' | 'shrub' | 'groundcover' | 'lawn'> =
     catAsked.length > 0 ? catAsked : ['tree', 'shrub', 'groundcover', 'lawn']
 
@@ -414,8 +453,7 @@ function conditionSearchReply(q: string, conds: PlantCondition[], db: CsvPlantRe
   let usedFallback = false
 
   const pairCategories: AdvisorReply['pairCategories'] = cats.map(cat => {
-    const catFilter = (p: CsvPlantRecord) =>
-      cat === 'lawn' ? isLawn(p) : (p.normalizedCategory === cat && !isLawn(p))
+    const catFilter = (p: CsvPlantRecord) => matchesCategory(p, cat)
     const matches = db
       .filter(p => catFilter(p) && conds.every(c => c.test(p)))
       .sort((a, b) => (b.maintenanceLevel === '低' ? 1 : 0) - (a.maintenanceLevel === '低' ? 1 : 0))

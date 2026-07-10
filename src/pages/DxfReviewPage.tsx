@@ -1823,8 +1823,8 @@ export default function DxfReviewPage({
   onTabChange,
   onImport,
 }: {
-  activeTab?: 'pdf' | 'landscape' | 'dxf'
-  onTabChange?: (tab: 'pdf' | 'landscape' | 'dxf') => void
+  activeTab?: 'pdf' | 'landscape' | 'dxf' | 'advisor'
+  onTabChange?: (tab: 'pdf' | 'landscape' | 'dxf' | 'advisor') => void
   onImport?: (plantNames: string[]) => void
 } = {}) {
   const [parseResult, setParseResult]     = useState<DxfParseResult | null>(null)

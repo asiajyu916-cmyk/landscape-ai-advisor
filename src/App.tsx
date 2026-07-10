@@ -4,8 +4,9 @@ import type { ZonePlantingRow } from '@/utils/parsePdfZones'
 import type { ZoneReviewResult } from '@/utils/evaluateZone'
 import LandscapeAdvisorPage from '@/pages/LandscapeAdvisorPage'
 import DxfReviewPage from '@/pages/DxfReviewPage'
+import PlantAdvisorChatPage from '@/pages/PlantAdvisorChatPage'
 
-type AppTab = 'pdf' | 'landscape' | 'dxf'
+type AppTab = 'pdf' | 'landscape' | 'dxf' | 'advisor'
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<AppTab>('landscape')
@@ -64,6 +65,7 @@ export default function App() {
           onImport={handleDxfImport}
         />
       )}
+      {activeTab === 'advisor' && <PlantAdvisorChatPage />}
     </>
   )
 }

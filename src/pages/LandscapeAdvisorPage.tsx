@@ -443,7 +443,7 @@ const LEVEL_ICON_SM = {
   caution: <AlertTriangle size={13} className="text-amber-500  flex-shrink-0" />,
   danger:  <XCircle      size={13} className="text-orange-600 flex-shrink-0" />,
 }
-const CAT_COLOR: Record<string, string> = {
+export const CAT_COLOR: Record<string, string> = {
   '喬木': 'bg-teal-50 text-teal-700', '大喬木': 'bg-teal-50 text-teal-700',
   '灌木': 'bg-green-50 text-green-700',
   '草本': 'bg-lime-50 text-lime-700',
@@ -1091,7 +1091,7 @@ function AdvisorChat({ db, zones, prefill, onPrefillConsumed }: {
 
 // ── PlantImage with error fallback ───────────────────────────────────────────
 
-function PlantImage({ src, alt, fallbackClass, iconColor, staticFallback }: {
+export function PlantImage({ src, alt, fallbackClass, iconColor, staticFallback }: {
   src: string; alt: string; fallbackClass: string; iconColor: string
   staticFallback?: string   // 外部網址失敗時改試靜態圖（/plant-images/名稱.jpg）
 }) {
@@ -1125,7 +1125,7 @@ function PlantImage({ src, alt, fallbackClass, iconColor, staticFallback }: {
 
 // ── Plant image placeholder ───────────────────────────────────────────────────
 
-const CARD_BG: Record<string, string> = {
+export const CARD_BG: Record<string, string> = {
   '大喬木': 'from-teal-100 to-teal-50',
   '小喬木': 'from-cyan-100 to-cyan-50',
   '喬木': 'from-teal-100 to-teal-50',
@@ -1134,7 +1134,7 @@ const CARD_BG: Record<string, string> = {
   '地被': 'from-emerald-100 to-emerald-50',
   '草皮': 'from-green-100 to-emerald-50',
 }
-const CARD_ICON_COLOR: Record<string, string> = {
+export const CARD_ICON_COLOR: Record<string, string> = {
   '大喬木': 'text-teal-500', '小喬木': 'text-cyan-500', '喬木': 'text-teal-500',
   '灌木': 'text-green-500', '草本': 'text-lime-600', '地被': 'text-emerald-500', '草皮': 'text-green-500',
 }
@@ -1248,7 +1248,7 @@ function RatingLegend() {
 
 // ── Suitability badge logic ───────────────────────────────────────────────────
 
-function getSuitability(plant: CsvPlantRecord): { label: string; cls: string } {
+export function getSuitability(plant: CsvPlantRecord): { label: string; cls: string } {
   const danger = plant.riskTags.filter(t =>
     t.includes('積水') || t.includes('病蟲') || t.includes('不耐積水') || t.includes('高')
   ).length
@@ -1263,7 +1263,7 @@ function getSuitability(plant: CsvPlantRecord): { label: string; cls: string } {
 
 // ── PlantCardItem ──────────────────────────────────────────────────────────────
 
-function PlantCardItem({ plant, imageData, added, fresh, isActive, onDetail, onAdd }: {
+export function PlantCardItem({ plant, imageData, added, fresh, isActive, onDetail, onAdd }: {
   plant: CsvPlantRecord
   imageData?: PlantImageData
   added: boolean
@@ -2774,8 +2774,8 @@ export default function LandscapeAdvisorPage({
   pdfParsed = false,
   zoneReviewResults = [],
 }: {
-  activeTab?: 'pdf' | 'landscape' | 'dxf'
-  onTabChange?: (tab: 'pdf' | 'landscape' | 'dxf') => void
+  activeTab?: 'pdf' | 'landscape' | 'dxf' | 'advisor'
+  onTabChange?: (tab: 'pdf' | 'landscape' | 'dxf' | 'advisor') => void
   importedPlantNames?: string[]
   onImportConsumed?: () => void
   dxfZonesLinked?: boolean
@@ -3355,6 +3355,7 @@ tfoot{display:table-footer-group}
                   { id: 'pdf'       as const, label: 'PDF 審圖' },
                   { id: 'landscape' as const, label: 'AI 配植評估' },
                   { id: 'dxf'       as const, label: 'DXF 審查' },
+                  { id: 'advisor'   as const, label: 'AI 配植助理' },
                 ]).map(t => (
                   <button key={t.id} onClick={() => onTabChange(t.id)}
                     className={`relative px-5 py-2.5 rounded-lg text-[15px] font-semibold transition-colors whitespace-nowrap ${
@@ -3424,6 +3425,7 @@ tfoot{display:table-footer-group}
                   { id: 'pdf' as const, label: 'PDF' },
                   { id: 'landscape' as const, label: 'AI' },
                   { id: 'dxf' as const, label: 'DXF' },
+                  { id: 'advisor' as const, label: '助理' },
                 ]).map(t => (
                   <button key={t.id} onClick={() => onTabChange(t.id)}
                     className={`px-2.5 py-2 rounded-md text-xs font-medium transition-colors min-w-[44px] ${

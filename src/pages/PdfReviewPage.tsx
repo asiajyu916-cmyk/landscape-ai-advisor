@@ -324,7 +324,7 @@ async function extractPdfText(file: File): Promise<string> {
 
 // ── Shared tab nav (同三頁共用) ───────────────────────────────────────────────────
 
-type AppTab = 'pdf' | 'landscape' | 'dxf'
+type AppTab = 'pdf' | 'landscape' | 'dxf' | 'advisor'
 
 function TabNav({ active, onChange }: { active: AppTab; onChange: (t: AppTab) => void }) {
   return (
