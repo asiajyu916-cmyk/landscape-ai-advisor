@@ -1,76 +1,80 @@
-// ── /api/plant-search — 缺漏植栽自動補資料：官方資料搜尋 ──────────────────────
+// ── /api/plant-search — 缺漏植栽自動補資料：官方資料搜尋（v1，速度優先）──────
 // Vercel Edge Function。前端在「圖面辨識到植物但本地資料庫查無」時呼叫本 API。
 //
-// 職責範圍（僅此而已，不做任何寫入）：
-//   1. 用 Claude API 的 web_search 工具，限定官方 / 可信網域搜尋該植物
-//   2. 將搜尋結果整理成逐欄位標記可信度（official_confirmed / inferred / insufficient）
-//      的結構化 JSON，絕不允許模型在找不到依據時憑空填值
-//   3. 回傳給前端 → 前端顯示「新增植栽資料確認」視窗 → 使用者確認後才寫入資料庫
+// ⚠️ 時間預算限制（重要）：
+// Vercel Edge Function 的執行時間上限是平台固定值，無法用程式碼延長
+// （這跟 Node.js Serverless Function 的 `maxDuration` 不同，Edge 沒有這個設定）。
+// 實測 Hobby 方案約 25 秒會被平台強制中斷，中斷時回傳的不是 JSON、而是 Vercel
+// 的錯誤 HTML 頁面，導致前端 res.json() 直接拋例外（"Unexpected token 'A'..."
+// 這種錯誤訊息就是把 HTML 當 JSON 解析失敗）。
+//
+// 因此這版做兩件事把「跑到平台強制中斷」的情況降到最低：
+//   1. 大幅縮小任務範圍 —— 只搜尋 1~2 個來源、只要 5 個核心欄位，其餘欄位
+//      v1 一律標記 insufficient，不逼模型為了填滿 18 個欄位而一直搜尋。
+//   2. 自己設一個比平台上限更早的逾時（20 秒），時間到就主動中止並回傳
+//      乾淨的 JSON「查詢逾時」訊息 —— 寧可提早放棄也不要被平台強制中斷。
 //
 // 環境變數需求（Vercel 專案設定 → Environment Variables）：
 //   ANTHROPIC_API_KEY  — Anthropic API 金鑰
 
 export const config = { runtime: 'edge' }
 
+const OWN_TIMEOUT_MS = 20_000   // 自己的逾時，刻意比平台上限（~25s）早，確保還來得及回傳乾淨 JSON
+
 // ── 官方 / 可信資料來源網域白名單 ─────────────────────────────────────────────
-// 依使用者指定：農業部、林業及自然保育署、農業試驗所、林業試驗所（隸屬農業部）、
-// 各縣市農業局（*.gov.tw 概括涵蓋）、臺灣原生樹木推廣及媒合平臺、特有生物研究
-// 保育中心（官方植物資料庫）。不含一般部落格、園藝商店、未標示來源網站。
 const ALLOWED_DOMAINS = [
-  'moa.gov.tw',                    // 農業部（含各附屬機關 *.moa.gov.tw）
-  'forest.gov.tw',                 // 林業及自然保育署
-  'nativetree.forest.gov.tw',      // 臺灣原生樹木推廣及媒合平臺
-  'theme.forest.gov.tw',           // 臺灣原生樹木種苗網（樹種資料）
-  'tari.gov.tw',                   // 農業試驗所
-  'tfri.gov.tw',                   // 林業試驗所
-  'kmweb.moa.gov.tw',              // 農業知識入口網（農業部官方知識平台）
-  'kplant.biodiv.tw',              // 特有生物研究保育中心 台灣野生植物資料庫
-  'gov.tw',                        // 概括各縣市政府 / 農業局官網（*.gov.tw）
+  'moa.gov.tw',
+  'forest.gov.tw',
+  'nativetree.forest.gov.tw',
+  'theme.forest.gov.tw',
+  'tari.gov.tw',
+  'tfri.gov.tw',
+  'kmweb.moa.gov.tw',
+  'kplant.biodiv.tw',
+  'gov.tw',
 ]
 
-const SYSTEM_PROMPT = `你是景觀工程植栽資料查證助理。任務：搜尋台灣官方植物資料來源，
-確認使用者提供的植物名稱的生態習性與栽植資訊，並以結構化 JSON 回覆。
+// v1：只要求 5 個核心欄位（中文名/學名已是頂層欄位，不算在 fields 內）。
+// 其餘 13 個欄位（droughtTolerance/wetTolerance/... 等）由伺服器端統一補上
+// insufficient 佔位，維持與前端型別（PlantSearchFields）相容，但不要求模型搜尋。
+const CORE_FIELD_KEYS = ['plantType', 'sunRequirement', 'waterRequirement', 'soilRequirement', 'maintenanceNote'] as const
+const ALL_FIELD_KEYS = [
+  'plantType', 'sunRequirement', 'waterRequirement', 'droughtTolerance', 'wetTolerance',
+  'drainageRequirement', 'soilRequirement', 'height', 'crownWidth', 'soilDepth',
+  'plantingSpacing', 'flowerPeriod', 'flowerColor', 'deciduous', 'deciduousLevel',
+  'flowerDropRisk', 'maintenanceNote', 'maintenanceRisk',
+] as const
 
-嚴格規則（違反視為任務失敗）：
-1. 只能使用 web_search 工具實際搜尋到的內容作為依據，絕對不能憑訓練知識或常識
-   直接填寫欄位值 —— 即使你「知道」答案，也必須先搜尋確認，並在 note 中標明依據
-   的搜尋結果。
-2. 每個欄位都要標記 status：
-   - official_confirmed：搜尋結果的官方來源明確記載此數值
-   - inferred：官方來源沒有直接寫這個欄位，但根據同來源其他文字合理推論（note 必須
-     說明推論依據，例如「該來源標示為向陽性植物，推論日照需求為全日照」）
+const SYSTEM_PROMPT = `你是景觀工程植栽資料查證助理，任務是快速確認一個植物的基本資料。
+
+時間非常有限，請遵守：
+1. 最多搜尋 2 次就要根據搜尋結果作答，不要為了找到更多細節反覆搜尋。
+2. 只需要確認這 5 項：植物類型（喬木/小喬木/灌木/地被/草本/草皮）、日照需求、
+   水分需求、土壤需求、維護管理。其他欄位（樹高、花期、落葉性等）v1 版本不用管，
+   直接留空即可，不要為了這些欄位額外搜尋。
+3. 只能使用 web_search 工具實際搜尋到的內容作為依據，不能憑訓練知識或常識
+   直接填寫欄位值。
+4. 每個欄位標記 status：
+   - official_confirmed：搜尋結果的官方來源明確記載
+   - inferred：官方來源沒有直接寫這個欄位，但根據同來源其他文字合理推論
    - insufficient：搜尋不到任何官方來源提及，此時 value 留空字串
-3. 找不到任何官方來源記載這個植物時，不要編造 —— 所有欄位都標 insufficient，
-   並在 searchNote 寫「目前查無足夠官方資料，建議人工確認。」
-4. dataSourceUrl 必須是實際搜尋到、真實存在的網址，不可捏造或用網站首頁代替
-   實際查到資料的頁面。
-5. 只採信搜尋結果中來自官方網域的內容；若搜尋結果混雜非官方網站，忽略非官方部分。
+5. 找不到任何官方來源記載這個植物時，不要編造，所有欄位標 insufficient，
+   searchNote 寫「目前查無足夠官方資料，建議人工確認。」
+6. dataSourceUrl 必須是實際搜尋到、真實存在的網址。
+7. 只採信搜尋結果中來自官方網域的內容。
 
 只回傳單一 JSON 物件，不要加 markdown code fence、不要加任何說明文字。JSON 結構：
 {
   "found": boolean,
   "matchedName": "正式中文名稱",
   "scientificName": "學名",
-  "aliases": ["別名1","別名2"],
+  "aliases": ["別名1"],
   "fields": {
-    "plantType":            { "value": "喬木|小喬木|灌木|地被|草本|草皮", "status": "...", "note": "" },
-    "sunRequirement":       { "value": "", "status": "...", "note": "" },
-    "waterRequirement":     { "value": "", "status": "...", "note": "" },
-    "droughtTolerance":     { "value": "", "status": "...", "note": "" },
-    "wetTolerance":         { "value": "", "status": "...", "note": "" },
-    "drainageRequirement":  { "value": "", "status": "...", "note": "" },
-    "soilRequirement":      { "value": "", "status": "...", "note": "" },
-    "height":               { "value": "", "status": "...", "note": "" },
-    "crownWidth":           { "value": "", "status": "...", "note": "" },
-    "soilDepth":            { "value": "", "status": "...", "note": "" },
-    "plantingSpacing":      { "value": "", "status": "...", "note": "" },
-    "flowerPeriod":         { "value": "", "status": "...", "note": "" },
-    "flowerColor":          { "value": "", "status": "...", "note": "" },
-    "deciduous":            { "value": "落葉|常綠", "status": "...", "note": "" },
-    "deciduousLevel":       { "value": "", "status": "...", "note": "" },
-    "flowerDropRisk":       { "value": "", "status": "...", "note": "" },
-    "maintenanceNote":      { "value": "", "status": "...", "note": "" },
-    "maintenanceRisk":      { "value": "", "status": "...", "note": "" }
+    "plantType":        { "value": "喬木|小喬木|灌木|地被|草本|草皮", "status": "...", "note": "" },
+    "sunRequirement":   { "value": "", "status": "...", "note": "" },
+    "waterRequirement": { "value": "", "status": "...", "note": "" },
+    "soilRequirement":  { "value": "", "status": "...", "note": "" },
+    "maintenanceNote":  { "value": "", "status": "...", "note": "" }
   },
   "dataSourceName": "主要來源機構名稱",
   "dataSourceUrl": "https://...",
@@ -81,24 +85,28 @@ const SYSTEM_PROMPT = `你是景觀工程植栽資料查證助理。任務：搜
 interface SearchRequestBody {
   queryName: string
   scientificNameHint?: string
-  contextNote?: string   // 例如「出現在 J 區、H 區的草皮」，幫助搜尋鎖定正確物種
+  contextNote?: string
 }
 
 function buildUserPrompt(body: SearchRequestBody): string {
   const lines = [
-    `請搜尋並確認以下植物的官方資料：`,
+    `請搜尋並確認以下植物的官方資料（只需要 5 項核心欄位，最多搜尋 2 次）：`,
     `植物名稱：${body.queryName}`,
   ]
   if (body.scientificNameHint) lines.push(`學名線索：${body.scientificNameHint}`)
   if (body.contextNote) lines.push(`圖面上下文：${body.contextNote}`)
-  lines.push(
-    '',
-    '請先搜尋確認正式中文名稱與學名（同名異物很常見，例如「沿階草」與「麥門冬」',
-    '在不同地區可能指不同物種，請以搜尋到的官方分類資料為準），再搜尋景觀應用相關',
-    '的生態習性資料（日照、水分、耐旱耐濕、排水、土壤、樹高樹冠、花期花色、落葉性、',
-    '維護管理與常見養護風險）。搜尋時優先使用中文名稱 + 學名 + 官方機構名稱組合查詢。',
-  )
   return lines.join('\n')
+}
+
+type FieldResult = { value: string; status: string; note?: string }
+
+/** 補齊前端型別需要的完整欄位集合：模型有回的照抄，沒回的一律標 insufficient 佔位 */
+function fillAllFields(partial: Record<string, FieldResult> | undefined): Record<string, FieldResult> {
+  const out: Record<string, FieldResult> = {}
+  for (const key of ALL_FIELD_KEYS) {
+    out[key] = partial?.[key] ?? { value: '', status: 'insufficient', note: 'v1 版本此欄位尚未搜尋，如需要請人工確認' }
+  }
+  return out
 }
 
 export default async function handler(req: Request): Promise<Response> {
@@ -125,9 +133,17 @@ export default async function handler(req: Request): Promise<Response> {
     return new Response(JSON.stringify({ ok: false, reason: '缺少植物名稱' }), { status: 400 })
   }
 
+  // ── 自訂逾時：比 Vercel Edge 平台上限更早中止，確保能回傳乾淨 JSON ──────────
+  // 平台強制中斷時回傳的是 HTML 錯誤頁，會讓前端 JSON.parse 直接拋例外；
+  // 自己主動中止則能照常回傳結構化的「查詢逾時」訊息，且不會自動重試
+  // （沒有 retry 迴圈，失敗一次就結束，不會重複消耗 API 額度）。
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), OWN_TIMEOUT_MS)
+
   try {
     const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
+      signal: controller.signal,
       headers: {
         'content-type': 'application/json',
         'x-api-key': apiKey,
@@ -135,23 +151,25 @@ export default async function handler(req: Request): Promise<Response> {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-5',
-        max_tokens: 4096,
+        max_tokens: 1536,   // v1 只要 5 個欄位，不需要 4096；縮短輸出也能縮短耗時
         system: SYSTEM_PROMPT,
         messages: [{ role: 'user', content: buildUserPrompt(body) }],
         tools: [{
           type: 'web_search_20250305',
           name: 'web_search',
           allowed_domains: ALLOWED_DOMAINS,
+          max_uses: 2,   // 明確限制搜尋次數，避免模型反覆搜尋拖長時間
         }],
       }),
     })
+    clearTimeout(timeoutId)
 
     if (!anthropicRes.ok) {
       const errText = await anthropicRes.text().catch(() => '')
       return new Response(JSON.stringify({
         ok: false, queryName, reason: `搜尋服務暫時無法使用（${anthropicRes.status}）`,
         detail: errText.slice(0, 500),
-      }), { status: 502, headers: { 'content-type': 'application/json' } })
+      }), { status: 200, headers: { 'content-type': 'application/json' } })   // 200：讓前端能正常解析錯誤訊息，不要再噴 502
     }
 
     const data = await anthropicRes.json()
@@ -159,8 +177,6 @@ export default async function handler(req: Request): Promise<Response> {
       .filter((b: { type: string }) => b.type === 'text')
       .map((b: { text: string }) => b.text)
     const rawText = textBlocks.join('\n').trim()
-
-    // 模型可能仍包了 ```json fence，即使系統提示已禁止 —— 保守地剝除
     const cleaned = rawText.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim()
 
     let parsed: Record<string, unknown>
@@ -181,15 +197,16 @@ export default async function handler(req: Request): Promise<Response> {
       }), { status: 200, headers: { 'content-type': 'application/json' } })
     }
 
-    // ── 計算整體信心度與缺漏欄位 ──────────────────────────────────────────────
-    const fields = (parsed.fields ?? {}) as Record<string, { value: string; status: string; note?: string }>
+    const fields = fillAllFields(parsed.fields as Record<string, FieldResult> | undefined)
     const fieldKeys = Object.keys(fields)
-    const confirmedCount = fieldKeys.filter(k => fields[k]?.status === 'official_confirmed').length
+    const confirmedCount = CORE_FIELD_KEYS.filter(k => fields[k]?.status === 'official_confirmed').length
     const insufficientKeys = fieldKeys.filter(k => fields[k]?.status === 'insufficient')
-    const overallConfidence = fieldKeys.length > 0 ? Math.round((confirmedCount / fieldKeys.length) * 100) : 0
+    // 信心度只以 5 個核心欄位計算（其餘本來就刻意不搜尋，不該拉低信心度）
+    const overallConfidence = Math.round((confirmedCount / CORE_FIELD_KEYS.length) * 100)
+    const coreInsufficient = CORE_FIELD_KEYS.filter(k => fields[k]?.status === 'insufficient').length
     const overallStatus =
-      insufficientKeys.length === fieldKeys.length ? 'insufficient' :
-      confirmedCount === fieldKeys.length ? 'official_confirmed' : 'inferred'
+      coreInsufficient === CORE_FIELD_KEYS.length ? 'insufficient' :
+      confirmedCount === CORE_FIELD_KEYS.length ? 'official_confirmed' : 'inferred'
 
     const result = {
       queryName,
@@ -212,10 +229,14 @@ export default async function handler(req: Request): Promise<Response> {
       headers: { 'content-type': 'application/json' },
     })
   } catch (err) {
+    clearTimeout(timeoutId)
+    const isTimeout = err instanceof Error && err.name === 'AbortError'
     return new Response(JSON.stringify({
       ok: false, queryName,
-      reason: '搜尋過程發生錯誤，請稍後再試或人工確認。',
+      reason: isTimeout
+        ? '查詢逾時（超過 20 秒），建議稍後重試或人工確認。未自動重試，不會重複消耗額度。'
+        : '搜尋過程發生錯誤，請稍後再試或人工確認。',
       detail: err instanceof Error ? err.message : String(err),
-    }), { status: 500, headers: { 'content-type': 'application/json' } })
+    }), { status: 200, headers: { 'content-type': 'application/json' } })   // 200：確保前端永遠拿到合法 JSON
   }
 }
