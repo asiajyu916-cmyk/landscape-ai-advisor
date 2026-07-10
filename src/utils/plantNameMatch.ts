@@ -1,0 +1,162 @@
+// ── plantNameMatch.ts — 植物名稱正規化與本地資料庫比對 ────────────────────────
+// 用途：在觸發「自動搜尋官方資料」之前，先確認本地資料庫是否已有這個植物
+// （只是名稱寫法不同、全半形不同、或用了別名）。避免因為單純的文字差異
+// 就誤判「資料庫查無」而觸發不必要的搜尋。
+
+import type { CsvPlantRecord } from '@/types/csvPlant'
+import type { PlantMatchCandidate } from '@/types/plantSearch'
+
+// ── 常見別名對照表 ────────────────────────────────────────────────────────────
+// 索引表 / 圖面常用簡稱、俗名 ↔ 資料庫慣用正式名稱。
+// 可持續擴充；左側可為多個別名對一個正式名稱。
+const ALIAS_GROUPS: string[][] = [
+  ['蔓花生', '花生藤', '長花生藤'],
+  ['沿階草', '麥門冬', '沿階草(麥門冬)'],
+  ['台北草', '台北狗牙根', '假儉草(台北草)'],
+  ['榕樹', '正榕', '大葉榕'],
+  ['羅漢松', '羅漢柏'],
+  ['桂花', '木樨'],
+  ['金葉女貞', '金葉女貞木'],
+  ['腎蕨', '玉蘭蕨', '波士頓蕨'],
+  ['蝦蟆草', '蟛蜞菊', '南美蟛蜞菊'],
+  ['細葉雪茄花', '雪茄花'],
+  ['今葉石菖蒲', '金葉石菖蒲', '石菖蒲'],
+  ['胡椒木', '花椒木'],
+  ['紅花玉芙蓉', '玉芙蓉'],
+  ['茄苳', '重陽木'],
+  ['櫸木', '雞油'],
+  ['九芎', '猴不爬'],
+  ['辛夷', '玉蘭花', '白玉蘭'],
+  ['緬梔', '雞蛋花'],
+  ['白水木', '水芫花'],
+  ['青楓', '楓香(青楓)'],
+]
+
+/** 建立「任一寫法 → 正式代表名稱」的查表（代表名取該組第一個） */
+function buildAliasMap(): Map<string, string> {
+  const m = new Map<string, string>()
+  for (const group of ALIAS_GROUPS) {
+    const canonical = group[0]
+    for (const alt of group) m.set(normalizeForCompare(alt), canonical)
+  }
+  return m
+}
+const ALIAS_MAP = buildAliasMap()
+
+// ── 全形/半形統一 + 去空白 ────────────────────────────────────────────────────
+function toHalfWidth(s: string): string {
+  return s.replace(/[\uFF01-\uFF5E]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+          .replace(/\u3000/g, ' ')   // 全形空白
+}
+
+/** 供比對用的正規化：去除所有空白、全形轉半形、統一為小寫（英數部分）*/
+export function normalizeForCompare(raw: string): string {
+  return toHalfWidth(raw)
+    .replace(/[\s\u00A0]+/g, '')
+    .replace(/[（）]/g, m => (m === '（' ? '(' : ')'))
+    .toLowerCase()
+    .trim()
+}
+
+/** 學名正規化：統一空白為單一半形空格、去除命名者縮寫括號等雜訊，僅比對屬種二名 */
+export function normalizeScientificName(raw: string): string {
+  const half = toHalfWidth(raw).trim()
+  // 只取前兩個字詞（屬名 + 種小名），忽略命名者、變種等後綴
+  const parts = half.replace(/[.,].*$/, '').split(/\s+/).filter(Boolean)
+  return parts.slice(0, 2).join(' ').toLowerCase()
+}
+
+/** 別名正規化：查表得到代表名稱；查無則回傳正規化後的原字串 */
+export function resolveAlias(raw: string): string {
+  const key = normalizeForCompare(raw)
+  return ALIAS_MAP.get(key) ?? raw
+}
+
+/**
+ * 在本地資料庫中尋找符合的植物記錄。
+ * 依序嘗試：
+ *   1. 中文名稱完全比對（正規化後）
+ *   2. 別名比對（查表後再比對正規化中文名）
+ *   3. 學名比對（正規化後）
+ *   4. 中文名 / 學名交叉比對（查詢名稱可能誤填成學名欄位，或反之）
+ * 回傳依信心排序的候選清單（可能為空）。
+ */
+export function findLocalPlantMatch(
+  queryName: string,
+  plants: CsvPlantRecord[],
+  scientificNameHint?: string,
+): PlantMatchCandidate[] {
+  const candidates: PlantMatchCandidate[] = []
+  const qNorm = normalizeForCompare(queryName)
+  const qAlias = normalizeForCompare(resolveAlias(queryName))
+  const qSci = scientificNameHint ? normalizeScientificName(scientificNameHint) : ''
+
+  for (const p of plants) {
+    const pNameNorm = normalizeForCompare(p.name)
+    const pSciNorm = p.scientificName ? normalizeScientificName(p.scientificName) : ''
+
+    // 1. 完全比對
+    if (pNameNorm === qNorm) {
+      candidates.push({ plant: p, matchType: 'exact_name', score: 100 })
+      continue
+    }
+    // 2. 別名比對
+    if (qAlias !== qNorm && pNameNorm === qAlias) {
+      candidates.push({ plant: p, matchType: 'alias', score: 95 })
+      continue
+    }
+    // 也檢查資料庫端名稱是否為查詢名稱的別名（雙向）
+    if (normalizeForCompare(resolveAlias(p.name)) === qNorm) {
+      candidates.push({ plant: p, matchType: 'alias', score: 95 })
+      continue
+    }
+    // 3. 學名比對
+    if (qSci && pSciNorm && pSciNorm === qSci) {
+      candidates.push({ plant: p, matchType: 'exact_scientific', score: 90 })
+      continue
+    }
+    // 4. 交叉比對：查詢名稱其實是學名，或資料庫學名欄位其實填了中文名
+    if (pSciNorm && normalizeScientificName(queryName) === pSciNorm) {
+      candidates.push({ plant: p, matchType: 'cross_reference', score: 80 })
+      continue
+    }
+    if (scientificNameHint && normalizeForCompare(scientificNameHint) === pNameNorm) {
+      candidates.push({ plant: p, matchType: 'cross_reference', score: 80 })
+      continue
+    }
+  }
+
+  return candidates.sort((a, b) => b.score - a.score)
+}
+
+/**
+ * 嚴格版存在判斷：只認「完全相同的中文名稱」或「完全相同的學名」，
+ * 不使用別名表、不使用交叉比對。
+ *
+ * 用途：決定「要不要顯示自動搜尋按鈕」。別名表是我方自行整理、未逐一跟使用者
+ * 確認學名是否真的相同，若拿別名表來判定「已有資料」，會跟「植栽資料庫」頁面
+ * 的純文字搜尋（找不到別名對應的另一個名稱）產生矛盾 —— 系統顯示已比對，但
+ * 使用者直接搜尋卻查無此植物。改用嚴格比對後，兩邊的判斷依據一致。
+ */
+export function existsExactInLocalDatabase(
+  queryName: string,
+  plants: CsvPlantRecord[],
+  scientificNameHint?: string,
+): boolean {
+  const qNorm = normalizeForCompare(queryName)
+  const qSci = scientificNameHint ? normalizeScientificName(scientificNameHint) : ''
+  return plants.some(p => {
+    if (normalizeForCompare(p.name) === qNorm) return true
+    if (qSci && p.scientificName && normalizeScientificName(p.scientificName) === qSci) return true
+    return false
+  })
+}
+
+/** 便利函式：只要「是否已有可用資料」的布林結果 */
+export function existsInLocalDatabase(
+  queryName: string,
+  plants: CsvPlantRecord[],
+  scientificNameHint?: string,
+): boolean {
+  return findLocalPlantMatch(queryName, plants, scientificNameHint).length > 0
+}

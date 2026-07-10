@@ -54,12 +54,6 @@ export interface CsvPlantRecord {
   soilTexture: string       // 土壤質地：砂質土/壤土/黏質土
   soilAmendment: string     // 客土改良需求：是/否/建議
 
-  // ── safety（新增，選填，向下相容既有 CSV / 資料庫）────────────────────────
-  minimumPlantSpacing: string   // 最小種植間距（與 plantingSpacing 不同：這是安全下限，非建議值）
-  leafDropStatus: string        // 是否容易落葉：常綠/季節性換葉/落葉性強 等
-  toxicity: string              // 有無毒性：無/低毒性/有毒（接觸）/有毒（誤食）等
-  plantSafetyNote: string       // 植栽安全備註（毒性、落葉、其他公安相關的補充說明）
-
   // ── risk & tags ───────────────────────────────────────────────────────────
   riskTags: string[]
 
@@ -78,10 +72,6 @@ export interface CsvPlantRecord {
   // ── derived ───────────────────────────────────────────────────────────────
   reviewNote: string
   dataComplete: boolean       // false if key fields are '待查'
-
-  // ── 缺漏植栽自動補資料（選填，向下相容既有 CSV 匯入資料）───────────────────
-  isAutoSourced?: boolean
-  autoSourceFields?: Partial<Record<string, 'official_confirmed' | 'inferred' | 'insufficient'>>
 }
 
 // ── Selected plant (with evaluation status) ───────────────────────────────────

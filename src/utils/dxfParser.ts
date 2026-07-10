@@ -408,46 +408,97 @@ export function classifyZone(layerName: string): ZoneType {
 // 會被誤判為邊界頂點，污染分區 polygon。
 
 function parseHatchBoundary(groups: GroupCode[], startIdx: number): {
-  vertices: Array<{ x: number; y: number }>; end: number
+  loops: Array<Array<{ x: number; y: number }>>; end: number
   hatchScale?: number; hatchAngle?: number
 } {
-  const vertices: Array<{ x: number; y: number }> = []
+  // ── Type-aware boundary 解析 ────────────────────────────────────────────────
+  // 1. Multi-path 分離：一個 HATCH 可含多個不相連 boundary path（code 92 起始）。
+  //    舊版合併成單一 polygon 導致 point-in-polygon 奇偶錯亂。
+  // 2. Edge type 感知：非 polyline path 中 code 72 = edge type。
+  //    type 2（圓弧）：10/20 是圓心（不在弧上）、40 半徑、50/51 起終角 → 產出弧起終點
+  //    type 3（橢圓弧）：10/20 是中心、11/21 是「相對中心的長軸向量」→ 產出 中心±向量
+  //    舊版把 11/21 一律當絕對座標，產生距圖面數十萬單位的假頂點（實測 -349369），
+  //    而事後統計淨化會誤砍細長草皮 loop 的真實端點（導致 J 區覆蓋測不到）。
+  //    來源正確解析後，不再需要任何統計淨化。
+  const loops: Array<Array<{ x: number; y: number }>> = []
+  let current: Array<{ x: number; y: number }> = []
+  const flush = () => { if (current.length >= 3) loops.push(current); current = [] }
   let i = startIdx
 
-  // 呼叫端應已停在 code 91；若不是則嘗試找到它
   if (i < groups.length && groups[i].code !== 91) {
     while (i < groups.length && groups[i].code !== 91 && groups[i].code !== 75 && groups[i].code !== 0) i++
   }
   if (i >= groups.length || groups[i].code !== 91) {
-    // 沒找到邊界資料段，跳到下一個 entity 結束
     while (i < groups.length && groups[i].code !== 0) i++
-    return { vertices, end: i }
+    return { loops, end: i }
   }
-  i++ // 跳過 code 91 本身
+  i++ // 跳過 code 91
 
-  // 讀取邊界頂點，直到 code 75（填充圖案起始）或 code 0（下一實體）
-  let currentX: number | null = null
-  let endX:     number | null = null   // line edge 終點 (code 11/21)
+  let isPoly = false      // 此 path 是否為 polyline path（92 flags bit 2）
+  let edgeType = 0        // 非 polyline path 的當前 edge type（code 72）
+  let pendX: number | null = null
+  let pendX2: number | null = null
+  let arcCx = 0; let arcCy = 0; let arcR = 0; let arcA0 = 0
+  let hasArcC = false; let hasArcR = false
+  let ellCx = 0; let ellCy = 0; let hasEllC = false
 
   while (i < groups.length && groups[i].code !== 0 && groups[i].code !== 75) {
     const g = groups[i]
-    // ── 頂點（polyline boundary 或 line/arc edge 起點）──────────────────
-    if (g.code === 10) { currentX = parseFloat(g.value) || 0 }
-    else if (g.code === 20 && currentX !== null) {
-      vertices.push({ x: currentX, y: parseFloat(g.value) || 0 })
-      currentX = null
-    }
-    // ── line edge 終點（code 11/21）── 讓折線不斷開 ─────────────────────
-    if (g.code === 11) { endX = parseFloat(g.value) || 0 }
-    else if (g.code === 21 && endX !== null) {
-      vertices.push({ x: endX, y: parseFloat(g.value) || 0 })
-      endX = null
+    const val = parseFloat(g.value) || 0
+    switch (g.code) {
+      case 92:
+        flush()
+        isPoly = ((parseInt(g.value) || 0) & 2) !== 0
+        edgeType = 0; hasArcC = false; hasArcR = false; hasEllC = false
+        break
+      case 72:
+        // polyline path 的 72 是 has-bulge flag，不是 edge type
+        if (!isPoly) { edgeType = parseInt(g.value) || 0; hasArcC = false; hasArcR = false; hasEllC = false }
+        break
+      case 10: pendX = val; break
+      case 20:
+        if (pendX !== null) {
+          if (!isPoly && edgeType === 2)      { arcCx = pendX; arcCy = val; hasArcC = true }   // 圓弧圓心（不在弧上）
+          else if (!isPoly && edgeType === 3) { ellCx = pendX; ellCy = val; hasEllC = true }   // 橢圓中心
+          else current.push({ x: pendX, y: val })   // polyline 頂點 / line 起點 / spline 控制點
+          pendX = null
+        }
+        break
+      case 11: pendX2 = val; break
+      case 21:
+        if (pendX2 !== null) {
+          if (!isPoly && edgeType === 3) {
+            // 橢圓弧：11/21 是相對中心的長軸端點向量 → 絕對座標 = 中心 ± 向量
+            if (hasEllC) {
+              current.push({ x: ellCx + pendX2, y: ellCy + val })
+              current.push({ x: ellCx - pendX2, y: ellCy - val })
+            }
+          } else {
+            current.push({ x: pendX2, y: val })   // line edge 終點 / spline fit point（絕對座標）
+          }
+          pendX2 = null
+        }
+        break
+      case 40:
+        if (!isPoly && edgeType === 2) { arcR = val; hasArcR = true }
+        break
+      case 50:
+        if (!isPoly && edgeType === 2) arcA0 = val
+        break
+      case 51:
+        if (!isPoly && edgeType === 2 && hasArcC && hasArcR) {
+          const r0 = arcA0 * Math.PI / 180
+          const r1 = val * Math.PI / 180
+          current.push({ x: arcCx + arcR * Math.cos(r0), y: arcCy + arcR * Math.sin(r0) })
+          current.push({ x: arcCx + arcR * Math.cos(r1), y: arcCy + arcR * Math.sin(r1) })
+        }
+        break
     }
     i++
   }
+  flush()
 
   // 跳過剩餘 HATCH 資料到下一個 entity — 途中捕捉 pattern scale(41) / angle(52)
-  // （41/52 出現在 boundary 之後、pattern def lines 之前；def lines 用 43-49/53 不衝突）
   let hatchScale: number | undefined
   let hatchAngle: number | undefined
   while (i < groups.length && groups[i].code !== 0) {
@@ -456,7 +507,7 @@ function parseHatchBoundary(groups: GroupCode[], startIdx: number): {
     i++
   }
 
-  return { vertices, end: i, hatchScale, hatchAngle }
+  return { loops, end: i, hatchScale, hatchAngle }
 }
 
 // ── Block definition parser ───────────────────────────────────────────────────
@@ -552,17 +603,20 @@ function parseBlockDefs(groups: GroupCode[]): Map<string, BlockDef> {
         } else if (groups[i].code === 0 && eVal === 'INSERT') {
           let layer = ''; let bname = ''; let lx = 0; let ly = 0
           let sx = 1; let sy = 1; let rot = 0
+          let extZ = 1  // code 230：OCS 鏡射（見 ENTITIES INSERT 分支說明）
           i++
           while (i < groups.length && groups[i].code !== 0) {
-            if (groups[i].code === 8) layer = groups[i].value
-            if (groups[i].code === 2) bname = groups[i].value
-            if (groups[i].code === 10) lx   = parseFloat(groups[i].value) || 0
-            if (groups[i].code === 20) ly   = parseFloat(groups[i].value) || 0
-            if (groups[i].code === 41) sx   = parseFloat(groups[i].value) || 1
-            if (groups[i].code === 42) sy   = parseFloat(groups[i].value) || 1
-            if (groups[i].code === 50) rot  = parseFloat(groups[i].value) || 0
+            if (groups[i].code === 8)   layer = groups[i].value
+            if (groups[i].code === 2)   bname = groups[i].value
+            if (groups[i].code === 10)  lx    = parseFloat(groups[i].value) || 0
+            if (groups[i].code === 20)  ly    = parseFloat(groups[i].value) || 0
+            if (groups[i].code === 41)  sx    = parseFloat(groups[i].value) || 1
+            if (groups[i].code === 42)  sy    = parseFloat(groups[i].value) || 1
+            if (groups[i].code === 50)  rot   = parseFloat(groups[i].value) || 0
+            if (groups[i].code === 230) extZ  = parseFloat(groups[i].value) || 1
             i++
           }
+          if (extZ < -0.5) { lx = -lx; sx = -sx; rot = -rot }
           if (bname) blockInserts.push({ blockName: bname, layer, localX: lx, localY: ly, scaleX: sx, scaleY: sy, rotation: rot })
 
         // LWPOLYLINE
@@ -589,9 +643,11 @@ function parseBlockDefs(groups: GroupCode[]): Map<string, BlockDef> {
             if (groups[i].code === 62) hatchColor = parseInt(groups[i].value) || undefined
             i++
           }
-          const { vertices: hv, end: he, hatchScale, hatchAngle } = parseHatchBoundary(groups, i)
+          const { loops: hLoops, end: he, hatchScale, hatchAngle } = parseHatchBoundary(groups, i)
           i = he
-          if (hv.length >= 3) blockPolygons.push({ layer, vertices: hv, closed: true, source: 'HATCH', hatchPattern: hatchPattern || undefined, hatchScale, hatchAngle, hatchColor })
+          for (const hv of hLoops) {
+            blockPolygons.push({ layer, vertices: hv, closed: true, source: 'HATCH', hatchPattern: hatchPattern || undefined, hatchScale, hatchAngle, hatchColor })
+          }
 
         // CIRCLE（樹木圓形圖案最常見的幾何元素）
         } else if (groups[i].code === 0 && eVal === 'CIRCLE') {
@@ -619,15 +675,26 @@ function parseBlockDefs(groups: GroupCode[]): Map<string, BlockDef> {
       }
 
       // ── 計算 block 本地 bbox（以 baseX/baseY 為原點偏移後的 local 座標系）
+      // 迴圈實作：大型 block（數萬頂點）用 spread 會拋 RangeError
       let localBBox: BlockDef['localBBox'] = undefined
-      const allLocalPts: Array<{x:number;y:number}> = []
-      for (const poly of blockPolygons) allLocalPts.push(...poly.vertices)
-      for (const t of blockTexts) allLocalPts.push({ x: t.localX, y: t.localY })
-      if (allLocalPts.length > 0) {
-        const xs = allLocalPts.map(p => p.x); const ys = allLocalPts.map(p => p.y)
-        const minX = Math.min(...xs); const maxX = Math.max(...xs)
-        const minY = Math.min(...ys); const maxY = Math.max(...ys)
-        localBBox = { minX, maxX, minY, maxY, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 }
+      let lminX = Infinity; let lmaxX = -Infinity
+      let lminY = Infinity; let lmaxY = -Infinity
+      for (const poly of blockPolygons) {
+        for (const v of poly.vertices) {
+          if (v.x < lminX) lminX = v.x
+          if (v.x > lmaxX) lmaxX = v.x
+          if (v.y < lminY) lminY = v.y
+          if (v.y > lmaxY) lmaxY = v.y
+        }
+      }
+      for (const t of blockTexts) {
+        if (t.localX < lminX) lminX = t.localX
+        if (t.localX > lmaxX) lmaxX = t.localX
+        if (t.localY < lminY) lminY = t.localY
+        if (t.localY > lmaxY) lmaxY = t.localY
+      }
+      if (isFinite(lminX)) {
+        localBBox = { minX: lminX, maxX: lmaxX, minY: lminY, maxY: lmaxY, cx: (lminX + lmaxX) / 2, cy: (lminY + lmaxY) / 2 }
       }
 
       if (blockName) defs.set(blockName, { baseX, baseY, texts: blockTexts, inserts: blockInserts, polygons: blockPolygons, localBBox })
@@ -771,17 +838,29 @@ export function parseDxf(text: string): DxfParseResult {
       let layer = ''; let blockName = ''
       let x = 0; let y = 0
       let scaleX = 1; let scaleY = 1; let rotDeg = 0
+      let extZ = 1  // code 230：extrusion normal Z。-1 = AutoCAD MIRROR 產生的 OCS 鏡射
       i++
       while (i < groups.length && groups[i].code !== 0) {
         const eg = groups[i]
-        if (eg.code === 8)  layer     = eg.value
-        if (eg.code === 2)  blockName = eg.value
-        if (eg.code === 10) x         = parseFloat(eg.value) || 0
-        if (eg.code === 20) y         = parseFloat(eg.value) || 0
-        if (eg.code === 41) scaleX    = parseFloat(eg.value) || 1
-        if (eg.code === 42) scaleY    = parseFloat(eg.value) || 1
-        if (eg.code === 50) rotDeg    = parseFloat(eg.value) || 0
+        if (eg.code === 8)   layer     = eg.value
+        if (eg.code === 2)   blockName = eg.value
+        if (eg.code === 10)  x         = parseFloat(eg.value) || 0
+        if (eg.code === 20)  y         = parseFloat(eg.value) || 0
+        if (eg.code === 41)  scaleX    = parseFloat(eg.value) || 1
+        if (eg.code === 42)  scaleY    = parseFloat(eg.value) || 1
+        if (eg.code === 50)  rotDeg    = parseFloat(eg.value) || 0
+        if (eg.code === 230) extZ      = parseFloat(eg.value) || 1
         i++
+      }
+      // ── OCS → WCS 正規化（Arbitrary Axis Algorithm，normal=(0,0,-1) 退化情形）──
+      // MIRROR 產生的 INSERT 其 10/20 為 OCS 座標：worldX = -ocsX, worldY = ocsY。
+      // Block 展開等效變換：insert.x 取負、scaleX 取負、rotation 取負（數學推導：
+      // M·R(θ)·S(sx,sy) = R(-θ)·S(-sx,sy)，M = diag(-1,1)）。
+      // 正規化後下游（block 展開、bbox center、歸區）全部沿用既有邏輯即正確。
+      if (extZ < -0.5) {
+        x = -x
+        scaleX = -scaleX
+        rotDeg = -rotDeg
       }
 
       // 緊接收集 ATTRIB / ATTDEF 實體（連結到此 INSERT）
@@ -943,11 +1022,11 @@ export function parseDxf(text: string): DxfParseResult {
         if (groups[i].code === 62) hatchColor = parseInt(groups[i].value) || undefined
         i++
       }
-      const { vertices, end, hatchScale, hatchAngle } = parseHatchBoundary(groups, i)
+      const { loops: hLoops, end, hatchScale, hatchAngle } = parseHatchBoundary(groups, i)
       i = end
-      if (vertices.length >= 3) {
+      for (const hv of hLoops) {
         polygons.push({
-          layer, vertices,
+          layer, vertices: hv,
           closed: true,
           zoneType: classifyZone(layer),
           source: 'HATCH',

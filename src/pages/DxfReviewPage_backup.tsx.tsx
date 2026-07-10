@@ -4,17 +4,13 @@ import {
   ChevronDown, X, ArrowRight, Layers, Trash2, BookOpen, Table2, FileOutput, FileDown,
 } from 'lucide-react'
 import { parseDxf, detectPlantSchedule, findNearbyTexts } from '@/utils/dxfParser'
-import { analyzeMultiLayer, zoneLabel, detectZonesFromText, buildZonePlantList, buildZoneAssignDebug, polygonBBox, pointInPolygon, detectAnalysisScope } from '@/utils/spatialAnalysis'
+import { analyzeMultiLayer, zoneLabel, detectZonesFromText, buildZonePlantList, buildZoneAssignDebug, polygonBBox, pointInPolygon } from '@/utils/spatialAnalysis'
 import type { ZoneAssignDebug } from '@/utils/spatialAnalysis'
 import { exportZoneReviewPdf } from '@/utils/exportReviewPdf'
 import type { ZoneReviewPdfData } from '@/utils/exportReviewPdf'
 import { evaluate } from '@/utils/plantEvaluator'
 import type { EvalResult } from '@/utils/plantEvaluator'
-import { loadPlantsFromStorage, savePlantsToStorage } from '@/data/plantStore'
-import { searchOfficialPlantData, searchResultToDraft } from '@/utils/plantSearchClient'
-import { existsExactInLocalDatabase } from '@/utils/plantNameMatch'
-import type { PlantSearchResult, DraftPlantRecord } from '@/types/plantSearch'
-import PlantAutoAddModal from '@/components/modals/PlantAutoAddModal'
+import { loadPlantsFromStorage } from '@/data/plantStore'
 import {
   loadDxfRules, upsertDxfRule, deleteDxfRule, clearAllDxfRules,
   loadSessionRules, upsertSessionRule,
@@ -1051,9 +1047,28 @@ function buildZoneReviews(
         continue
       }
 
-      // ── D-2（已降級）：圖層名稱比對移至 Section A 之後 ──────────────────
-      // 依審查優先序：legend HATCH → HATCH 特徵 → nearby TEXT → layer（僅輔助）
-      // 原本 layer 比對在圖例比對之前，導致過度依賴 layer；現移到文字搜尋之後。
+      // ── D-2. 圖層名稱直接含植物名（最高優先，如圖層「腎蕨(灌木)」）──────
+      if (!matched && area.source === 'HATCH' && layerName) {
+        const layerPlant =
+          schedule.find(e => e.plantName && e.plantName.length >= 2 && layerName.includes(e.plantName))?.plantName
+          ?? plantDB.find(p => p.name.length >= 2 && layerName.includes(p.name))?.name
+        if (layerPlant) {
+          console.log(`✅ [HATCH LayerName] zone="${zpl.zone.name}" layer="${layerName}" → "${layerPlant}"（圖層名直接含植物名）`)
+          if (!seenNames.has(layerPlant)) {
+            seenNames.add(layerPlant)
+            const dbP = findInDB(layerPlant, plantDB)
+            if (dbP) {
+              const ps = dbP.wetTolerance === '不耐積水' && dbP.droughtTolerance === '不耐旱' ? '需注意' as const : '可用' as const
+              confirmed.push({ ...dbP, instanceId: uid(), status: ps })
+              blockEntries.push({ blockName: `[HATCH圖例] layer:${layerName}`, plantName: dbP.name, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'db-matched' })
+            } else {
+              blockEntries.push({ blockName: `[HATCH圖例] layer:${layerName}`, plantName: layerPlant, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'name-only' })
+            }
+          }
+          matched = true
+          continue
+        }
+      }
 
       // ── D. HATCH pattern 圖例對照（最優先：pattern name → 索引表植物名稱）──
       // 即使植栽不在 DB，也要標記為 matched，不讓 Layer 名稱覆蓋辨識結果
@@ -1326,29 +1341,8 @@ function buildZoneReviews(
       } // end Section A (HATCH only)
       if (matched) continue
 
-      // ── B. Layer 輔助比對（第 4 順位：legend → HATCH 特徵 → nearby text 都失敗才用）──
-      // layer 只能輔助，不可作為主判斷；比對結果標記 layer-assisted 供 UI 顯示信心
-      if (!matched && area.source === 'HATCH' && layerName) {
-        const layerPlant =
-          schedule.find(e => e.plantName && e.plantName.length >= 2 && layerName.includes(e.plantName))?.plantName
-          ?? plantDB.find(p => p.name.length >= 2 && layerName.includes(p.name))?.name
-        if (layerPlant) {
-          console.log(`🟡 [HATCH LayerAssist] zone="${zpl.zone.name}" layer="${layerName}" → "${layerPlant}"（圖層名輔助，前 3 順位皆未命中）`)
-          if (!seenNames.has(layerPlant)) {
-            seenNames.add(layerPlant)
-            const dbP = findInDB(layerPlant, plantDB)
-            if (dbP) {
-              const ps = dbP.wetTolerance === '不耐積水' && dbP.droughtTolerance === '不耐旱' ? '需注意' as const : '可用' as const
-              confirmed.push({ ...dbP, instanceId: uid(), status: ps })
-              blockEntries.push({ blockName: `[HATCH候選] score:50 layer:${layerName}`, plantName: dbP.name, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'db-matched' })
-            } else {
-              blockEntries.push({ blockName: `[HATCH候選] score:50 layer:${layerName}`, plantName: layerPlant, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'name-only' })
-            }
-          }
-          matched = true
-          continue
-        }
-      }
+      // ── B. Layer Fallback — 完全禁用 ─────────────────────────────────────
+      // layer 只用於區域分類，永遠不作為植物名稱
 
       // ── E. LWPOLYLINE / POLYLINE 繼承重疊 HATCH 的植物名稱 ───────────────
       // 當面積多邊形是 LWPOLYLINE（CAD 封閉折線）且 Legend Mapping 有值，
@@ -1894,17 +1888,6 @@ export default function DxfReviewPage({
 
   const plants = allPlants.length > 0 ? allPlants : (loadPlantsFromStorage() ?? [])
 
-  // ── 缺漏植栽自動補資料：確認新增 → 寫入資料庫 → 自動重新評估 ─────────────────
-  // 「重新評估」不需要額外程式碼：下面既有的 useEffect 已經監看 [plants, ...]，
-  // plants 一變動就會自動重跑 buildZoneReviews，覆蓋目前所有分區的審查結果。
-  const handlePlantAdded = useCallback((record: CsvPlantRecord) => {
-    setAllPlants(prev => {
-      const next = [...prev, record]
-      savePlantsToStorage(next)
-      return next
-    })
-  }, [])
-
   // ── 當 plants 或 zonePlantLists 改變時重算分區審查 ──────────────────────────
   // 解決「DXF 上傳時 DB 尚未載入 → 分數為空」的問題
   useEffect(() => {
@@ -1956,11 +1939,10 @@ export default function DxfReviewPage({
       setMappings(active)
       setExcluded(exc)
 
-      // 分區空間識別（固定流程：評估範圍 → 排除索引表區 → 分區 polyline → 區內 entity）
-      const scope = detectAnalysisScope(result.texts, result.polygons)
-      const zones = detectZonesFromText(result.texts, result.polygons, scope)
+      // 分區空間識別
+      const zones = detectZonesFromText(result.texts, result.polygons)
       setDetectedZones(zones)
-      const zpl = buildZonePlantList(zones, active, result.polygons, result.inserts, result.blockExtents, scope)
+      const zpl = buildZonePlantList(zones, active, result.polygons, result.inserts, result.blockExtents)
       setZonePlantLists(zpl)
       saveZoneReviews(buildZoneReviews(zpl, loaded, sched.entries, result.texts, radius, result.polygons, result.layerColors ?? {}), 'handleFile [polygons=' + result.polygons.length + ']')
       setZoneDebug(buildZoneAssignDebug(zones, zpl, active, result.inserts, result.blockExtents))
@@ -2021,7 +2003,7 @@ export default function DxfReviewPage({
     )
     setMappings(active)
     setExcluded(exc)
-    const zpl2 = buildZonePlantList(detectedZones, active, parseResult.polygons, parseResult.inserts, parseResult.blockExtents, detectAnalysisScope(parseResult.texts, parseResult.polygons))
+    const zpl2 = buildZonePlantList(detectedZones, active, parseResult.polygons, parseResult.inserts, parseResult.blockExtents)
     setZonePlantLists(zpl2)
     saveZoneReviews(buildZoneReviews(zpl2, plantList, plantSchedule.entries, parseResult.texts, drawingRadius, parseResult.polygons, parseResult.layerColors ?? {}), 'rebuildMappings [polygons=' + parseResult.polygons.length + ']')
     setZoneDebug(buildZoneAssignDebug(detectedZones, zpl2, active, parseResult.inserts, parseResult.blockExtents))
@@ -2241,7 +2223,7 @@ export default function DxfReviewPage({
 
         {/* ── Schedule tab ── */}
         {tab === 'schedule' && (
-          <ScheduleTab schedule={plantSchedule} mappings={mappings} plants={plants} onPlantAdded={handlePlantAdded} />
+          <ScheduleTab schedule={plantSchedule} mappings={mappings} />
         )}
 
         {/* ── Zone review tab ── */}
@@ -2405,7 +2387,7 @@ export default function DxfReviewPage({
               <div className="text-sm text-stone-500">
                 已對應 <strong className="text-green-700">{matched.length + partial.length}</strong> 種・
                 未對應 <strong className="text-red-600">{unmatched.length}</strong> 種・
-                索引表 {plantSchedule.entries.filter(e => existsExactInLocalDatabase(e.plantName, plants, e.scientificName)).length} 筆已比對
+                索引表 {plantSchedule.entries.filter(e => e.dbMatched).length} 筆已比對
               </div>
               <div className="flex items-center gap-3">
                 <span className="text-xs text-stone-400">
@@ -4375,34 +4357,7 @@ function ZonesTab({ polygons }: { polygons: DxfParseResult['polygons'] }) {
 
 // ── Schedule tab ─────────────────────────────────────────────────────────────
 
-function ScheduleTab({ schedule, mappings, plants, onPlantAdded }: {
-  schedule: PlantSchedule; mappings: MappedItem[]
-  plants: CsvPlantRecord[]; onPlantAdded: (record: CsvPlantRecord) => void
-}) {
-  // ── 缺漏植栽自動補資料：每個索引表植物名稱各自的搜尋狀態 ────────────────────
-  const [searchStates, setSearchStates] = useState<Record<string, 'idle' | 'searching' | 'failed'>>({})
-  const [failureNotes, setFailureNotes] = useState<Record<string, string>>({})
-  const [activeSearch, setActiveSearch] = useState<{
-    queryName: string; result: PlantSearchResult; draft: DraftPlantRecord
-  } | null>(null)
-
-  const runAutoSearch = useCallback(async (e: PlantScheduleEntry) => {
-    const key = e.plantName
-    setSearchStates(prev => ({ ...prev, [key]: 'searching' }))
-    setFailureNotes(prev => { const n = { ...prev }; delete n[key]; return n })
-    const res = await searchOfficialPlantData(
-      e.plantName, e.scientificName,
-      e.code ? `索引表代號 ${e.code}` : undefined,
-    )
-    if (res.ok) {
-      setActiveSearch({ queryName: key, result: res.result, draft: searchResultToDraft(res.result) })
-      setSearchStates(prev => ({ ...prev, [key]: 'idle' }))
-    } else {
-      setSearchStates(prev => ({ ...prev, [key]: 'failed' }))
-      setFailureNotes(prev => ({ ...prev, [key]: res.reason }))
-    }
-  }, [])
-
+function ScheduleTab({ schedule, mappings }: { schedule: PlantSchedule; mappings: MappedItem[] }) {
   if (!schedule.detected) return (
     <div className="flex flex-col items-center justify-center py-20 text-stone-400 gap-3">
       <Table2 size={36} className="opacity-30" />
@@ -4428,11 +4383,9 @@ function ScheduleTab({ schedule, mappings, plants, onPlantAdded }: {
   const isBlockMatched = (e: PlantScheduleEntry) =>
     (e.code && matchedCodes.has(e.code.trim())) || matchedNames.has(e.plantName)
 
-  const isDbMatched      = (e: PlantScheduleEntry) => existsExactInLocalDatabase(e.plantName, plants, e.scientificName)
   const blockMatchedCount = schedule.entries.filter(isBlockMatched).length
   const noBlockCount      = schedule.entries.length - blockMatchedCount
-  const dbCount           = schedule.entries.filter(isDbMatched).length
-  const missingCount      = schedule.entries.length - dbCount
+  const dbCount           = schedule.entries.filter(e => e.dbMatched).length
 
   return (
     <div>
@@ -4452,11 +4405,6 @@ function ScheduleTab({ schedule, mappings, plants, onPlantAdded }: {
         <div className="px-4 py-2.5 rounded-xl border border-stone-200 bg-stone-50 text-stone-600 text-sm font-medium">
           植栽資料庫比對 {dbCount} 筆
         </div>
-        {missingCount > 0 && (
-          <div className="px-4 py-2.5 rounded-xl border border-amber-200 bg-amber-50 text-amber-800 text-sm font-medium">
-            資料庫查無 <strong>{missingCount}</strong> 筆（可於下表逐筆自動搜尋官方資料補建）
-          </div>
-        )}
       </div>
 
       {schedule.headerRow && (
@@ -4535,25 +4483,11 @@ function ScheduleTab({ schedule, mappings, plants, onPlantAdded }: {
                 </td>
                 {/* 資料庫對應 */}
                 <td className="px-4 py-2.5">
-                  {isDbMatched(e)
+                  {e.dbMatched
                     ? <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs">
                         <CheckCircle size={10} />已比對
                       </span>
-                    : searchStates[e.plantName] === 'searching'
-                    ? <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-50 border border-blue-200 text-blue-600 text-xs animate-pulse">
-                        搜尋官方資料中…
-                      </span>
-                    : (
-                      <div className="flex flex-col gap-1 items-start">
-                        <button onClick={() => runAutoSearch(e)}
-                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-stone-100 border border-stone-300 text-stone-600 text-xs hover:bg-stone-200 hover:border-stone-400">
-                          <HelpCircle size={10} />未比對・自動搜尋
-                        </button>
-                        {searchStates[e.plantName] === 'failed' && (
-                          <p className="text-[10px] text-amber-600 max-w-[160px]">{failureNotes[e.plantName]}</p>
-                        )}
-                      </div>
-                    )}
+                    : <span className="text-xs text-stone-300">未比對</span>}
                 </td>
                 {/* 信心 */}
                 <td className="px-4 py-2.5">
@@ -4574,20 +4508,6 @@ function ScheduleTab({ schedule, mappings, plants, onPlantAdded }: {
           </tbody>
         </table>
       </div>
-      {/* 新增植栽資料確認視窗 */}
-      {activeSearch && (
-        <PlantAutoAddModal
-          queryName={activeSearch.queryName}
-          result={activeSearch.result}
-          draft={activeSearch.draft}
-          onConfirm={(record) => {
-            onPlantAdded(record)
-            setActiveSearch(null)
-          }}
-          onSkip={() => setActiveSearch(null)}
-          onClose={() => setActiveSearch(null)}
-        />
-      )}
     </div>
   )
 }

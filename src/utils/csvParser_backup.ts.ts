@@ -4,100 +4,48 @@ import type {
   ImportResult,
 } from '@/types/csvPlant'
 
-// ── Header-name-based column mapping ──────────────────────────────────────────
-// 改用「讀取 CSV header 名稱 → 對應欄位」，不再依賴固定欄位順序。
-// 即使欄位順序改變、或新增欄位，只要 header 文字對得上，資料就不會錯位。
-// 每個欄位可接受多個慣用寫法（別名），涵蓋舊版匯出檔與手動整理檔常見的用字差異。
-type FieldKey = keyof CsvPlantRecord | 'imageUrl'
+// ── Column index map (0-based, matches CSV header order) ─────────────────────
+const COL = {
+  name:               0,
+  category:           1,
+  subCategory:        2,
+  scientificName:     3,
+  height:             4,
+  crownWidth:         5,
+  trunkDiameter:      6,
+  treeForm:           7,
+  flowerColor:        8,
+  flowerMonth:        9,
+  flowerPeriod:       10,
+  nativeStatus:       11,
+  flowerSupplement:   12,
+  soilDepth:          13,
+  biodiversityValue:  14,
+  maintenanceNote:    15,
+  price:              16,
+  plantingSpacing:    17,
+  referencePageNo:    18,
+  referenceNote:      19,
+  officialUrl:        20,
+  remarks:            21,
+  sunRequirement:     22,
+  droughtTolerance:   23,
+  wetTolerance:       24,
+  waterRequirement:   25,
+  waterToleranceTag:  26,
+  sunWaterSource:     27,
+  sunWaterSourceUrl:  28,
+  verificationStatus: 29,
+  verifiedAt:         30,
+  verificationSummary:31,
+  imageUrl:           32,   // 圖片網址（選用欄，匯出時自動附加）
+  soilPh:             33,   // 土壤酸鹼性（選用欄）
+  soilPhRange:        34,   // 建議 pH 範圍（選用欄）
+  soilTexture:        35,   // 土壤質地（選用欄）
+  soilAmendment:      36,   // 客土改良需求（選用欄）
+} as const
 
-const HEADER_ALIASES: Record<FieldKey, string[]> = {
-  id:                  [],   // 不從 CSV 讀取，程式自動產生
-  name:                ['植物名稱', '中文名稱', '名稱'],
-  category:            ['喬木.灌木.草本', '喬木/灌木/草本', '分類', '大分類'],
-  normalizedCategory:  [],   // 由 category 推導，不從 CSV 讀取
-  subCategory:         ['細分類', '子分類'],
-  scientificName:      ['學名'],
-
-  height:              ['樹高'],
-  crownWidth:          ['樹冠'],
-  trunkDiameter:       ['米徑'],
-  treeForm:            ['樹型'],
-  soilDepth:           ['覆土深度'],
-  plantingSpacing:     ['種植株距', '建議種植株距'],
-
-  flowerColor:         ['花色'],
-  flowerMonth:         ['花期月份'],
-  flowerPeriod:        ['花期(花色-月份)', '花期（花色-月份）', '花期'],
-  flowerSupplement:    ['花期花色補充'],
-
-  nativeStatus:        ['台灣原生種.外來種', '台灣原生種/外來種', '原生/外來'],
-  biodiversityValue:   ['誘鳥誘蝶', '生態價值'],
-
-  maintenanceNote:     ['維護管理', '維護管理備註'],
-  maintenanceLevel:    [],   // 由 maintenanceNote 推導，不從 CSV 讀取
-
-  sunRequirement:      ['日照需求'],
-  droughtTolerance:    ['耐旱性'],
-  wetTolerance:        ['耐濕性'],
-  waterRequirement:    ['水分需求'],
-  waterToleranceTag:   ['水分耐受標籤'],
-  drainageSensitivity: [],   // 由 wetTolerance 推導，不從 CSV 讀取
-
-  soilPh:              ['土壤酸鹼性'],
-  soilPhRange:         ['pH範圍', 'pH 範圍', '建議pH範圍', '建議 pH 範圍'],
-  soilTexture:         ['土壤質地'],
-  soilAmendment:       ['客土改良需求', '客土改良'],
-
-  // ── 新增欄位（缺漏植栽安全 / 落葉性資料）─────────────────────────────────────
-  minimumPlantSpacing: ['最小種植間距'],
-  leafDropStatus:      ['是否容易落葉', '落葉性'],
-  toxicity:            ['有無毒性', '毒性'],
-  plantSafetyNote:     ['植栽安全備註'],
-
-  riskTags:            [],   // 由多個欄位推導，不從 CSV 讀取
-
-  price:               ['價格資訊', '參考價格'],
-  referencePageNo:     ['圖鑑頁碼'],
-  referenceNote:       ['圖鑑資料備註'],
-  officialUrl:         ['官方資料連結'],
-  remarks:             ['備註'],
-  sunWaterSource:      ['日照水分資料來源'],
-  sunWaterSourceUrl:   ['日照水分來源網址'],
-  verificationStatus:  ['日照水分資料判定'],
-  verifiedAt:          ['日照水分查核日期'],
-  verificationSummary: ['日照水分查核摘要'],
-
-  imageUrl:            ['圖片網址', '照片網址', 'imageUrl', 'Image URL'],
-
-  reviewNote:          [],   // 程式自動產生，不從 CSV 讀取
-  dataComplete:        [],   // 程式自動產生，不從 CSV 讀取
-  isAutoSourced:       [],
-  autoSourceFields:    [],
-}
-
-/** 正規化 header 文字以利比對（去除全形/半形空白、統一大小寫）*/
-function normalizeHeader(h: string): string {
-  return h.replace(/[\s\u3000]+/g, '').toLowerCase()
-}
-
-/** 依 headers 陣列建立「欄位 key → 欄位索引」的對照表 */
-function buildColumnIndex(headers: string[]): Partial<Record<FieldKey, number>> {
-  const normalizedHeaders = headers.map(normalizeHeader)
-  const index: Partial<Record<FieldKey, number>> = {}
-  for (const [key, aliases] of Object.entries(HEADER_ALIASES) as [FieldKey, string[]][]) {
-    if (aliases.length === 0) continue
-    for (const alias of aliases) {
-      const idx = normalizedHeaders.indexOf(normalizeHeader(alias))
-      if (idx !== -1) { index[key] = idx; break }
-    }
-  }
-  return index
-}
-
-const REQUIRED_FIELDS: FieldKey[] = ['name', 'category', 'sunRequirement', 'waterRequirement']
-const REQUIRED_FIELD_LABELS: Record<string, string> = {
-  name: '植物名稱', category: '喬木.灌木.草本', sunRequirement: '日照需求', waterRequirement: '水分需求',
-}
+const REQUIRED_COLUMNS = ['植物名稱', '喬木.灌木.草本', '日照需求', '水分需求']
 
 // ── Derivation helpers ────────────────────────────────────────────────────────
 
@@ -165,7 +113,7 @@ function deriveDrainageSensitivity(wet: WetTolerance): DrainageSensitivity {
 
 function deriveRiskTags(
   water: WaterReq, drought: DroughtTolerance, wet: WetTolerance,
-  sun: SunReq, maintenance: string, toxicity?: string,
+  sun: SunReq, maintenance: string
 ): string[] {
   const tags: string[] = []
   if (wet === '不耐積水') tags.push('排水敏感', '積水風險')
@@ -179,7 +127,6 @@ function deriveRiskTags(
   if (maintenance.includes('定期修剪') || maintenance.includes('修剪')) tags.push('修剪需求')
   if (maintenance.includes('支柱')) tags.push('需立支柱')
   if (maintenance.includes('病蟲') || maintenance.includes('蟲害') || maintenance.includes('病害')) tags.push('病蟲害注意')
-  if (toxicity && /有毒|毒性(強|中)|誤食|接觸.{0,2}(過敏|中毒)/.test(toxicity)) tags.push('有毒性注意')
   return [...new Set(tags)]
 }
 
@@ -187,7 +134,7 @@ function buildReviewNote(p: {
   name: string; category: string; subCategory: string
   sun: SunReq; water: WaterReq; drought: DroughtTolerance; wet: WetTolerance
   soilDepth: string; maintenance: string; height: string; spacing: string
-  verificationStatus: string; toxicity?: string; leafDropStatus?: string; safetyNote?: string
+  verificationStatus: string
 }): string {
   const catLabel = p.subCategory ? `${p.category}（${p.subCategory}）` : p.category
   let note = `${p.name}為${catLabel}`
@@ -209,13 +156,6 @@ function buildReviewNote(p: {
     note += `養護要點：${short}`
   }
 
-  if (p.toxicity && !/^(無|無明確|低毒性或無明確毒性資料)/.test(p.toxicity)) {
-    note += `安全提醒：${p.toxicity}。`
-  }
-  if (p.leafDropStatus && /落葉性強|容易落葉/.test(p.leafDropStatus)) {
-    note += `落葉性：${p.leafDropStatus}。`
-  }
-
   const isVerified = p.verificationStatus && !p.verificationStatus.includes('待查') && !p.verificationStatus.includes('初步')
   if (!isVerified) note += '（日照水分資料屬初步判定，建議人工確認）'
 
@@ -232,17 +172,14 @@ export function parsePlantCsv(text: string): ImportResult {
 
   const headerLine = lines[0]
   const headers = headerLine.split('\t').map(h => h.trim())
-  const colIndex = buildColumnIndex(headers)
 
-  // 缺少必要欄位（依欄位名稱比對，不是位置）
-  const missingColumns = REQUIRED_FIELDS
-    .filter(key => colIndex[key] === undefined)
-    .map(key => REQUIRED_FIELD_LABELS[key] ?? key)
-
+  // Check required columns
+  const missingColumns = REQUIRED_COLUMNS.filter(req => !headers.includes(req))
   const columnMap: Record<string, boolean> = {}
-  for (const key of Object.keys(HEADER_ALIASES) as FieldKey[]) {
-    columnMap[key] = colIndex[key] !== undefined
-  }
+  Object.entries(COL).forEach(([key]) => {
+    const humanName = headers[COL[key as keyof typeof COL]] ?? ''
+    columnMap[key] = humanName !== ''
+  })
 
   const plants: CsvPlantRecord[] = []
   const imageUrls: Record<string, string> = {}
@@ -250,29 +187,23 @@ export function parsePlantCsv(text: string): ImportResult {
 
   for (let i = 1; i < lines.length; i++) {
     const cols = lines[i].split('\t')
-    if (cols.length < 2) { skippedRows++; continue }
+    if (cols.length < 4) { skippedRows++; continue }
 
-    // 依欄位名稱對應到的索引取值；該欄位若不在此 CSV 中（colIndex 無此 key）則回傳空字串，
-    // 不會誤讀到其他欄位的內容（這是修正舊版「依固定順序取值」錯位問題的核心）。
-    const get = (key: FieldKey): string => {
-      const idx = colIndex[key]
-      return idx === undefined ? '' : (cols[idx] ?? '').trim()
-    }
-
-    const name = get('name')
+    const get = (idx: number) => (cols[idx] ?? '').trim()
+    const name = get(COL.name)
     if (!name) { skippedRows++; continue }
 
-    const sunRaw      = get('sunRequirement')
-    const waterRaw     = get('waterRequirement')
-    const droughtRaw   = get('droughtTolerance')
-    const wetRaw        = get('wetTolerance')
-    const mainNote      = get('maintenanceNote')
-    const categoryRaw   = get('category')
-    const subCat        = get('subCategory')
-    const height         = get('height')
-    const spacing        = get('plantingSpacing')
-    const soilDepth       = get('soilDepth')
-    const verStatus        = get('verificationStatus')
+    const sunRaw      = get(COL.sunRequirement)
+    const waterRaw    = get(COL.waterRequirement)
+    const droughtRaw  = get(COL.droughtTolerance)
+    const wetRaw      = get(COL.wetTolerance)
+    const mainNote    = get(COL.maintenanceNote)
+    const categoryRaw = get(COL.category)
+    const subCat      = get(COL.subCategory)
+    const height      = get(COL.height)
+    const spacing     = get(COL.plantingSpacing)
+    const soilDepth   = get(COL.soilDepth)
+    const verStatus   = get(COL.verificationStatus)
 
     const sun    = normalizeSun(sunRaw)
     const water  = normalizeWater(waterRaw)
@@ -280,8 +211,7 @@ export function parsePlantCsv(text: string): ImportResult {
     const wet    = normalizeWet(wetRaw)
     const mLevel = deriveMaintenanceLevel(mainNote, water, wet)
     const drain  = deriveDrainageSensitivity(wet)
-    const toxicityRaw = get('toxicity')
-    const riskTags = deriveRiskTags(water, drought, wet, sun, mainNote, toxicityRaw)
+    const riskTags = deriveRiskTags(water, drought, wet, sun, mainNote)
     const dataComplete = sun !== '待查' && water !== '待查' && drought !== '待查' && wet !== '待查'
 
     const record: CsvPlantRecord = {
@@ -290,59 +220,54 @@ export function parsePlantCsv(text: string): ImportResult {
       category: categoryRaw,
       normalizedCategory: normalizeCategory(categoryRaw),
       subCategory: subCat,
-      scientificName: get('scientificName'),
+      scientificName: get(COL.scientificName),
       height,
-      crownWidth: get('crownWidth'),
-      trunkDiameter: get('trunkDiameter'),
-      treeForm: get('treeForm'),
+      crownWidth: get(COL.crownWidth),
+      trunkDiameter: get(COL.trunkDiameter),
+      treeForm: get(COL.treeForm),
       soilDepth,
       plantingSpacing: spacing,
-      flowerColor: get('flowerColor'),
-      flowerMonth: get('flowerMonth'),
-      flowerPeriod: get('flowerPeriod'),
-      flowerSupplement: get('flowerSupplement'),
-      nativeStatus: get('nativeStatus'),
-      biodiversityValue: get('biodiversityValue'),
+      flowerColor: get(COL.flowerColor),
+      flowerMonth: get(COL.flowerMonth),
+      flowerPeriod: get(COL.flowerPeriod),
+      flowerSupplement: get(COL.flowerSupplement),
+      nativeStatus: get(COL.nativeStatus),
+      biodiversityValue: get(COL.biodiversityValue),
       maintenanceNote: mainNote,
       maintenanceLevel: mLevel,
       sunRequirement: sun,
       droughtTolerance: drought,
       wetTolerance: wet,
       waterRequirement: water,
-      waterToleranceTag: get('waterToleranceTag'),
+      waterToleranceTag: get(COL.waterToleranceTag),
       drainageSensitivity: drain,
       riskTags,
-      price: get('price'),
-      referencePageNo: get('referencePageNo'),
-      referenceNote: get('referenceNote'),
-      officialUrl: get('officialUrl'),
-      remarks: get('remarks'),
-      sunWaterSource: get('sunWaterSource'),
-      sunWaterSourceUrl: get('sunWaterSourceUrl'),
+      price: get(COL.price),
+      referencePageNo: get(COL.referencePageNo),
+      referenceNote: get(COL.referenceNote),
+      officialUrl: get(COL.officialUrl),
+      remarks: get(COL.remarks),
+      sunWaterSource: get(COL.sunWaterSource),
+      sunWaterSourceUrl: get(COL.sunWaterSourceUrl),
       verificationStatus: verStatus,
-      verifiedAt: get('verifiedAt'),
-      verificationSummary: get('verificationSummary'),
-      soilPh:        get('soilPh'),
-      soilPhRange:   get('soilPhRange'),
-      soilTexture:   get('soilTexture'),
-      soilAmendment: get('soilAmendment'),
-      minimumPlantSpacing: get('minimumPlantSpacing'),
-      leafDropStatus:      get('leafDropStatus'),
-      toxicity:            toxicityRaw,
-      plantSafetyNote:     get('plantSafetyNote'),
+      verifiedAt: get(COL.verifiedAt),
+      verificationSummary: get(COL.verificationSummary),
+      soilPh:        get(COL.soilPh),
+      soilPhRange:   get(COL.soilPhRange),
+      soilTexture:   get(COL.soilTexture),
+      soilAmendment: get(COL.soilAmendment),
       reviewNote: buildReviewNote({
         name, category: categoryRaw, subCategory: subCat,
         sun, water, drought, wet,
         soilDepth, maintenance: mainNote, height, spacing,
         verificationStatus: verStatus,
-        toxicity: toxicityRaw, leafDropStatus: get('leafDropStatus'), safetyNote: get('plantSafetyNote'),
       }),
       dataComplete,
     }
     plants.push(record)
 
-    // 若 CSV 含圖片網址欄，記錄下來（依欄位名稱找到，不是固定第 33 欄）
-    const imgUrl = get('imageUrl')
+    // 若 CSV 含圖片網址欄（col 32），記錄下來
+    const imgUrl = get(COL.imageUrl)
     if (imgUrl) imageUrls[name] = imgUrl
   }
 

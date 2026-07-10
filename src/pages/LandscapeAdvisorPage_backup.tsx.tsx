@@ -14,8 +14,6 @@ import {
   parsePlantCsv, waterScore, sunConflictLevel, drainageConflictLevel,
 } from '@/utils/csvParser'
 import { getAdvisorReply, type AdvisorReply } from '@/utils/plantAdvisor'
-import { buildMergePreview, applyMerge } from '@/utils/plantCsvMerge'
-import type { ImportMode, MergePreview, MergeApplyResult } from '@/types/plantMerge'
 import type {
   CsvPlantRecord, SelectedCsvPlant, ImportResult, PlantStatus,
   PlantImageData, ImageStore, CandidatePhoto, ImageReviewStatus,
@@ -1599,7 +1597,6 @@ function PlantDetailDrawer({ plant, onClose, onAdd, added, imageData, onSaveImag
               { label: '樹冠',     value: plant.crownWidth },
               { label: '覆土深度', value: plant.soilDepth },
               { label: '種植株距', value: plant.plantingSpacing },
-              { label: '最小種植間距', value: plant.minimumPlantSpacing },
               { label: '台灣原生', value: plant.nativeStatus },
               { label: '誘鳥誘蝶', value: plant.biodiversityValue ? '是' : '' },
               { label: '米徑',     value: plant.trunkDiameter },
@@ -1612,38 +1609,6 @@ function PlantDetailDrawer({ plant, onClose, onAdd, added, imageData, onSaveImag
             ))}
           </div>
         </div>
-
-        {/* ④-2 植栽安全（落葉性 / 毒性 / 安全備註）*/}
-        {(plant.leafDropStatus || plant.toxicity || plant.plantSafetyNote) && (
-          <div>
-            <p className="text-xs font-semibold text-stone-500 mb-3 uppercase tracking-wide">植栽安全</p>
-            <div className="space-y-2">
-              {(plant.leafDropStatus || plant.toxicity) && (
-                <div className="flex gap-2 flex-wrap">
-                  {plant.leafDropStatus && (
-                    <span className="text-xs px-2.5 py-1 rounded-full bg-stone-100 border border-stone-200 text-stone-600">
-                      落葉性：{plant.leafDropStatus}
-                    </span>
-                  )}
-                  {plant.toxicity && (
-                    <span className={`text-xs px-2.5 py-1 rounded-full border ${
-                      /有毒|毒性(強|中)/.test(plant.toxicity)
-                        ? 'bg-red-50 border-red-200 text-red-700'
-                        : 'bg-stone-100 border-stone-200 text-stone-600'
-                    }`}>
-                      毒性：{plant.toxicity}
-                    </span>
-                  )}
-                </div>
-              )}
-              {plant.plantSafetyNote && (
-                <p className="text-xs text-stone-500 bg-stone-50 border border-stone-100 rounded-xl px-3 py-2.5 leading-relaxed">
-                  {plant.plantSafetyNote}
-                </p>
-              )}
-            </div>
-          </div>
-        )}
 
         {/* ⑤ 養護管理 */}
         {plant.maintenanceNote && (
@@ -1737,7 +1702,6 @@ function PlantDetailModal({ plant, onClose, onAdd, added }: {
                 { label: '樹冠', value: plant.crownWidth },
                 { label: '覆土深度', value: plant.soilDepth },
                 { label: '種植株距', value: plant.plantingSpacing },
-                { label: '最小種植間距', value: plant.minimumPlantSpacing },
                 { label: '台灣原生', value: plant.nativeStatus },
                 { label: '誘鳥誘蝶', value: plant.biodiversityValue ? '是' : '—' },
               ].filter(f => f.value).map(f => (
@@ -1747,13 +1711,6 @@ function PlantDetailModal({ plant, onClose, onAdd, added }: {
                 </div>
               ))}
             </div>
-            {(plant.leafDropStatus || plant.toxicity || plant.plantSafetyNote) && (
-              <p className="text-xs text-stone-500 mt-2">
-                {plant.leafDropStatus && `落葉性：${plant.leafDropStatus}　`}
-                {plant.toxicity && `毒性：${plant.toxicity}　`}
-                {plant.plantSafetyNote && plant.plantSafetyNote}
-              </p>
-            )}
           </div>
           {/* Risk tags */}
           {plant.riskTags.length > 0 && (
@@ -2411,91 +2368,39 @@ function PlantDatabaseModal({ plants, onClose, onSelect, selectedIds, imageStore
 
 // ── CSV Import Modal ──────────────────────────────────────────────────────────
 
-function CsvImportModal({ onClose, existingPlants, onApply }: {
+function CsvImportModal({ onClose, onImported }: {
   onClose: () => void
-  existingPlants: CsvPlantRecord[]
-  onApply: (finalPlants: CsvPlantRecord[], applyResult: MergeApplyResult, imageUrls: Record<string, string>) => void
+  onImported: (result: ImportResult) => void
 }) {
-  const [phase, setPhase] = useState<'idle' | 'processing' | 'preview' | 'result' | 'error'>('idle')
-  const [parsed, setParsed] = useState<ImportResult | null>(null)
-  const [preview, setPreview] = useState<MergePreview | null>(null)
-  const [mode, setMode] = useState<ImportMode>('merge')
-  const [replaceConfirmed, setReplaceConfirmed] = useState(false)
-  const [resolvedDuplicates, setResolvedDuplicates] = useState<Set<number>>(new Set())
-  const [applyResult, setApplyResult] = useState<MergeApplyResult | null>(null)
+  const [phase, setPhase] = useState<'idle' | 'processing' | 'done' | 'error'>('idle')
+  const [result, setResult] = useState<ImportResult | null>(null)
   const [errMsg, setErrMsg] = useState('')
   const [dragOver, setDragOver] = useState(false)
-  const [showDiffs, setShowDiffs] = useState<Set<number>>(new Set())
   const inputRef = useRef<HTMLInputElement>(null)
 
   const handleFile = async (file: File) => {
     setPhase('processing')
     try {
       const r = await importFromFile(file)
-      if (r.plants.length === 0) {
-        setErrMsg('CSV 解析結果沒有任何有效植物列，請確認檔案內容與格式（Tab 分隔、UTF-8 編碼）。')
-        setPhase('error')
-        return
-      }
-      setParsed(r)
-      setPreview(buildMergePreview(r, existingPlants, 'merge'))
-      setMode('merge')
-      setReplaceConfirmed(false)
-      setResolvedDuplicates(new Set())
-      setPhase('preview')
+      setResult(r)
+      setPhase('done')
     } catch {
       setErrMsg('檔案讀取失敗，請確認檔案格式。')
       setPhase('error')
     }
   }
 
-  const switchMode = (m: ImportMode) => {
-    if (!parsed) return
-    setMode(m)
-    setReplaceConfirmed(false)
-    setPreview(buildMergePreview(parsed, existingPlants, m))
-  }
-
-  const toggleDuplicate = (rowIndex: number) => {
-    setResolvedDuplicates(prev => {
-      const next = new Set(prev)
-      if (next.has(rowIndex)) next.delete(rowIndex); else next.add(rowIndex)
-      return next
-    })
-  }
-
-  const toggleDiffView = (rowIndex: number) => {
-    setShowDiffs(prev => {
-      const next = new Set(prev)
-      if (next.has(rowIndex)) next.delete(rowIndex); else next.add(rowIndex)
-      return next
-    })
-  }
-
-  const handleConfirmApply = () => {
-    if (!preview || !parsed) return
-    if (mode === 'replace' && !replaceConfirmed) return   // 安全門檻：完全取代必須勾選確認
-    const result = applyMerge(preview, existingPlants, resolvedDuplicates)
-    setApplyResult(result)
-    setPhase('result')
-    onApply(result.finalPlants, result, parsed.imageUrls)
-  }
-
-  const duplicateRows = preview?.rows.filter(r => r.action === 'duplicate') ?? []
-  const updateRows = preview?.rows.filter(r => r.action === 'update') ?? []
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[88vh] overflow-hidden flex flex-col">
-        <div className="flex items-center justify-between p-6 border-b border-stone-100 flex-shrink-0">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg">
+        <div className="flex items-center justify-between p-6 border-b border-stone-100">
           <div>
             <h2 className="text-lg font-semibold text-stone-800">匯入植栽資料庫 CSV</h2>
-            <p className="text-xs text-stone-400 mt-0.5">Tab 分隔格式，UTF-8 編碼・依欄位名稱對應，不受欄位順序影響</p>
+            <p className="text-xs text-stone-400 mt-0.5">Tab 分隔格式，UTF-8 編碼</p>
           </div>
           <button onClick={onClose} className="text-stone-400 hover:text-stone-600"><X size={20} /></button>
         </div>
-
-        <div className="p-6 space-y-4 overflow-y-auto flex-1">
+        <div className="p-6 space-y-4">
           {phase === 'idle' && (
             <div
               onDragOver={e => { e.preventDefault(); setDragOver(true) }}
@@ -2511,213 +2416,58 @@ function CsvImportModal({ onClose, existingPlants, onApply }: {
                 onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f) }} />
             </div>
           )}
-
           {phase === 'processing' && (
             <div className="py-10 text-center">
               <div className="w-10 h-10 border-4 border-green-700 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
               <p className="text-stone-600 font-medium">解析 CSV 資料中…</p>
             </div>
           )}
-
+          {phase === 'done' && result && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-3 p-3 bg-green-50 rounded-xl border border-green-100">
+                <CheckCircle size={18} className="text-green-600 flex-shrink-0" />
+                <div>
+                  <p className="text-sm font-medium text-stone-800">匯入成功</p>
+                  <p className="text-xs text-stone-500">共 {result.totalRows} 列，成功匯入 {result.successRows} 筆，跳過 {result.skippedRows} 筆</p>
+                </div>
+              </div>
+              {result.missingColumns.length > 0 && (
+                <div className="flex gap-2 p-3 bg-amber-50 rounded-xl border border-amber-100">
+                  <AlertTriangle size={15} className="text-amber-500 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-xs font-medium text-stone-700">缺漏欄位</p>
+                    <p className="text-xs text-stone-500 mt-0.5">{result.missingColumns.join('、')}</p>
+                  </div>
+                </div>
+              )}
+              <div className="bg-stone-50 rounded-xl p-3 grid grid-cols-2 gap-1.5">
+                {Object.entries(result.columnMap).filter(([, v]) => v).map(([k]) => (
+                  <div key={k} className="flex items-center gap-1.5 text-xs text-stone-600">
+                    <CheckCircle size={11} className="text-green-500 flex-shrink-0" />{k}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           {phase === 'error' && (
             <div className="flex gap-2 p-4 bg-red-50 rounded-xl border border-red-100">
               <XCircle size={16} className="text-red-500 flex-shrink-0 mt-0.5" />
               <p className="text-sm text-red-700">{errMsg}</p>
             </div>
           )}
-
-          {phase === 'preview' && preview && parsed && (
-            <div className="space-y-4">
-              {/* 匯入模式切換 */}
-              <div className="flex gap-2">
-                <button onClick={() => switchMode('merge')}
-                  className={`flex-1 px-4 py-2.5 rounded-xl text-sm font-medium border transition-colors ${
-                    mode === 'merge' ? 'bg-green-700 text-white border-green-700' : 'border-stone-200 text-stone-600 hover:bg-stone-50'
-                  }`}>
-                  合併更新（預設・保留現有資料）
-                </button>
-                <button onClick={() => switchMode('replace')}
-                  className={`flex-1 px-4 py-2.5 rounded-xl text-sm font-medium border transition-colors ${
-                    mode === 'replace' ? 'bg-red-600 text-white border-red-600' : 'border-stone-200 text-stone-600 hover:bg-stone-50'
-                  }`}>
-                  完全取代（清空重建）
-                </button>
-              </div>
-
-              {mode === 'replace' && (
-                <div className="flex gap-2 p-3 bg-red-50 border border-red-200 rounded-xl">
-                  <AlertTriangle size={16} className="text-red-500 flex-shrink-0 mt-0.5" />
-                  <div className="flex-1">
-                    <p className="text-sm text-red-700 font-medium">
-                      這會刪除現有資料庫中「不在這份 CSV 裡」的所有植物（{existingPlants.length} 筆現有資料，此 CSV 只有 {parsed.plants.length} 筆）。
-                    </p>
-                    <label className="flex items-center gap-2 mt-2 text-sm text-red-700 cursor-pointer">
-                      <input type="checkbox" checked={replaceConfirmed}
-                        onChange={e => setReplaceConfirmed(e.target.checked)} />
-                      我確認要完全取代，了解不在此 CSV 中的既有植物將被刪除
-                    </label>
-                  </div>
-                </div>
-              )}
-
-              {/* 預覽摘要（需求 6）*/}
-              <div className="grid grid-cols-2 gap-2">
-                <div className="p-3 bg-stone-50 rounded-xl border border-stone-200">
-                  <p className="text-xs text-stone-400">現有資料庫</p>
-                  <p className="text-lg font-bold text-stone-800">{preview.existingCount} 筆</p>
-                </div>
-                <div className="p-3 bg-stone-50 rounded-xl border border-stone-200">
-                  <p className="text-xs text-stone-400">新 CSV</p>
-                  <p className="text-lg font-bold text-stone-800">{preview.incomingCount} 筆</p>
-                </div>
-                <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200">
-                  <p className="text-xs text-emerald-600">預計新增</p>
-                  <p className="text-lg font-bold text-emerald-700">{preview.toAddCount} 筆</p>
-                </div>
-                <div className="p-3 bg-blue-50 rounded-xl border border-blue-200">
-                  <p className="text-xs text-blue-600">預計更新</p>
-                  <p className="text-lg font-bold text-blue-700">{preview.toUpdateCount} 筆</p>
-                </div>
-                <div className="p-3 bg-amber-50 rounded-xl border border-amber-200">
-                  <p className="text-xs text-amber-600">疑似重複（待確認）</p>
-                  <p className="text-lg font-bold text-amber-700">{preview.duplicateCount} 筆</p>
-                </div>
-                <div className={`p-3 rounded-xl border ${preview.willDeleteExisting ? 'bg-red-50 border-red-200' : 'bg-stone-50 border-stone-200'}`}>
-                  <p className={`text-xs ${preview.willDeleteExisting ? 'text-red-600' : 'text-stone-400'}`}>是否刪除舊資料</p>
-                  <p className={`text-sm font-bold mt-0.5 ${preview.willDeleteExisting ? 'text-red-700' : 'text-stone-600'}`}>
-                    {preview.willDeleteExisting ? `會刪除 ${preview.existingCount - preview.toAddCount} 筆` : '不會，全部保留'}
-                  </p>
-                </div>
-              </div>
-              <div className="flex gap-4 text-xs text-stone-500 px-1">
-                <span>新增欄位種類：{preview.newFieldCount}</span>
-                <span>有差異的欄位種類：{preview.conflictFieldCount}</span>
-                {preview.skippedRows > 0 && <span>CSV 內跳過（缺名稱等）：{preview.skippedRows} 列</span>}
-              </div>
-
-              {preview.missingColumns.length > 0 && (
-                <div className="flex gap-2 p-3 bg-amber-50 rounded-xl border border-amber-100">
-                  <AlertTriangle size={15} className="text-amber-500 flex-shrink-0 mt-0.5" />
-                  <div>
-                    <p className="text-xs font-medium text-stone-700">缺漏必要欄位</p>
-                    <p className="text-xs text-stone-500 mt-0.5">{preview.missingColumns.join('、')}</p>
-                  </div>
-                </div>
-              )}
-
-              <details className="border border-stone-200 rounded-xl overflow-hidden">
-                <summary className="px-3 py-2 bg-stone-50 text-xs font-medium text-stone-600 cursor-pointer select-none">
-                  欄位對應詳情（依名稱對應，與順序無關）
-                </summary>
-                <div className="p-3 grid grid-cols-2 gap-1.5">
-                  {Object.entries(parsed.columnMap).filter(([, v]) => v).map(([k]) => (
-                    <div key={k} className="flex items-center gap-1.5 text-xs text-stone-600">
-                      <CheckCircle size={11} className="text-green-500 flex-shrink-0" />{k}
-                    </div>
-                  ))}
-                </div>
-              </details>
-
-              {/* 疑似重複列表（需求 5：人工確認）*/}
-              {mode === 'merge' && duplicateRows.length > 0 && (
-                <div className="border border-amber-200 rounded-xl overflow-hidden">
-                  <div className="px-3 py-2 bg-amber-50 text-xs font-medium text-amber-700">
-                    疑似重複，需人工確認（勾選代表「仍視為新植物新增」，不勾選則略過）
-                  </div>
-                  <div className="max-h-48 overflow-y-auto divide-y divide-stone-100">
-                    {duplicateRows.map(r => (
-                      <label key={r.rowIndex} className="flex items-start gap-2 px-3 py-2 text-xs cursor-pointer hover:bg-stone-50">
-                        <input type="checkbox" className="mt-0.5"
-                          checked={resolvedDuplicates.has(r.rowIndex)}
-                          onChange={() => toggleDuplicate(r.rowIndex)} />
-                        <div>
-                          <p className="font-medium text-stone-700">第 {r.rowIndex} 列・{r.incoming.name}</p>
-                          <p className="text-stone-400 mt-0.5">{r.errorReason}</p>
-                        </div>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* 將被更新的植物明細（可展開看差異欄位）*/}
-              {mode === 'merge' && updateRows.length > 0 && (
-                <div className="border border-blue-200 rounded-xl overflow-hidden">
-                  <div className="px-3 py-2 bg-blue-50 text-xs font-medium text-blue-700">
-                    將被更新的植物（{updateRows.length} 筆，僅覆蓋新 CSV 有值的欄位）
-                  </div>
-                  <div className="max-h-48 overflow-y-auto divide-y divide-stone-100">
-                    {updateRows.map(r => (
-                      <div key={r.rowIndex} className="px-3 py-2 text-xs">
-                        <button onClick={() => toggleDiffView(r.rowIndex)}
-                          className="flex items-center gap-1.5 text-stone-700 font-medium hover:text-green-700">
-                          {showDiffs.has(r.rowIndex) ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-                          {r.incoming.name}
-                          <span className="text-stone-400 font-normal">
-                            （{r.matchType === 'scientific_name' ? '學名比對' : r.matchType === 'chinese_name' ? '中文名比對' : '別名比對'}
-                            ・{r.fieldDiffs?.length ?? 0} 個欄位有變動）
-                          </span>
-                        </button>
-                        {showDiffs.has(r.rowIndex) && r.fieldDiffs && r.fieldDiffs.length > 0 && (
-                          <div className="mt-1.5 ml-4 space-y-1">
-                            {r.fieldDiffs.map(d => (
-                              <p key={d.field} className="text-stone-400">
-                                <span className="text-stone-500">{String(d.field)}：</span>
-                                {d.oldValue ? <span className="line-through">{d.oldValue}</span> : <span className="italic">（空）</span>}
-                                {' → '}
-                                <span className="text-green-700">{d.newValue}</span>
-                              </p>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {phase === 'result' && applyResult && (
-            <div className="space-y-3">
-              <div className="flex items-center gap-3 p-3 bg-green-50 rounded-xl border border-green-100">
-                <CheckCircle size={18} className="text-green-600 flex-shrink-0" />
-                <p className="text-sm font-medium text-stone-800">已套用至植栽資料庫</p>
-              </div>
-              <div className="grid grid-cols-2 gap-2 text-sm">
-                <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200">成功新增：<strong>{applyResult.addedCount}</strong> 筆</div>
-                <div className="p-3 bg-blue-50 rounded-xl border border-blue-200">成功更新：<strong>{applyResult.updatedCount}</strong> 筆</div>
-                <div className="p-3 bg-stone-50 rounded-xl border border-stone-200">保留舊資料：<strong>{applyResult.keptCount}</strong> 筆</div>
-                <div className="p-3 bg-amber-50 rounded-xl border border-amber-200">跳過：<strong>{applyResult.skippedCount}</strong> 筆</div>
-                <div className="p-3 bg-red-50 rounded-xl border border-red-200 col-span-2">失敗：<strong>{applyResult.failedCount}</strong> 筆</div>
-              </div>
-              {applyResult.fieldErrors.length > 0 && (
-                <div className="p-3 bg-amber-50 rounded-xl border border-amber-100">
-                  <p className="text-xs font-medium text-stone-700 mb-1">欄位錯誤清單</p>
-                  {applyResult.fieldErrors.map((e, i) => <p key={i} className="text-xs text-stone-500">{e}</p>)}
-                </div>
-              )}
-            </div>
-          )}
         </div>
-
-        <div className="flex justify-end gap-3 px-6 py-4 border-t border-stone-100 flex-shrink-0">
+        <div className="flex justify-end gap-3 px-6 pb-6">
           <button onClick={onClose} className="px-4 py-2 rounded-xl border border-stone-200 text-sm text-stone-600 hover:bg-stone-50">
-            {phase === 'result' ? '關閉' : '取消'}
+            {phase === 'done' ? '關閉' : '取消'}
           </button>
-          {phase === 'preview' && (
-            <button onClick={handleConfirmApply}
-              disabled={mode === 'replace' && !replaceConfirmed}
-              className={`px-5 py-2 rounded-xl text-sm font-medium ${
-                mode === 'replace'
-                  ? 'bg-red-600 text-white hover:bg-red-700 disabled:bg-stone-200 disabled:text-stone-400 disabled:cursor-not-allowed'
-                  : 'bg-green-700 text-white hover:bg-green-800'
-              }`}>
-              {mode === 'replace' ? '確認完全取代' : `確認合併（新增 ${preview?.toAddCount ?? 0}／更新 ${preview?.toUpdateCount ?? 0}）`}
+          {phase === 'done' && result && (
+            <button onClick={() => { onImported(result); onClose() }}
+              className="px-5 py-2 rounded-xl bg-green-700 text-white text-sm font-medium hover:bg-green-800">
+              套用為植栽資料庫
             </button>
           )}
-          {phase === 'error' && (
-            <button onClick={() => { setPhase('idle') }}
+          {(phase === 'error' || phase === 'idle') && phase !== 'idle' && (
+            <button onClick={() => { setPhase('idle'); setResult(null) }}
               className="px-4 py-2 rounded-xl bg-stone-700 text-white text-sm hover:bg-stone-800">重新上傳</button>
           )}
         </div>
@@ -2912,14 +2662,14 @@ export default function LandscapeAdvisorPage({
     setResult(null)
   }, [])
 
-  const handleCsvImported = (finalPlants: CsvPlantRecord[], mergeResult: MergeApplyResult, imageUrls: Record<string, string>) => {
-    setAllPlants(finalPlants)
-    savePlantsToStorage(finalPlants)
+  const handleCsvImported = (res: ImportResult) => {
+    setAllPlants(res.plants)
+    savePlantsToStorage(res.plants)
     // 若 CSV 含圖片網址欄，自動合併進 imageStore（不覆蓋本機已上傳的檔案）
-    if (Object.keys(imageUrls).length > 0) {
+    if (Object.keys(res.imageUrls).length > 0) {
       const current = loadImageStore()
       const merged = { ...current }
-      for (const [plantName, url] of Object.entries(imageUrls)) {
+      for (const [plantName, url] of Object.entries(res.imageUrls)) {
         if (!merged[plantName]?.uploadedDataUrl) {
           merged[plantName] = { ...(merged[plantName] ?? {}), imageUrl: url, hasImage: true }
         }
@@ -2928,12 +2678,8 @@ export default function LandscapeAdvisorPage({
       setImageStore(merged)
     }
     setDbStatus('loaded')
-    // 合併更新模式（keptCount > 0 代表有保留舊資料）不清空目前的植栽配置；
-    // 完全取代模式（keptCount === 0 且有動到資料）才清空，避免選配內容對應到已被替換的舊資料。
-    if (mergeResult.keptCount === 0 && (mergeResult.addedCount > 0 || mergeResult.updatedCount > 0)) {
-      setSelectedPlants([])
-      setResult(null)
-    }
+    setSelectedPlants([])
+    setResult(null)
   }
 
   const handleExport = () => {
@@ -4099,7 +3845,7 @@ tfoot{display:table-footer-group}
         />
       )}
       {showCsvImport && (
-        <CsvImportModal onClose={() => setShowCsvImport(false)} existingPlants={allPlants} onApply={handleCsvImported} />
+        <CsvImportModal onClose={() => setShowCsvImport(false)} onImported={handleCsvImported} />
       )}
     </div>}
     </>
