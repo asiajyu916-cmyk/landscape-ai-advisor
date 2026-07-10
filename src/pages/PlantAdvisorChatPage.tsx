@@ -11,7 +11,7 @@
 // 不觸碰 DXF / HATCH / PDF 審查 / 分區判讀——只讀 localStorage 裡的植栽資料庫，
 // 卡片外觀直接重用 LandscapeAdvisorPage 匯出的 PlantCardItem，不重新設計樣式。
 
-import { useState, useMemo, useEffect, useCallback } from 'react'
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import { Search, Loader2, Sparkles, X as XIcon } from 'lucide-react'
 import type { CsvPlantRecord } from '@/types/csvPlant'
 import { loadPlantsFromStorage } from '@/data/plantStore'
@@ -54,6 +54,41 @@ export default function PlantAdvisorChatPage() {
   const [apiLoading, setApiLoading] = useState(false)
   const [apiSuggestions, setApiSuggestions] = useState<ApiSuggestion[] | null>(null)
   const [apiNote, setApiNote] = useState('')
+
+  // ── 左右面板可拖曳調整寬度 ────────────────────────────────────────────────
+  const [chatWidth, setChatWidth] = useState(380)   // 對話區寬度（px），預設跟原本固定寬度一致
+  const containerRef = useRef<HTMLDivElement>(null)
+  const draggingRef = useRef(false)
+  const MIN_CHAT_WIDTH = 280
+  const MAX_CHAT_WIDTH = 720
+
+  const handleDragStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    draggingRef.current = true
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+  }, [])
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!draggingRef.current || !containerRef.current) return
+      const left = containerRef.current.getBoundingClientRect().left
+      const next = Math.min(MAX_CHAT_WIDTH, Math.max(MIN_CHAT_WIDTH, e.clientX - left))
+      setChatWidth(next)
+    }
+    const handleMouseUp = () => {
+      if (!draggingRef.current) return
+      draggingRef.current = false
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+    window.addEventListener('mousemove', handleMouseMove)
+    window.addEventListener('mouseup', handleMouseUp)
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove)
+      window.removeEventListener('mouseup', handleMouseUp)
+    }
+  }, [])
 
   useEffect(() => {
     setPlants(loadPlantsFromStorage() ?? [])
@@ -205,9 +240,9 @@ export default function PlantAdvisorChatPage() {
         )}
       </div>
 
-      <div className="flex-1 flex overflow-hidden">
-        {/* 左側：對話區 */}
-        <div className="w-[380px] flex-shrink-0 border-r border-stone-200 bg-white flex flex-col">
+      <div ref={containerRef} className="flex-1 flex overflow-hidden">
+        {/* 左側：對話區（寬度可拖曳調整）*/}
+        <div style={{ width: chatWidth }} className="flex-shrink-0 bg-white flex flex-col">
           <div className="flex-1 overflow-y-auto p-4 space-y-3">
             {messages.map((m, i) => (
               <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
@@ -233,6 +268,14 @@ export default function PlantAdvisorChatPage() {
           </div>
         </div>
 
+        {/* 拖曳分隔線 */}
+        <div
+          onMouseDown={handleDragStart}
+          title="拖曳調整寬度"
+          className="w-1.5 flex-shrink-0 cursor-col-resize bg-stone-100 hover:bg-green-200 active:bg-green-300 transition-colors relative group border-x border-stone-200">
+          <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 bg-stone-300 group-hover:bg-green-500" />
+        </div>
+
         {/* 右側：符合條件的植栽卡片 */}
         <div className="flex-1 overflow-y-auto p-5">
           <div className="flex items-center justify-between mb-4">
@@ -244,7 +287,7 @@ export default function PlantAdvisorChatPage() {
           </div>
 
           {matches.length > 0 ? (
-            <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))' }}>
               {matches.map(p => (
                 <PlantCardItem key={p.id} plant={p} imageData={imageStore[p.name]}
                   added={false} fresh={false} isActive={false}
