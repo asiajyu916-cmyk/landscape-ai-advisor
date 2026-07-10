@@ -1389,7 +1389,7 @@ export function PlantCardItem({ plant, imageData, added, fresh, isActive, onDeta
 
 // ── Detail drawer (right panel inside the DB modal) ───────────────────────────
 
-function PlantDetailDrawer({ plant, onClose, onAdd, added, imageData, onSaveImage, onDelete }: {
+export function PlantDetailDrawer({ plant, onClose, onAdd, added, imageData, onSaveImage, onDelete }: {
   plant: CsvPlantRecord
   onClose: () => void
   onAdd: () => void

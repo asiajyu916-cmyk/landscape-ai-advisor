@@ -13,13 +13,13 @@
 
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import { Search, Loader2, Sparkles, X as XIcon } from 'lucide-react'
-import type { CsvPlantRecord } from '@/types/csvPlant'
-import { loadPlantsFromStorage } from '@/data/plantStore'
-import { loadImageStore } from '@/data/plantStore'
+import type { CsvPlantRecord, PlantImageData } from '@/types/csvPlant'
+import { loadPlantsFromStorage, savePlantsToStorage } from '@/data/plantStore'
+import { loadImageStore, saveImageStore, upsertPlantImage } from '@/data/plantStore'
 import {
   CONDITIONS, parseTypeIntent, matchesCategory, getAdvisorReply,
 } from '@/utils/plantAdvisor'
-import { PlantCardItem } from './LandscapeAdvisorPage'
+import { PlantCardItem, PlantDetailDrawer } from './LandscapeAdvisorPage'
 
 type CategoryKey = 'tree' | 'shrub' | 'groundcover' | 'lawn'
 
@@ -54,13 +54,35 @@ export default function PlantAdvisorChatPage() {
   const [apiLoading, setApiLoading] = useState(false)
   const [apiSuggestions, setApiSuggestions] = useState<ApiSuggestion[] | null>(null)
   const [apiNote, setApiNote] = useState('')
+  const [detail, setDetail] = useState<CsvPlantRecord | null>(null)
+
+  const handleSaveImage = useCallback((plantName: string, data: Partial<PlantImageData>) => {
+    setImageStore(prev => {
+      const next = upsertPlantImage(prev, plantName, data)
+      saveImageStore(next)
+      return next
+    })
+  }, [])
+
+  const handleDeletePlant = useCallback((plantId: string) => {
+    setPlants(prev => {
+      const next = prev.filter(p => p.id !== plantId)
+      const saved = savePlantsToStorage(next)
+      if (!saved) {
+        window.alert('刪除失敗：瀏覽器儲存空間可能已滿，請稍後再試。')
+        return prev
+      }
+      return next
+    })
+    setDetail(null)
+  }, [])
 
   // ── 左右面板可拖曳調整寬度 ────────────────────────────────────────────────
   const [chatWidth, setChatWidth] = useState(380)   // 對話區寬度（px），預設跟原本固定寬度一致
   const containerRef = useRef<HTMLDivElement>(null)
   const draggingRef = useRef(false)
   const MIN_CHAT_WIDTH = 280
-  const MAX_CHAT_WIDTH = 720
+  const MIN_GRID_WIDTH = 320   // 右側卡片區至少保留的寬度，避免拖到卡片完全放不下
 
   const handleDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -72,8 +94,10 @@ export default function PlantAdvisorChatPage() {
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       if (!draggingRef.current || !containerRef.current) return
-      const left = containerRef.current.getBoundingClientRect().left
-      const next = Math.min(MAX_CHAT_WIDTH, Math.max(MIN_CHAT_WIDTH, e.clientX - left))
+      const rect = containerRef.current.getBoundingClientRect()
+      const maxWidth = rect.width - MIN_GRID_WIDTH   // 上限依容器實際寬度動態算，不是寫死的數字
+      const left = rect.left
+      const next = Math.min(maxWidth, Math.max(MIN_CHAT_WIDTH, e.clientX - left))
       setChatWidth(next)
     }
     const handleMouseUp = () => {
@@ -277,7 +301,7 @@ export default function PlantAdvisorChatPage() {
         </div>
 
         {/* 右側：符合條件的植栽卡片 */}
-        <div className="flex-1 overflow-y-auto p-5">
+        <div className="flex-1 overflow-y-auto p-5 relative">
           <div className="flex items-center justify-between mb-4">
             <p className="text-sm text-stone-500">
               {activeType || activeConds.size > 0
@@ -290,8 +314,8 @@ export default function PlantAdvisorChatPage() {
             <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))' }}>
               {matches.map(p => (
                 <PlantCardItem key={p.id} plant={p} imageData={imageStore[p.name]}
-                  added={false} fresh={false} isActive={false}
-                  onDetail={() => {}} onAdd={() => {}} />
+                  added={false} fresh={false} isActive={detail?.id === p.id}
+                  onDetail={() => setDetail(prev => prev?.id === p.id ? null : p)} onAdd={() => {}} />
               ))}
             </div>
           ) : (activeType || activeConds.size > 0) ? (
@@ -327,6 +351,19 @@ export default function PlantAdvisorChatPage() {
             <div className="py-16 text-center text-stone-300 text-sm">
               使用上方篩選按鈕，或在左側輸入問題開始查詢
             </div>
+          )}
+
+          {/* 詳情面板（疊加在右側卡片區上方）*/}
+          {detail && (
+            <PlantDetailDrawer
+              plant={detail}
+              onClose={() => setDetail(null)}
+              onAdd={() => {}}
+              added={false}
+              imageData={imageStore[detail.name]}
+              onSaveImage={data => handleSaveImage(detail.name, data)}
+              onDelete={() => handleDeletePlant(detail.id)}
+            />
           )}
         </div>
       </div>
