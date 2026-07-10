@@ -1899,8 +1899,24 @@ export default function DxfReviewPage({
   // plants 一變動就會自動重跑 buildZoneReviews，覆蓋目前所有分區的審查結果。
   const handlePlantAdded = useCallback((record: CsvPlantRecord) => {
     setAllPlants(prev => {
+      // 新增前先檢查資料庫是否已有完全同名（或同學名）的植物 —— 避免「這個名字之前
+      // 已經被 CSV 合併或其他管道加進資料庫，但畫面當時還沒即時更新」導致重複寫入。
+      if (existsExactInLocalDatabase(record.name, prev, record.scientificName)) {
+        window.alert(`「${record.name}」資料庫裡已經有相同名稱的植物了，不會重複新增。請至「植栽資料庫」頁面確認既有資料。`)
+        return prev
+      }
       const next = [...prev, record]
-      savePlantsToStorage(next)
+      const saved = savePlantsToStorage(next)
+      if (!saved) {
+        // 跟 CSV 合併匯入共用同一個儲存函式，同樣可能因瀏覽器儲存空間已滿而寫入失敗。
+        // 這裡沒有像 CSV 匯入那樣的結果畫面可以顯示警示，先用 alert 確保使用者不會
+        // 誤以為「新增植栽資料確認」按下去就一定成功了。
+        window.alert(
+          `「${record.name}」新增失敗：瀏覽器儲存空間可能已滿（常見原因：植栽照片累積過多）。\n` +
+          '建議先到「補圖管理」清理不必要的大尺寸照片，再重新嘗試新增。',
+        )
+        return prev   // 存檔失敗就不採用這筆變動，避免畫面顯示已新增但實際沒存到
+      }
       return next
     })
   }, [])

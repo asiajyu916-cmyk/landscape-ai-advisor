@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import {
-  Upload, Database, FileDown, Plus, X, Search, Leaf,
+  Upload, Database, FileDown, Plus, X, Search, Leaf, Trash2,
   AlertTriangle, CheckCircle, XCircle, Info, ChevronDown, ChevronUp,
   ArrowRight, FileText, ExternalLink, RefreshCw, FileOutput, Layers,
 } from 'lucide-react'
@@ -1389,13 +1389,14 @@ function PlantCardItem({ plant, imageData, added, fresh, isActive, onDetail, onA
 
 // ── Detail drawer (right panel inside the DB modal) ───────────────────────────
 
-function PlantDetailDrawer({ plant, onClose, onAdd, added, imageData, onSaveImage }: {
+function PlantDetailDrawer({ plant, onClose, onAdd, added, imageData, onSaveImage, onDelete }: {
   plant: CsvPlantRecord
   onClose: () => void
   onAdd: () => void
   added: boolean
   imageData?: PlantImageData
   onSaveImage: (data: Partial<PlantImageData>) => void
+  onDelete?: () => void
 }) {
   const [urlInput, setUrlInput]     = useState(imageData?.imageUrl ?? '')
   const [sourceInput, setSourceInput] = useState(imageData?.imageSource ?? '')
@@ -1461,6 +1462,17 @@ function PlantDetailDrawer({ plant, onClose, onAdd, added, imageData, onSaveImag
             }`}>
             {added ? '已加入' : '加入配置'}
           </button>
+          {onDelete && (
+            <button onClick={() => {
+              if (window.confirm(`確定要從植栽資料庫永久刪除「${plant.name}」嗎？此動作無法復原（不影響目前已加入配置的植栽）。`)) {
+                onDelete()
+              }
+            }}
+              title="從植栽資料庫刪除"
+              className="p-2 rounded-xl text-stone-400 hover:text-red-600 hover:bg-red-50 transition-colors">
+              <Trash2 size={16} />
+            </button>
+          )}
           <button onClick={onClose} className="text-stone-400 hover:text-stone-600 p-1"><X size={18} /></button>
         </div>
       </div>
@@ -2127,11 +2139,12 @@ function PhotoManagerModal({ plants, imageStore, onSaveImage, onClose }: {
   )
 }
 
-function PlantDatabaseModal({ plants, onClose, onSelect, selectedIds, imageStore, onSaveImage }: {
+function PlantDatabaseModal({ plants, onClose, onSelect, selectedIds, imageStore, onSaveImage, onDeletePlant }: {
   plants: CsvPlantRecord[]; onClose: () => void
   onSelect: (p: CsvPlantRecord) => void; selectedIds: Set<string>
   imageStore: ImageStore
   onSaveImage: (plantName: string, data: Partial<PlantImageData>) => void
+  onDeletePlant?: (plantId: string) => void
 }) {
   const [search, setSearch] = useState('')
   const [filterCat, setFilterCat] = useState('')
@@ -2389,6 +2402,7 @@ function PlantDatabaseModal({ plants, onClose, onSelect, selectedIds, imageStore
               added={selectedIds.has(detail.id)}
               imageData={imageStore[detail.name]}
               onSaveImage={data => onSaveImage(detail.name, data)}
+              onDelete={onDeletePlant ? () => { onDeletePlant(detail.id); setDetail(null) } : undefined}
             />
           </div>
         )}
@@ -2414,7 +2428,7 @@ function PlantDatabaseModal({ plants, onClose, onSelect, selectedIds, imageStore
 function CsvImportModal({ onClose, existingPlants, onApply }: {
   onClose: () => void
   existingPlants: CsvPlantRecord[]
-  onApply: (finalPlants: CsvPlantRecord[], applyResult: MergeApplyResult, imageUrls: Record<string, string>) => void
+  onApply: (finalPlants: CsvPlantRecord[], applyResult: MergeApplyResult, imageUrls: Record<string, string>) => boolean
 }) {
   const [phase, setPhase] = useState<'idle' | 'processing' | 'preview' | 'result' | 'error'>('idle')
   const [parsed, setParsed] = useState<ImportResult | null>(null)
@@ -2423,6 +2437,7 @@ function CsvImportModal({ onClose, existingPlants, onApply }: {
   const [replaceConfirmed, setReplaceConfirmed] = useState(false)
   const [resolvedDuplicates, setResolvedDuplicates] = useState<Set<number>>(new Set())
   const [applyResult, setApplyResult] = useState<MergeApplyResult | null>(null)
+  const [saveFailed, setSaveFailed] = useState(false)
   const [errMsg, setErrMsg] = useState('')
   const [dragOver, setDragOver] = useState(false)
   const [showDiffs, setShowDiffs] = useState<Set<number>>(new Set())
@@ -2430,6 +2445,7 @@ function CsvImportModal({ onClose, existingPlants, onApply }: {
 
   const handleFile = async (file: File) => {
     setPhase('processing')
+    setSubmitting(false)
     try {
       const r = await importFromFile(file)
       if (r.plants.length === 0) {
@@ -2472,13 +2488,18 @@ function CsvImportModal({ onClose, existingPlants, onApply }: {
     })
   }
 
+  const [submitting, setSubmitting] = useState(false)
+
   const handleConfirmApply = () => {
+    if (submitting) return   // 防止手滑連點兩下造成重複匯入（這正是這次重複資料的成因）
     if (!preview || !parsed) return
     if (mode === 'replace' && !replaceConfirmed) return   // 安全門檻：完全取代必須勾選確認
+    setSubmitting(true)
     const result = applyMerge(preview, existingPlants, resolvedDuplicates)
     setApplyResult(result)
+    const saved = onApply(result.finalPlants, result, parsed.imageUrls)
+    setSaveFailed(!saved)
     setPhase('result')
-    onApply(result.finalPlants, result, parsed.imageUrls)
   }
 
   const duplicateRows = preview?.rows.filter(r => r.action === 'duplicate') ?? []
@@ -2680,10 +2701,24 @@ function CsvImportModal({ onClose, existingPlants, onApply }: {
 
           {phase === 'result' && applyResult && (
             <div className="space-y-3">
-              <div className="flex items-center gap-3 p-3 bg-green-50 rounded-xl border border-green-100">
-                <CheckCircle size={18} className="text-green-600 flex-shrink-0" />
-                <p className="text-sm font-medium text-stone-800">已套用至植栽資料庫</p>
-              </div>
+              {saveFailed ? (
+                <div className="flex gap-2 p-3 bg-red-50 rounded-xl border border-red-200">
+                  <XCircle size={18} className="text-red-600 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-sm font-semibold text-red-700">寫入失敗，資料沒有真的儲存</p>
+                    <p className="text-xs text-red-600 mt-1">
+                      瀏覽器儲存空間可能已滿（常見原因：植栽照片累積過多）。下面的統計數字是這次「原本應該」產生的結果，
+                      但實際上資料庫並未更新，重新整理頁面後會恢復成合併前的內容。
+                      建議先到「補圖管理」清理不必要的大尺寸照片，或改用較小的圖片網址而非直接上傳檔案，再重新匯入一次。
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center gap-3 p-3 bg-green-50 rounded-xl border border-green-100">
+                  <CheckCircle size={18} className="text-green-600 flex-shrink-0" />
+                  <p className="text-sm font-medium text-stone-800">已套用至植栽資料庫</p>
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-2 text-sm">
                 <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200">成功新增：<strong>{applyResult.addedCount}</strong> 筆</div>
                 <div className="p-3 bg-blue-50 rounded-xl border border-blue-200">成功更新：<strong>{applyResult.updatedCount}</strong> 筆</div>
@@ -2707,13 +2742,13 @@ function CsvImportModal({ onClose, existingPlants, onApply }: {
           </button>
           {phase === 'preview' && (
             <button onClick={handleConfirmApply}
-              disabled={mode === 'replace' && !replaceConfirmed}
-              className={`px-5 py-2 rounded-xl text-sm font-medium ${
+              disabled={submitting || (mode === 'replace' && !replaceConfirmed)}
+              className={`px-5 py-2 rounded-xl text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed ${
                 mode === 'replace'
-                  ? 'bg-red-600 text-white hover:bg-red-700 disabled:bg-stone-200 disabled:text-stone-400 disabled:cursor-not-allowed'
+                  ? 'bg-red-600 text-white hover:bg-red-700 disabled:bg-stone-200 disabled:text-stone-400'
                   : 'bg-green-700 text-white hover:bg-green-800'
               }`}>
-              {mode === 'replace' ? '確認完全取代' : `確認合併（新增 ${preview?.toAddCount ?? 0}／更新 ${preview?.toUpdateCount ?? 0}）`}
+              {submitting ? '處理中…' : mode === 'replace' ? '確認完全取代' : `確認合併（新增 ${preview?.toAddCount ?? 0}／更新 ${preview?.toUpdateCount ?? 0}）`}
             </button>
           )}
           {phase === 'error' && (
@@ -2912,9 +2947,26 @@ export default function LandscapeAdvisorPage({
     setResult(null)
   }, [])
 
-  const handleCsvImported = (finalPlants: CsvPlantRecord[], mergeResult: MergeApplyResult, imageUrls: Record<string, string>) => {
+  const handleDeletePlant = useCallback((plantId: string) => {
+    setAllPlants(prev => {
+      const next = prev.filter(p => p.id !== plantId)
+      const saved = savePlantsToStorage(next)
+      if (!saved) {
+        window.alert('刪除失敗：瀏覽器儲存空間可能已滿，請稍後再試或先清理照片。')
+        return prev
+      }
+      return next
+    })
+  }, [])
+
+  const handleCsvImported = (finalPlants: CsvPlantRecord[], mergeResult: MergeApplyResult, imageUrls: Record<string, string>): boolean => {
     setAllPlants(finalPlants)
-    savePlantsToStorage(finalPlants)
+    const saved = savePlantsToStorage(finalPlants)
+    if (!saved) {
+      // 寫入失敗：結果畫面會顯示警示，這裡不做任何「看起來成功」的後續動作
+      // （不合併圖片、不清空選配），避免使用者誤以為資料已經更新。
+      return false
+    }
     // 若 CSV 含圖片網址欄，自動合併進 imageStore（不覆蓋本機已上傳的檔案）
     if (Object.keys(imageUrls).length > 0) {
       const current = loadImageStore()
@@ -2934,6 +2986,7 @@ export default function LandscapeAdvisorPage({
       setSelectedPlants([])
       setResult(null)
     }
+    return true
   }
 
   const handleExport = () => {
@@ -4096,6 +4149,7 @@ tfoot{display:table-footer-group}
           selectedIds={selectedIds}
           imageStore={imageStore}
           onSaveImage={handleSaveImage}
+          onDeletePlant={handleDeletePlant}
         />
       )}
       {showCsvImport && (
