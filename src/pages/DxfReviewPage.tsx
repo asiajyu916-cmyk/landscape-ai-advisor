@@ -4,7 +4,7 @@ import {
   ChevronDown, X, ArrowRight, Layers, Trash2, BookOpen, Table2, FileOutput, FileDown,
 } from 'lucide-react'
 import { parseDxf, detectPlantSchedule, findNearbyTexts } from '@/utils/dxfParser'
-import { analyzeMultiLayer, zoneLabel, detectZonesFromText, buildZonePlantList, buildZoneAssignDebug, polygonBBox, polygonArea, pointInPolygon, detectAnalysisScope } from '@/utils/spatialAnalysis'
+import { analyzeMultiLayer, zoneLabel, detectZonesFromText, buildZonePlantList, buildZoneAssignDebug, polygonBBox, polygonArea, pointInPolygon, detectAnalysisScope, SCHEDULE_KEYWORD_RE } from '@/utils/spatialAnalysis'
 import type { ZoneAssignDebug } from '@/utils/spatialAnalysis'
 import { exportZoneReviewPdf } from '@/utils/exportReviewPdf'
 import type { ZoneReviewPdfData } from '@/utils/exportReviewPdf'
@@ -926,7 +926,8 @@ function buildZoneReviews(
         if (fromDB) { hatchPatternToPlant.set(pattern, fromDB.name); fbText = txt; fbPlant = fromDB.name; break }
         const fromSched = schedule.find(e => e.plantName && e.plantName.length >= 2 && txt.includes(e.plantName))
         if (fromSched) { hatchPatternToPlant.set(pattern, fromSched.plantName); fbText = txt; fbPlant = fromSched.plantName; break }
-        if (/^[一-鿿]{2,}/.test(txt.trim())) { hatchPatternToPlant.set(pattern, txt.trim()); fbText = txt; fbPlant = txt.trim(); break }
+        // 索引表表頭字樣（圖例/備註/項次…）緊鄰圖例符號時常是最近文字，但不是植物名稱
+        if (/^[一-鿿]{2,}/.test(txt.trim()) && !SCHEDULE_KEYWORD_RE.test(txt.trim())) { hatchPatternToPlant.set(pattern, txt.trim()); fbText = txt; fbPlant = txt.trim(); break }
       }
       if (fbPlant) {
         legendEvidence.set(pattern, {

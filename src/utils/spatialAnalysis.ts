@@ -178,7 +178,9 @@ export interface AnalysisScope {
 }
 
 // 索引表表頭關鍵字（強指標，出現 ≥2 個即視為表格區域）
-const SCHEDULE_KEYWORD_RE = /^(項次|圖例|植物名稱|植栽名稱|名稱|學名|規格|數量|小計|合計|備註|單位|高度|寬度|面積|株\/㎡)/
+// 亦供 DxfReviewPage 的「HATCH 附近文字」fallback 排除表頭字樣，避免把
+// 「圖例」「備註」等欄位標題誤判成植物名稱（表頭文字必然緊鄰圖例符號）。
+export const SCHEDULE_KEYWORD_RE = /^(項次|圖例|植物名稱|植栽名稱|名稱|學名|規格|數量|小計|合計|備註|單位|高度|寬度|面積|株\/㎡)/
 
 // 評估範圍圖層關鍵字
 const EVAL_BOUNDARY_LAYER_RE = /評估範圍|評估|範圍|基地|境界|紅線|用地|scope|boundar|site/i
