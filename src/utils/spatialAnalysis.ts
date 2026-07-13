@@ -162,7 +162,7 @@ function polygonCenter(vertices: Array<{ x: number; y: number }>): { x: number; 
 export interface LegendBox { minX: number; minY: number; maxX: number; maxY: number }
 
 export interface AnalysisScope {
-  evalBoundary?: DxfPolygon    // 評估範圍 polygon（找不到則 undefined = 不過濾）
+  evalBoundaries: DxfPolygon[] // 評估範圍 polygon（可能每分區各一條；空陣列 = 不過濾）
   legendBoxes: LegendBox[]     // 索引表 bounding box（可能多張表）
 }
 
@@ -176,17 +176,20 @@ export function pointInLegendBoxes(x: number, y: number, boxes: LegendBox[]): bo
   return boxes.some(b => x >= b.minX && x <= b.maxX && y >= b.minY && y <= b.maxY)
 }
 
-/** 是否在分析範圍內：評估範圍內（若有）且不在索引表區 */
+/** 是否在分析範圍內：落在任一評估範圍內（若有）且不在索引表區 */
 export function pointInScope(x: number, y: number, scope: AnalysisScope | undefined): boolean {
   if (!scope) return true
   if (pointInLegendBoxes(x, y, scope.legendBoxes)) return false
-  if (scope.evalBoundary && !pointInPolygon(x, y, scope.evalBoundary.vertices)) return false
+  if (scope.evalBoundaries.length > 0 && !scope.evalBoundaries.some(b => pointInPolygon(x, y, b.vertices))) return false
   return true
 }
 
 /**
  * 偵測分析範圍：
- * 1. 評估範圍 = 圖層名含關鍵字的封閉 polyline 中 bbox 面積最大者（找不到 = 不過濾）
+ * 1. 評估範圍 = 圖層名含關鍵字的封閉 polyline 全部保留（找不到 = 不過濾）。
+ *    圖面可能是「整個基地一條」，也可能是「每個分區各自一條」（如
+ *    A區評估範圍/B區評估範圍/C區評估範圍）——分析範圍取所有評估範圍的聯集，
+ *    不再只挑 bbox 面積最大的一條，避免把其他分區排除在分析範圍外。
  * 2. 索引表 bbox = 「包含 ≥2 個表頭關鍵字文字」的封閉 polyline 之 bbox
  *    防呆：候選框內若含任何分區標籤（A區/B區…）則視為圖框/大框而剔除，
  *    避免把整張圖框誤判成索引表導致全部排除。
@@ -195,12 +198,9 @@ export function pointInScope(x: number, y: number, scope: AnalysisScope | undefi
 export function detectAnalysisScope(texts: DxfText[], polygons: DxfPolygon[]): AnalysisScope {
   const closed = polygons.filter(p => p.closed && p.vertices.length >= 3)
 
-  // ── 1. 評估範圍 ──
-  let evalBoundary: DxfPolygon | undefined
-  const evalCands = closed.filter(p => EVAL_BOUNDARY_LAYER_RE.test(p.layer))
-  if (evalCands.length > 0) {
-    evalBoundary = evalCands.reduce((a, b) => bboxArea(a) >= bboxArea(b) ? a : b)
-  }
+  // ── 1. 評估範圍（可能多條，每分區各一）──
+  const evalBoundaries = closed.filter(p => EVAL_BOUNDARY_LAYER_RE.test(p.layer))
+  const evalBoundarySet = new Set(evalBoundaries)
 
   // ── 2. 索引表 bbox ──
   const kwTexts = texts.filter(t => SCHEDULE_KEYWORD_RE.test(t.content.trim()))
@@ -212,7 +212,7 @@ export function detectAnalysisScope(texts: DxfText[], polygons: DxfPolygon[]): A
   const legendBoxes: LegendBox[] = []
   if (kwTexts.length >= 2) {
     for (const p of closed) {
-      if (p === evalBoundary) continue
+      if (evalBoundarySet.has(p)) continue
       const kwInside = kwTexts.filter(t => pointInPolygon(t.x, t.y, p.vertices)).length
       if (kwInside < 2) continue
       // 內含分區標籤 → 是圖框/評估範圍等大框，不是索引表
@@ -233,14 +233,14 @@ export function detectAnalysisScope(texts: DxfText[], polygons: DxfPolygon[]): A
   }
 
   console.group('📐 AnalysisScope（分析範圍）')
-  console.debug(evalBoundary
-    ? `評估範圍: layer="${evalBoundary.layer}" ${evalBoundary.source}(${evalBoundary.vertices.length}頂點)`
+  console.debug(evalBoundaries.length > 0
+    ? `評估範圍 × ${evalBoundaries.length}: ${evalBoundaries.map(b => `layer="${b.layer}" ${b.source}(${b.vertices.length}頂點)`).join(' | ')}`
     : '評估範圍: 未偵測到（不做範圍過濾）')
   console.debug(`索引表 bbox × ${legendBoxes.length}:`)
   for (const b of legendBoxes) console.debug(`  (${b.minX.toFixed(0)},${b.minY.toFixed(0)})-(${b.maxX.toFixed(0)},${b.maxY.toFixed(0)})`)
   console.groupEnd()
 
-  return { evalBoundary, legendBoxes }
+  return { evalBoundaries, legendBoxes }
 }
 
 // ── 分區邊界候選過濾 ──────────────────────────────────────────────────────────
@@ -290,10 +290,14 @@ export function detectZonesFromText(
 ): DetectedZone[] {
   const zones: DetectedZone[] = []
   const seenNames = new Set<string>()
-  // 邊界候選：封閉多邊形，排除索引表區內者與評估範圍本身
+  // 評估範圍只有「單一整體基地範圍」時才視為非分區框而排除；
+  // 若有多條（每分區各自一條，如 A區評估範圍/B區評估範圍…），
+  // 這些本身就是分區邊界候選，不能排除。
+  const singleWholeSiteEvalBoundary = scope?.evalBoundaries.length === 1 ? scope.evalBoundaries[0] : undefined
+  // 邊界候選：封閉多邊形，排除索引表區內者與（單一）評估範圍本身
   const closedPolygons = polygons.filter(p => {
     if (!p.closed || p.vertices.length < 3) return false
-    if (scope?.evalBoundary && p === scope.evalBoundary) return false
+    if (singleWholeSiteEvalBoundary && p === singleWholeSiteEvalBoundary) return false
     if (scope) {
       const bb = polygonBBox(p.vertices)
       const cx = (bb.minX + bb.maxX) / 2; const cy = (bb.minY + bb.maxY) / 2
@@ -305,11 +309,17 @@ export function detectZonesFromText(
   // ── 分區定義圖層模式（最優先）─────────────────────────────────────────────
   // 圖面若有專屬分區圖層（AREA / 區域 / 分區 / ZONE）的封閉 polyline ≥ 2 條，
   // 直接以該層 polyline 作為 zone polygon，不再全圖搜尋猜測。
+  // 同理，若各分區各自有獨立的「評估範圍」線（≥2 條），也視為分區邊界候選
+  // （本案無獨立 AREA/分區圖層，分區邊界即各自的評估範圍線）。
   // 標籤配對：1) 包含標籤的 polyline  2) 標籤在線外（引線標註）→ 取邊界距離
   // 最近者（上限 = 分區層整體寬度 3%），同一 polyline 不重複配對。
   const ZONE_LAYER_RE = /AREA|區域定義|區域|分區|ZONE/i
-  const zoneLayerPolys = closedPolygons.filter(p =>
+  const zoneLayerPolysStrict = closedPolygons.filter(p =>
     p.source !== 'HATCH' && ZONE_LAYER_RE.test(p.layer))
+  const perZoneEvalPolys = (scope?.evalBoundaries.length ?? 0) >= 2
+    ? closedPolygons.filter(p => p.source !== 'HATCH' && EVAL_BOUNDARY_LAYER_RE.test(p.layer))
+    : []
+  const zoneLayerPolys = zoneLayerPolysStrict.length >= 2 ? zoneLayerPolysStrict : perZoneEvalPolys
 
   const candidates = buildCandidateTexts(texts)
     .filter(c => pointInScope(c.x, c.y, scope))
@@ -346,7 +356,7 @@ export function detectZonesFromText(
       console.debug(`[Zone] "${c.name}" 標籤在分區線外 ${d.toFixed(0)} 單位 → 配對最近的分區層 polyline`)
       zones.push({ name: c.name, labelPosition: { x: c.x, y: c.y }, boundary: p, confidence: 'medium', source: 'text-in-polygon' })
     }
-    console.debug(`[Zone] 分區定義圖層模式：polyline×${zoneLayerPolys.length}，標籤×${candidates.length}，配對成功×${zones.length}`)
+    console.debug(`[Zone] 分區定義圖層模式（${zoneLayerPolysStrict.length >= 2 ? 'AREA/分區圖層' : '各分區獨立評估範圍'}）：polyline×${zoneLayerPolys.length}，標籤×${candidates.length}，配對成功×${zones.length}`)
     if (zones.length > 0) {
       // 依區名排序（A區、B區…），避免線外標籤（第二輪配對）排到最後
       zones.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hant', { numeric: true }))
@@ -360,8 +370,10 @@ export function detectZonesFromText(
   const drawingBBoxArea = allVerts.length >= 3
     ? (() => { const b = polygonBBox(allVerts); return b.width * b.height })()
     : 0
-  // 評估範圍 bbox 面積：有評估範圍時，分區邊界不得大於它（防呆圖框）
-  const evalArea = scope?.evalBoundary ? bboxArea(scope.evalBoundary) : undefined
+  // 評估範圍 bbox 面積：有評估範圍時，分區邊界不得大於「最大的一條」評估範圍（防呆圖框）
+  const evalArea = (scope?.evalBoundaries.length ?? 0) > 0
+    ? Math.max(...scope!.evalBoundaries.map(bboxArea))
+    : undefined
 
   // ── Step 1: 從文字（包含合併片段）找分區標籤（無分區定義圖層時的 fallback）──
   for (const cand of candidates) {
@@ -642,7 +654,7 @@ export function buildZonePlantList(
     polyId++
     if (!poly.closed || poly.vertices.length < 3) continue
     if (zoneBoundarySet.has(poly)) continue                       // 各區邊界線本身
-    if (scope?.evalBoundary && poly === scope.evalBoundary) continue
+    if (scope?.evalBoundaries.includes(poly)) continue             // 評估範圍線本身
     if (ZONE_DEF_LAYER_RE.test(poly.layer)) continue              // 分區定義層的其他線
     const pbb = polygonBBox(poly.vertices)
     const pbbArea = pbb.width * pbb.height
@@ -650,12 +662,12 @@ export function buildZonePlantList(
     const n0 = poly.vertices.length
     const pcx = poly.vertices.reduce((s, v) => s + v.x, 0) / n0
     const pcy = poly.vertices.reduce((s, v) => s + v.y, 0) / n0
-    // 範圍檢查：質心在分析範圍內；或質心在外但 loop 有頂點在評估範圍內
+    // 範圍檢查：質心在分析範圍內；或質心在外但 loop 有頂點在任一評估範圍內
     // （跨界幾何：如延伸出基地的路側草皮，質心在外、實體有一段在基地內）
     if (!pointInScope(pcx, pcy, scope)) {
-      const partialInEval = scope?.evalBoundary !== undefined
-        && !pointInLegendBoxes(pcx, pcy, scope.legendBoxes)
-        && poly.vertices.some(v => pointInPolygon(v.x, v.y, scope!.evalBoundary!.vertices))
+      const partialInEval = (scope?.evalBoundaries.length ?? 0) > 0
+        && !pointInLegendBoxes(pcx, pcy, scope!.legendBoxes)
+        && poly.vertices.some(v => scope!.evalBoundaries.some(b => pointInPolygon(v.x, v.y, b.vertices)))
       if (!partialInEval) continue
     }
 
