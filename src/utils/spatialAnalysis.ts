@@ -811,6 +811,15 @@ export function buildZonePlantList(
       if (cov < 0.2) continue
       // 選組內對此區 ratio 最高的 loop 作為代表
       const rep = near.reduce((a, b) => (b.ratios.get(zi) ?? 0) > (a.ratios.get(zi) ?? 0) ? b : a)
+      const repRatioHere = rep.ratios.get(zi) ?? 0
+      // 防呆：若代表 loop 對「其他分區」的個別 ratio 更高且已達 20%（已有跨區
+      // 意義），代表這個 loop 主要屬於那一區——不該因為同組聯合覆蓋率又把它
+      // 拉進這一區重複列出。典型情境：一大片種植帶主要落在 A 區（個別 ratio
+      // 38%），邊緣沾到旁邊一個很小的分區 B，B 區樣本剛好大半落在這片種植帶的
+      // 範圍內（聯合覆蓋率高），但這片種植帶其實不屬於 B，不該被列入。
+      const strongerElsewhere = [...rep.ratios.entries()]
+        .some(([zi2, r2]) => zi2 !== zi && r2 > repRatioHere && r2 >= 0.2)
+      if (strongerElsewhere) continue
       const asns = areaAssign.get(rep.poly) ?? []
       if (!asns.some(a => a.zoneIdx === zi)) {
         asns.push({ zoneIdx: zi, ratio: rep.ratios.get(zi) ?? 0, cross: true })
