@@ -3,11 +3,13 @@
 import type { CsvPlantRecord, NormalizedCategory, SunReq, WaterReq, DroughtTolerance, WetTolerance, DrainageSensitivity, MaintenanceLevel } from '@/types/csvPlant'
 import type {
   PlantSearchResponse, PlantSearchResult, PlantSearchFields, DraftPlantRecord, FieldVerificationStatus,
+  PlantSearchTelemetry, PlantDataSource,
 } from '@/types/plantSearch'
 import {
   SUN_REQ_KEYWORDS, WATER_REQ_KEYWORDS, DROUGHT_KEYWORDS, WET_KEYWORDS,
   DRAINAGE_KEYWORDS, MAINTENANCE_KEYWORDS, NORMALIZED_CATEGORY_KEYWORDS,
 } from '@/types/plantSearch'
+import { searchCloudPlant } from '@/services/plantCloudService'
 
 // ── 搜尋結果本地快取 ──────────────────────────────────────────────────────────
 // AI 網路搜尋一次要 ~20 秒，同一個植物名稱不該每次都重新查詢。成功結果寫入
@@ -52,19 +54,204 @@ export async function searchOfficialPlantData(
       body: JSON.stringify({ queryName, scientificNameHint, contextNote }),
     })
     const data = await res.json()
+    const telemetry: PlantSearchTelemetry[] | undefined = data.telemetry
     if (data.ok) {
       const result = data.result as PlantSearchResult
       cache[key] = { result, cachedAt: Date.now() }
       writeSearchCache(cache)
-      return { ok: true, result }
+      return { ok: true, result, telemetry }
     }
-    return { ok: false, queryName, reason: data.reason || '目前查無足夠官方資料，建議人工確認。' }
+    return { ok: false, queryName, reason: data.reason || '目前查無足夠官方資料，建議人工確認。', telemetry }
   } catch (err) {
     return {
       ok: false, queryName,
       reason: `搜尋服務連線失敗：${err instanceof Error ? err.message : '未知錯誤'}`,
+      telemetry: [{
+        tier: 'ai_web_search', searchQuery: queryName, searchDurationMs: 0,
+        jsonParseOk: false, timedOut: false,
+        failureReason: err instanceof Error ? err.message : String(err),
+      }],
     }
   }
+}
+
+// ── 第三層：指定植物網站查詢（臺北典藏植物園 / 農業知識入口網）─────────────────
+
+interface SiteSearchApiResult {
+  queryName: string
+  matchedName: string
+  scientificName: string
+  englishName: string
+  family: string
+  genus: string
+  aliases: string[]
+  plantType: string
+  growthHabit: string
+  sunRequirement: string
+  waterRequirement: string
+  soilRequirement: string
+  landscapeUse: string
+  dataSourceName: string
+  dataSourceUrl: string
+  dataSource: 'taipei_botanical' | 'moa_agriculture'
+  retrievedAt: string
+}
+
+async function searchDesignatedSitePlantData(
+  queryName: string,
+  scientificNameHint?: string,
+): Promise<{ ok: true; result: SiteSearchApiResult; telemetry?: PlantSearchTelemetry[] }
+  | { ok: false; reason: string; telemetry?: PlantSearchTelemetry[] }> {
+  try {
+    const res = await fetch('/api/plant-site-search', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ queryName, scientificNameHint }),
+    })
+    const data = await res.json()
+    const telemetry: PlantSearchTelemetry[] | undefined = data.telemetry
+    if (data.ok) return { ok: true, result: data.result as SiteSearchApiResult, telemetry }
+    return { ok: false, reason: data.reason || '指定網站查無此植物。', telemetry }
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `指定網站查詢連線失敗：${err instanceof Error ? err.message : '未知錯誤'}`,
+      telemetry: [{
+        tier: 'site_search', searchQuery: queryName, searchDurationMs: 0,
+        jsonParseOk: false, timedOut: false,
+        failureReason: err instanceof Error ? err.message : String(err),
+      }],
+    }
+  }
+}
+
+/** 指定網站查詢結果 → PlantSearchResult（沿用既有欄位格式，官方網站資料一律標記 official_confirmed）*/
+function siteResultToPlantSearchResult(site: SiteSearchApiResult): PlantSearchResult {
+  const status = (v: string): FieldVerificationStatus => v ? 'official_confirmed' : 'insufficient'
+  const field = (v: string, note?: string) => ({ value: v, status: status(v), note })
+  const fields: PlantSearchFields = {
+    plantType: field(site.plantType),
+    sunRequirement: field(site.sunRequirement),
+    waterRequirement: field(site.waterRequirement),
+    droughtTolerance: field(''),
+    wetTolerance: field(''),
+    drainageRequirement: field(''),
+    soilRequirement: field(site.soilRequirement),
+    height: field(''),
+    crownWidth: field(''),
+    soilDepth: field(''),
+    plantingSpacing: field(''),
+    flowerPeriod: field(''),
+    flowerColor: field(''),
+    deciduous: field(''),
+    deciduousLevel: field(''),
+    flowerDropRisk: field(''),
+    maintenanceNote: field(site.growthHabit, site.growthHabit ? '生長習性（來自指定網站，非正式維護管理欄位）' : undefined),
+    maintenanceRisk: field(''),
+  }
+  const missingFieldKeys = (Object.keys(fields) as (keyof PlantSearchFields)[])
+    .filter(k => fields[k].status === 'insufficient')
+  return {
+    queryName: site.queryName,
+    matchedName: site.matchedName,
+    scientificName: site.scientificName,
+    aliases: site.aliases,
+    fields,
+    dataSourceName: site.dataSourceName,
+    dataSourceUrl: site.dataSourceUrl,
+    retrievedAt: site.retrievedAt,
+    overallStatus: missingFieldKeys.length === 0 ? 'official_confirmed' : 'inferred',
+    overallConfidence: Math.round(((5 - missingFieldKeys.filter(
+      k => (['plantType', 'sunRequirement', 'waterRequirement', 'soilRequirement', 'maintenanceNote'] as const).includes(k as any)
+    ).length) / 5) * 100),
+    missingFieldKeys,
+    searchNote: site.landscapeUse ? `景觀用途：${site.landscapeUse}` : undefined,
+    citedSources: [{ name: site.dataSourceName, url: site.dataSourceUrl }],
+    dataSource: site.dataSource,
+  }
+}
+
+/** Supabase 雲端資料庫命中的既有紀錄 → PlantSearchResult（欄位皆視為既有已確認資料）*/
+function cloudRecordToPlantSearchResult(
+  record: CsvPlantRecord & { cloudDataSource: PlantDataSource; cloudSourceUrl: string },
+): PlantSearchResult {
+  const field = (v: string) => ({ value: v || '', status: (v ? 'official_confirmed' : 'insufficient') as FieldVerificationStatus })
+  const fields: PlantSearchFields = {
+    plantType: field(record.category),
+    sunRequirement: field(record.sunRequirement),
+    waterRequirement: field(record.waterRequirement),
+    droughtTolerance: field(record.droughtTolerance),
+    wetTolerance: field(record.wetTolerance),
+    drainageRequirement: field(record.drainageSensitivity),
+    soilRequirement: field(record.soilTexture),
+    height: field(record.height),
+    crownWidth: field(record.crownWidth),
+    soilDepth: field(record.soilDepth),
+    plantingSpacing: field(record.plantingSpacing),
+    flowerPeriod: field(record.flowerPeriod),
+    flowerColor: field(record.flowerColor),
+    deciduous: field(record.leafDropStatus),
+    deciduousLevel: field(''),
+    flowerDropRisk: field(''),
+    maintenanceNote: field(record.maintenanceNote),
+    maintenanceRisk: field(''),
+  }
+  return {
+    queryName: record.name,
+    matchedName: record.name,
+    scientificName: record.scientificName,
+    aliases: [],
+    fields,
+    dataSourceName: '雲端植物資料庫（先前已查證並人工確認）',
+    dataSourceUrl: record.cloudSourceUrl,
+    retrievedAt: new Date().toISOString(),
+    overallStatus: 'official_confirmed',
+    overallConfidence: 100,
+    missingFieldKeys: [],
+    citedSources: record.cloudSourceUrl ? [{ name: '雲端植物資料庫', url: record.cloudSourceUrl }] : [],
+    dataSource: 'cloud_db',
+  }
+}
+
+// ── 主流程：完整四層搜尋順序 ─────────────────────────────────────────────────
+// 呼叫端應先自行比對本地 CSV / localStorage 資料庫（existsExactInLocalDatabase /
+// findLocalPlantMatch），完全查無時才呼叫這個函式，依序往下查：
+//   第二層：Supabase 雲端植物資料庫（查到就停止，不呼叫 Claude API / web_search）
+//   第三層：指定植物網站（臺北典藏植物園、農業知識入口網）
+//   第四層：一般 Claude 網路搜尋（沿用既有 /api/plant-search，含 30 天本地快取）
+export async function searchPlantAllTiers(
+  queryName: string,
+  scientificNameHint?: string,
+  contextNote?: string,
+): Promise<PlantSearchResponse & { telemetry: PlantSearchTelemetry[]; alreadyInCloudDb?: boolean }> {
+  const telemetry: PlantSearchTelemetry[] = []
+
+  // 第二層：Supabase
+  const cloudStart = Date.now()
+  const cloudRes = await searchCloudPlant(queryName, scientificNameHint)
+  telemetry.push({
+    tier: 'cloud_db', searchQuery: queryName, searchDurationMs: Date.now() - cloudStart,
+    jsonParseOk: true, timedOut: false, failureReason: cloudRes.found ? undefined : 'not_found_in_cloud_db',
+  })
+  if (cloudRes.found && cloudRes.record) {
+    return {
+      ok: true, result: cloudRecordToPlantSearchResult(cloudRes.record),
+      telemetry, alreadyInCloudDb: true,
+    }
+  }
+
+  // 第三層：指定植物網站
+  const siteRes = await searchDesignatedSitePlantData(queryName, scientificNameHint)
+  if (siteRes.telemetry) telemetry.push(...siteRes.telemetry)
+  if (siteRes.ok) {
+    return { ok: true, result: siteResultToPlantSearchResult({ ...siteRes.result, queryName }), telemetry }
+  }
+
+  // 第四層：一般 AI 網路搜尋
+  const generalRes = await searchOfficialPlantData(queryName, scientificNameHint, contextNote)
+  if (generalRes.telemetry) telemetry.push(...generalRes.telemetry)
+  if (generalRes.ok) return { ...generalRes, telemetry }
+  return { ok: false, queryName, reason: generalRes.reason, telemetry }
 }
 
 // ── enum 欄位映射：搜尋結果是自由文字，需對應到 CsvPlantRecord 的固定選項 ──────
@@ -177,5 +364,9 @@ export function searchResultToDraft(result: PlantSearchResult): DraftPlantRecord
   setSrc('flowerColor', 'flowerColor')
   setSrc('maintenanceNote', 'maintenanceNote')
 
-  return { ...record, isAutoSourced: true, autoSourceFields }
+  return {
+    ...record, isAutoSourced: true, autoSourceFields,
+    dataSource: result.dataSource,
+    dataSourceUrlForCloud: result.dataSourceUrl,
+  }
 }

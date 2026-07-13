@@ -11,9 +11,11 @@ import type { ZoneReviewPdfData } from '@/utils/exportReviewPdf'
 import { evaluate } from '@/utils/plantEvaluator'
 import type { EvalResult } from '@/utils/plantEvaluator'
 import { loadPlantsFromStorage, savePlantsToStorage, loadPlantsWithCsvMerge } from '@/data/plantStore'
-import { searchOfficialPlantData, searchResultToDraft } from '@/utils/plantSearchClient'
+import { searchPlantAllTiers, searchResultToDraft } from '@/utils/plantSearchClient'
 import { existsExactInLocalDatabase, getAliasGroup } from '@/utils/plantNameMatch'
+import { persistConfirmedPlant } from '@/services/plantCloudService'
 import type { PlantSearchResult, DraftPlantRecord } from '@/types/plantSearch'
+import { PLANT_DATA_SOURCE_LABELS } from '@/types/plantSearch'
 import PlantAutoAddModal from '@/components/modals/PlantAutoAddModal'
 import {
   loadDxfRules, upsertDxfRule, deleteDxfRule, clearAllDxfRules,
@@ -2049,7 +2051,7 @@ export default function DxfReviewPage({
   // ── 缺漏植栽自動補資料：確認新增 → 寫入資料庫 → 自動重新評估 ─────────────────
   // 「重新評估」不需要額外程式碼：下面既有的 useEffect 已經監看 [plants, ...]，
   // plants 一變動就會自動重跑 buildZoneReviews，覆蓋目前所有分區的審查結果。
-  const handlePlantAdded = useCallback((record: CsvPlantRecord) => {
+  const handlePlantAdded = useCallback((record: CsvPlantRecord, dataSource?: DraftPlantRecord['dataSource'], sourceUrl?: string) => {
     setAllPlants(prev => {
       // 新增前先檢查資料庫是否已有完全同名（或同學名）的植物 —— 避免「這個名字之前
       // 已經被 CSV 合併或其他管道加進資料庫，但畫面當時還沒即時更新」導致重複寫入。
@@ -2071,6 +2073,12 @@ export default function DxfReviewPage({
       }
       return next
     })
+    // 永久寫入 Supabase 雲端資料庫（cloud_db 命中的資料已經在雲端，會自動略過）
+    if (dataSource) {
+      persistConfirmedPlant(record, dataSource, sourceUrl ?? '').then(res => {
+        if (!res.ok && res.reason) console.warn(`[雲端資料庫] 「${record.name}」未永久儲存：${res.reason}`)
+      })
+    }
   }, [])
 
   // ── 當 plants 或 zonePlantLists 改變時重算分區審查 ──────────────────────────
@@ -4557,7 +4565,7 @@ function ZonesTab({ polygons }: { polygons: DxfParseResult['polygons'] }) {
 
 function ScheduleTab({ schedule, mappings, plants, onPlantAdded }: {
   schedule: PlantSchedule; mappings: MappedItem[]
-  plants: CsvPlantRecord[]; onPlantAdded: (record: CsvPlantRecord) => void
+  plants: CsvPlantRecord[]; onPlantAdded: (record: CsvPlantRecord, dataSource?: DraftPlantRecord['dataSource'], sourceUrl?: string) => void
 }) {
   // ── 缺漏植栽自動補資料：每個索引表植物名稱各自的搜尋狀態 ────────────────────
   const [searchStates, setSearchStates] = useState<Record<string, 'idle' | 'searching' | 'failed'>>({})
@@ -4570,7 +4578,7 @@ function ScheduleTab({ schedule, mappings, plants, onPlantAdded }: {
     const key = e.plantName
     setSearchStates(prev => ({ ...prev, [key]: 'searching' }))
     setFailureNotes(prev => { const n = { ...prev }; delete n[key]; return n })
-    const res = await searchOfficialPlantData(
+    const res = await searchPlantAllTiers(
       e.plantName, e.scientificName,
       e.code ? `索引表代號 ${e.code}` : undefined,
     )
@@ -4718,7 +4726,10 @@ function ScheduleTab({ schedule, mappings, plants, onPlantAdded }: {
                   {isDbMatched(e)
                     ? (() => {
                         const matched = plants.find(p => p.name === e.plantName)
-                        const source = matched?.isAutoSourced ? 'AI 網路補充' : 'CSV 內建植栽資料庫'
+                        const matchedDataSource = (matched as unknown as { dataSource?: keyof typeof PLANT_DATA_SOURCE_LABELS })?.dataSource
+                        const source = matchedDataSource
+                          ? PLANT_DATA_SOURCE_LABELS[matchedDataSource]
+                          : matched?.isAutoSourced ? 'AI 網路補充' : 'CSV 內建植栽資料庫'
                         return (
                           <span className="inline-flex flex-col items-start gap-0.5">
                             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs">
@@ -4770,7 +4781,7 @@ function ScheduleTab({ schedule, mappings, plants, onPlantAdded }: {
           result={activeSearch.result}
           draft={activeSearch.draft}
           onConfirm={(record) => {
-            onPlantAdded(record)
+            onPlantAdded(record, activeSearch.draft.dataSource, activeSearch.draft.dataSourceUrlForCloud)
             setActiveSearch(null)
           }}
           onSkip={() => setActiveSearch(null)}

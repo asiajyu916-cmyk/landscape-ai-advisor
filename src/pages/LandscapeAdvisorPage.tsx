@@ -17,7 +17,8 @@ import {
 import { getAdvisorReply, type AdvisorReply } from '@/utils/plantAdvisor'
 import { buildMergePreview, applyMerge } from '@/utils/plantCsvMerge'
 import { findSimilarPlants } from '@/utils/plantNameMatch'
-import { searchOfficialPlantData, searchResultToDraft } from '@/utils/plantSearchClient'
+import { searchPlantAllTiers, searchResultToDraft } from '@/utils/plantSearchClient'
+import { persistConfirmedPlant } from '@/services/plantCloudService'
 import PlantAutoAddModal from '@/components/modals/PlantAutoAddModal'
 import type { ImportMode, MergePreview, MergeApplyResult } from '@/types/plantMerge'
 import type {
@@ -1959,7 +1960,7 @@ function SimilarPlantSubstituteModal({ allPlants, onClose, onSubstitute, onAiCon
   allPlants: CsvPlantRecord[]
   onClose: () => void
   onSubstitute: (originalPlantName: string, substitute: CsvPlantRecord) => void
-  onAiConfirm: (record: CsvPlantRecord) => void
+  onAiConfirm: (record: CsvPlantRecord, dataSource?: DraftPlantRecord['dataSource'], sourceUrl?: string) => void
 }) {
   const [queryName, setQueryName] = useState('')
   const [searched, setSearched] = useState(false)
@@ -1985,7 +1986,7 @@ function SimilarPlantSubstituteModal({ allPlants, onClose, onSubstitute, onAiCon
     if (!name) return
     setAiSearching(true)
     setAiFailure('')
-    const res = await searchOfficialPlantData(name)
+    const res = await searchPlantAllTiers(name)
     setAiSearching(false)
     if (res.ok) {
       setAiActive({ queryName: name, result: res.result, draft: searchResultToDraft(res.result) })
@@ -2068,7 +2069,7 @@ function SimilarPlantSubstituteModal({ allPlants, onClose, onSubstitute, onAiCon
           queryName={aiActive.queryName}
           result={aiActive.result}
           draft={aiActive.draft}
-          onConfirm={(record) => { onAiConfirm(record); setAiActive(null); onClose() }}
+          onConfirm={(record) => { onAiConfirm(record, aiActive.draft.dataSource, aiActive.draft.dataSourceUrlForCloud); setAiActive(null); onClose() }}
           onSkip={() => setAiActive(null)}
           onClose={() => setAiActive(null)}
         />
@@ -3185,7 +3186,8 @@ export default function LandscapeAdvisorPage({
   }, [])
 
   // AI 網路查詢成功並確認後：寫入資料庫（供後續直接比對）並加入本次評估
-  const handleAiFoundPlantConfirm = useCallback((record: CsvPlantRecord) => {
+  // 同時永久寫入 Supabase 雲端植物資料庫（cloud_db 命中的資料已在雲端，會自動略過）
+  const handleAiFoundPlantConfirm = useCallback((record: CsvPlantRecord, dataSource?: DraftPlantRecord['dataSource'], sourceUrl?: string) => {
     setAllPlants(prev => {
       if (prev.some(p => p.name === record.name)) return prev
       const next = [...prev, record]
@@ -3193,6 +3195,11 @@ export default function LandscapeAdvisorPage({
       return next
     })
     addPlant(record)
+    if (dataSource) {
+      persistConfirmedPlant(record, dataSource, sourceUrl ?? '').then(res => {
+        if (!res.ok && res.reason) console.warn(`[雲端資料庫] 「${record.name}」未永久儲存：${res.reason}`)
+      })
+    }
   }, [addPlant])
 
   const handleDeletePlant = useCallback((plantId: string) => {

@@ -71,9 +71,14 @@ function unifyVariantChars(s: string): string {
   return s.replace(/臺/g, '台')
 }
 
-/** 供比對用的正規化：去除所有空白、全形轉半形、統一為小寫（英數部分）*/
+// 常見不可見字元（零寬空白、位元組順序記號等）：CSV / 索引表文字複製貼上時常見的雜訊，
+// 比對前先移除，避免「看起來一樣」卻因為藏了不可見字元而判定為不同植物。
+const INVISIBLE_CHARS_RE = /[​-‏⁠﻿­]/g
+
+/** 供比對用的正規化：去除不可見字元、換行、所有空白、全形轉半形、統一為小寫（英數部分）*/
 export function normalizeForCompare(raw: string): string {
   return unifyVariantChars(toHalfWidth(raw))
+    .replace(INVISIBLE_CHARS_RE, '')
     .replace(/[\s\u00A0]+/g, '')
     .replace(/[（）]/g, m => (m === '（' ? '(' : ')'))
     .toLowerCase()

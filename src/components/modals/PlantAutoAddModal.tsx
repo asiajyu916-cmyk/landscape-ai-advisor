@@ -6,7 +6,7 @@ import { useState } from 'react'
 import { X, CheckCircle, AlertTriangle, HelpCircle, ExternalLink, Pencil } from 'lucide-react'
 import type { CsvPlantRecord } from '@/types/csvPlant'
 import type { DraftPlantRecord, PlantSearchResult, FieldVerificationStatus } from '@/types/plantSearch'
-import { PLANT_SEARCH_FIELD_LABELS } from '@/types/plantSearch'
+import { PLANT_SEARCH_FIELD_LABELS, PLANT_DATA_SOURCE_LABELS } from '@/types/plantSearch'
 
 interface Props {
   queryName: string
@@ -79,6 +79,9 @@ export default function PlantAutoAddModal({ queryName, result, draft, onConfirm,
             <p className="text-xs text-stone-400 mt-1">
               圖面辨識到「{queryName}」，植栽資料庫查無此植物，已自動搜尋官方資料
             </p>
+            <span className="inline-flex items-center gap-1 mt-2 px-2 py-0.5 rounded-full bg-stone-100 border border-stone-200 text-stone-600 text-[11px] font-medium">
+              資料來源：{PLANT_DATA_SOURCE_LABELS[result.dataSource]}
+            </span>
           </div>
           <button onClick={onClose} className="text-stone-300 hover:text-stone-500 flex-shrink-0">
             <X size={20} />

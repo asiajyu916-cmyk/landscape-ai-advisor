@@ -132,6 +132,7 @@ export default async function handler(req: Request): Promise<Response> {
   if (!queryName) {
     return new Response(JSON.stringify({ ok: false, reason: '缺少植物名稱' }), { status: 400 })
   }
+  const startedAt = Date.now()
 
   // ── 自訂逾時：比 Vercel Edge 平台上限更早中止，確保能回傳乾淨 JSON ──────────
   // 平台強制中斷時回傳的是 HTML 錯誤頁，會讓前端 JSON.parse 直接拋例外；
@@ -169,6 +170,10 @@ export default async function handler(req: Request): Promise<Response> {
       return new Response(JSON.stringify({
         ok: false, queryName, reason: `搜尋服務暫時無法使用（${anthropicRes.status}）`,
         detail: errText.slice(0, 500),
+        telemetry: [{
+          tier: 'ai_web_search', searchQuery: queryName, searchDurationMs: Date.now() - startedAt,
+          jsonParseOk: false, timedOut: false, failureReason: `anthropic_api_error_${anthropicRes.status}`,
+        }],
       }), { status: 200, headers: { 'content-type': 'application/json' } })   // 200：讓前端能正常解析錯誤訊息，不要再噴 502
     }
 
@@ -187,6 +192,10 @@ export default async function handler(req: Request): Promise<Response> {
         ok: false, queryName,
         reason: '搜尋結果解析失敗，建議人工確認。',
         detail: rawText.slice(0, 500),
+        telemetry: [{
+          tier: 'ai_web_search', searchQuery: queryName, searchDurationMs: Date.now() - startedAt,
+          jsonParseOk: false, timedOut: false, failureReason: 'json_parse_error',
+        }],
       }), { status: 200, headers: { 'content-type': 'application/json' } })
     }
 
@@ -194,6 +203,10 @@ export default async function handler(req: Request): Promise<Response> {
       return new Response(JSON.stringify({
         ok: false, queryName,
         reason: (parsed.searchNote as string) || '目前查無足夠官方資料，建議人工確認。',
+        telemetry: [{
+          tier: 'ai_web_search', searchQuery: queryName, searchDurationMs: Date.now() - startedAt,
+          jsonParseOk: true, timedOut: false, failureReason: 'not_found',
+        }],
       }), { status: 200, headers: { 'content-type': 'application/json' } })
     }
 
@@ -222,9 +235,17 @@ export default async function handler(req: Request): Promise<Response> {
       missingFieldKeys: insufficientKeys,
       searchNote: parsed.searchNote || undefined,
       citedSources: Array.isArray(parsed.citedSources) ? parsed.citedSources : [],
+      dataSource: 'ai_web_search' as const,
     }
 
-    return new Response(JSON.stringify({ ok: true, result }), {
+    return new Response(JSON.stringify({
+      ok: true, result,
+      telemetry: [{
+        tier: 'ai_web_search', searchQuery: queryName,
+        searchDurationMs: Date.now() - startedAt,
+        jsonParseOk: true, timedOut: false,
+      }],
+    }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
     })
@@ -237,6 +258,12 @@ export default async function handler(req: Request): Promise<Response> {
         ? '查詢逾時（超過 20 秒），建議稍後重試或人工確認。未自動重試，不會重複消耗額度。'
         : '搜尋過程發生錯誤，請稍後再試或人工確認。',
       detail: err instanceof Error ? err.message : String(err),
+      telemetry: [{
+        tier: 'ai_web_search', searchQuery: queryName,
+        searchDurationMs: Date.now() - startedAt,
+        jsonParseOk: false, timedOut: isTimeout,
+        failureReason: isTimeout ? 'timeout' : (err instanceof Error ? err.message : String(err)),
+      }],
     }), { status: 200, headers: { 'content-type': 'application/json' } })   // 200：確保前端永遠拿到合法 JSON
   }
 }

@@ -58,6 +58,22 @@ export const PLANT_SEARCH_FIELD_LABELS: Record<keyof PlantSearchFields, string> 
   maintenanceRisk: '常見養護風險',
 }
 
+// ── 資料來源分類（需求八：UI 顯示資料來源）──────────────────────────────────────
+export type PlantDataSource =
+  | 'csv'                 // CSV 內建植栽資料庫
+  | 'cloud_db'             // 雲端植物資料庫（Supabase）
+  | 'taipei_botanical'     // 臺北典藏植物園
+  | 'moa_agriculture'      // 農業知識入口網
+  | 'ai_web_search'        // AI 網路補充（一般 Claude web_search）
+
+export const PLANT_DATA_SOURCE_LABELS: Record<PlantDataSource, string> = {
+  csv: 'CSV 內建植栽資料庫',
+  cloud_db: '雲端植物資料庫',
+  taipei_botanical: '臺北典藏植物園',
+  moa_agriculture: '農業知識入口網',
+  ai_web_search: 'AI 網路補充',
+}
+
 // 一筆完整的搜尋結果（/api/plant-search 的回傳內容）
 export interface PlantSearchResult {
   queryName: string             // 原始查詢名稱（圖面辨識到的名稱）
@@ -73,6 +89,22 @@ export interface PlantSearchResult {
   missingFieldKeys: (keyof PlantSearchFields)[]
   searchNote?: string           // 找不到資料時的說明文字
   citedSources?: Array<{ name: string; url: string }>   // 搜尋過程引用的所有來源（可能多筆）
+  dataSource: PlantDataSource   // 這筆結果實際命中哪一層（供 UI 標示 + 寫入資料庫時記錄）
+}
+
+// ── 查詢過程遙測資訊（需求三：AI 網路搜尋時記錄搜尋過程細節）──────────────────
+// 目的：避免把「API timeout」「Vercel timeout」「查無資料」「JSON parse error」
+// 「rate limit」全部顯示成同一個籠統的「查無資料」，方便排查真正的失敗原因。
+export interface PlantSearchTelemetry {
+  tier: 'csv' | 'cloud_db' | 'site_search' | 'ai_web_search'
+  searchQuery: string
+  searchDurationMs: number
+  matchedDomain?: string
+  matchedUrl?: string
+  respondedAt?: string          // Claude 回傳時間（ISO）
+  jsonParseOk: boolean
+  timedOut: boolean
+  failureReason?: string        // 實際失敗原因（非籠統的「查無資料」）
 }
 
 // API 呼叫失敗 / 完全查無資料時的回應
@@ -80,11 +112,13 @@ export interface PlantSearchFailure {
   ok: false
   queryName: string
   reason: string   // 面向使用者的訊息，例如「目前查無足夠官方資料，建議人工確認。」
+  telemetry?: PlantSearchTelemetry[]   // 各層查詢過程記錄，供排查真正失敗原因
 }
 
 export interface PlantSearchSuccess {
   ok: true
   result: PlantSearchResult
+  telemetry?: PlantSearchTelemetry[]
 }
 
 export type PlantSearchResponse = PlantSearchSuccess | PlantSearchFailure
@@ -127,6 +161,8 @@ export interface MissingPlantEntry {
 export interface DraftPlantRecord extends CsvPlantRecord {
   isAutoSourced: true
   autoSourceFields: Partial<Record<keyof CsvPlantRecord, FieldVerificationStatus>>
+  dataSource: PlantDataSource
+  dataSourceUrlForCloud: string   // 寫入 Supabase 時的 source_url（cloud_db 命中時不需要再寫入）
 }
 
 // ── enum 值正規化對照（搜尋結果為自由文字，需映射進 CsvPlantRecord 的固定選項）──
