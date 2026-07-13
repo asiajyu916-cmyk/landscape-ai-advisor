@@ -76,8 +76,10 @@ export function evaluate(plants: SelectedCsvPlant[], allPlants: CsvPlantRecord[]
   if (drainLevel === 'caution') {
     deductions += 13
     if (hasNotTolerant) plants.filter(p => p.wetTolerance === '不耐積水').forEach(p => problemIds.add(p.instanceId))
+    const wetTolerantPlants = plants.filter(p => p.wetTolerance === '耐濕' || p.wetTolerance === '稍耐濕')
+    wetTolerantPlants.forEach(p => problemIds.add(p.instanceId))
     issues.push(makeIssue('排水衝突', 'caution',
-      `本區同時包含不耐積水（${plants.filter(p => p.wetTolerance === '不耐積水').map(p => p.name).join('、')}）與耐濕植物，排水條件需求相反。`,
+      `本區同時包含不耐積水（${plants.filter(p => p.wetTolerance === '不耐積水').map(p => p.name).join('、')}）與耐濕（${wetTolerantPlants.map(p => p.name).join('、')}）的植物組合，排水條件需求相反。`,
       '若採統一排水設計，不耐積水植物易發生爛根，耐濕植物則可能因過度排水而受影響。',
       '建議分區配置並設置差異化排水層，或選用排水需求相近的替代植栽。'))
   } else if (hasNotTolerant && plants.length > 1) {
