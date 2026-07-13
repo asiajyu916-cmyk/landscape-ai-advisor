@@ -65,9 +65,15 @@ function toHalfWidth(s: string): string {
           .replace(/\u3000/g, ' ')   // 全形空白
 }
 
+// 常見異體字統一（僅限比對用途，不影響原始資料顯示）：
+// 「臺」為「台」的傳統寫法，索引表/CSV/使用者輸入常混用，例如「臺北草」應視為「台北草」。
+function unifyVariantChars(s: string): string {
+  return s.replace(/臺/g, '台')
+}
+
 /** 供比對用的正規化：去除所有空白、全形轉半形、統一為小寫（英數部分）*/
 export function normalizeForCompare(raw: string): string {
-  return toHalfWidth(raw)
+  return unifyVariantChars(toHalfWidth(raw))
     .replace(/[\s\u00A0]+/g, '')
     .replace(/[（）]/g, m => (m === '（' ? '(' : ')'))
     .toLowerCase()

@@ -9,6 +9,7 @@ import {
   savePlantsToStorage, loadPlantsFromStorage,
   fetchDefaultPlants, importFromFile, filterPlants,
   loadImageStore, saveImageStore, upsertPlantImage, removePlantImage, readImageFile,
+  loadPlantsWithCsvMerge,
 } from '@/data/plantStore'
 import {
   parsePlantCsv, waterScore, sunConflictLevel, drainageConflictLevel,
@@ -2957,14 +2958,15 @@ export default function LandscapeAdvisorPage({
   }, [])
 
   useEffect(() => {
-    const stored = loadPlantsFromStorage()
-    if (stored && stored.length > 0) {
-      setAllPlants(stored); setDbStatus('loaded'); return
-    }
-    fetchDefaultPlants().then(res => {
-      if (res && res.plants.length > 0) {
+    loadPlantsWithCsvMerge().then(res => {
+      console.group('🌱 植栽資料庫載入')
+      console.debug(`來源: ${res.source}`)
+      console.debug(`CSV 檔名: ${res.csvFileName}　CSV 總筆數: ${res.csvTotal}　CSV 最後一筆: ${res.csvLastPlantName || '(無)'}`)
+      console.debug(`本次從 CSV 補進 localStorage 的新植物數: ${res.addedFromCsv}`)
+      console.debug(`最終使用中的植物總筆數: ${res.plants.length}`)
+      console.groupEnd()
+      if (res.plants.length > 0) {
         setAllPlants(res.plants)
-        savePlantsToStorage(res.plants)
         setDbStatus('loaded')
       } else {
         setDbStatus('empty')

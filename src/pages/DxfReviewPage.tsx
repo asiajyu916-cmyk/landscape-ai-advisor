@@ -10,7 +10,7 @@ import { exportZoneReviewPdf } from '@/utils/exportReviewPdf'
 import type { ZoneReviewPdfData } from '@/utils/exportReviewPdf'
 import { evaluate } from '@/utils/plantEvaluator'
 import type { EvalResult } from '@/utils/plantEvaluator'
-import { loadPlantsFromStorage, savePlantsToStorage } from '@/data/plantStore'
+import { loadPlantsFromStorage, savePlantsToStorage, loadPlantsWithCsvMerge } from '@/data/plantStore'
 import { searchOfficialPlantData, searchResultToDraft } from '@/utils/plantSearchClient'
 import { existsExactInLocalDatabase, getAliasGroup } from '@/utils/plantNameMatch'
 import type { PlantSearchResult, DraftPlantRecord } from '@/types/plantSearch'
@@ -2101,7 +2101,12 @@ export default function DxfReviewPage({
       setDetectedEnc(encoding)
       const result = parseDxf(text)
       setParseResult(result)
-      const loaded = loadPlantsFromStorage() ?? []
+      const dbRes = await loadPlantsWithCsvMerge()
+      const loaded = dbRes.plants
+      console.group('🌱 植栽資料庫載入（DXF 審查）')
+      console.debug(`來源: ${dbRes.source}　CSV 檔名: ${dbRes.csvFileName}　CSV 總筆數: ${dbRes.csvTotal}　CSV 最後一筆: ${dbRes.csvLastPlantName || '(無)'}`)
+      console.debug(`本次從 CSV 補進的新植物數: ${dbRes.addedFromCsv}　最終植物總筆數: ${loaded.length}`)
+      console.groupEnd()
       setAllPlants(loaded)
       const permRules = loadDxfRules()
       const sessRules = loadSessionRules(file.name)
@@ -4710,12 +4715,21 @@ function ScheduleTab({ schedule, mappings, plants, onPlantAdded }: {
                 {/* 資料庫對應 */}
                 <td className="px-4 py-2.5">
                   {isDbMatched(e)
-                    ? <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs">
-                        <CheckCircle size={10} />已比對
-                      </span>
+                    ? (() => {
+                        const matched = plants.find(p => p.name === e.plantName)
+                        const source = matched?.isAutoSourced ? 'AI 網路補充' : 'CSV 內建植栽資料庫'
+                        return (
+                          <span className="inline-flex flex-col items-start gap-0.5">
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs">
+                              <CheckCircle size={10} />已比對
+                            </span>
+                            <span className="text-[10px] text-stone-400">資料來源：{source}</span>
+                          </span>
+                        )
+                      })()
                     : searchStates[e.plantName] === 'searching'
                     ? <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-50 border border-blue-200 text-blue-600 text-xs animate-pulse">
-                        搜尋官方資料中…
+                        本地資料庫未找到，正在進行 AI 網路補充查詢
                       </span>
                     : (
                       <div className="flex flex-col gap-1 items-start">

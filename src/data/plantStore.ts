@@ -1,4 +1,5 @@
 import { parsePlantCsv } from '@/utils/csvParser'
+import { normalizeForCompare } from '@/utils/plantNameMatch'
 import type { CsvPlantRecord, ImportResult, PlantImageData, ImageStore } from '@/types/csvPlant'
 
 const STORAGE_KEY       = 'landscape_advisor_plants_v1'
@@ -41,6 +42,47 @@ export async function fetchDefaultPlants(): Promise<ImportResult | null> {
   } catch {
     return null
   }
+}
+
+// ── localStorage + 內建 CSV 合併載入 ────────────────────────────────────────────
+// 舊行為：localStorage 有資料就直接用，永遠不再讀 public/plantdb.csv，導致
+// CSV 新增/更新的植物即使部署上線，使用者瀏覽器裡也永遠看不到（除非手動清空
+// storage 重新匯入）。改為：localStorage 仍是主要來源（保留使用者已匯入/編輯
+// 的資料，不覆蓋、不刪除），但每次都同時讀取內建 CSV，只把「localStorage 裡
+// 完全沒有的植物名稱（正規化後比對，含台/臺等寫法差異）」補進去——只增不減、
+// 不覆蓋既有資料。
+export interface PlantsLoadResult {
+  plants: CsvPlantRecord[]
+  source: 'csv-only' | 'localStorage-only' | 'localStorage+csv-merge'
+  csvFileName: string
+  csvTotal: number
+  csvLastPlantName: string
+  addedFromCsv: number
+}
+
+export async function loadPlantsWithCsvMerge(): Promise<PlantsLoadResult> {
+  const stored = loadPlantsFromStorage() ?? []
+  const csvResult = await fetchDefaultPlants()
+  const csvPlants = csvResult?.plants ?? []
+  const csvFileName = '/plantdb.csv'
+  const csvLastPlantName = csvPlants.length > 0 ? csvPlants[csvPlants.length - 1].name : ''
+
+  if (!csvResult) {
+    return { plants: stored, source: 'localStorage-only', csvFileName, csvTotal: 0, csvLastPlantName, addedFromCsv: 0 }
+  }
+  if (stored.length === 0) {
+    savePlantsToStorage(csvPlants)
+    return { plants: csvPlants, source: 'csv-only', csvFileName, csvTotal: csvPlants.length, csvLastPlantName, addedFromCsv: csvPlants.length }
+  }
+
+  const existingKeys = new Set(stored.map(p => normalizeForCompare(p.name)))
+  const newOnes = csvPlants.filter(p => !existingKeys.has(normalizeForCompare(p.name)))
+  if (newOnes.length === 0) {
+    return { plants: stored, source: 'localStorage+csv-merge', csvFileName, csvTotal: csvPlants.length, csvLastPlantName, addedFromCsv: 0 }
+  }
+  const merged = [...stored, ...newOnes]
+  savePlantsToStorage(merged)
+  return { plants: merged, source: 'localStorage+csv-merge', csvFileName, csvTotal: csvPlants.length, csvLastPlantName, addedFromCsv: newOnes.length }
 }
 
 // ── File import (user upload) ──────────────────────────────────────────────────

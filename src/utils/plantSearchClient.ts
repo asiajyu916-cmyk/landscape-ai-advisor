@@ -9,12 +9,42 @@ import {
   DRAINAGE_KEYWORDS, MAINTENANCE_KEYWORDS, NORMALIZED_CATEGORY_KEYWORDS,
 } from '@/types/plantSearch'
 
-/** 呼叫後端 /api/plant-search。任何失敗都回傳結構化的失敗結果，不拋例外中斷審查流程。 */
+// ── 搜尋結果本地快取 ──────────────────────────────────────────────────────────
+// AI 網路搜尋一次要 ~20 秒，同一個植物名稱不該每次都重新查詢。成功結果寫入
+// localStorage，30 天內同名稱查詢直接使用快取；失敗結果不快取（允許重試）。
+const SEARCH_CACHE_KEY = 'landscape_advisor_plant_search_cache_v1'
+const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000   // 30 天
+
+interface SearchCacheEntry { result: PlantSearchResult; cachedAt: number }
+
+function readSearchCache(): Record<string, SearchCacheEntry> {
+  try {
+    const raw = localStorage.getItem(SEARCH_CACHE_KEY)
+    return raw ? JSON.parse(raw) as Record<string, SearchCacheEntry> : {}
+  } catch { return {} }
+}
+function writeSearchCache(cache: Record<string, SearchCacheEntry>): void {
+  try { localStorage.setItem(SEARCH_CACHE_KEY, JSON.stringify(cache)) } catch { /* quota exceeded，放棄快取即可 */ }
+}
+function searchCacheKey(queryName: string, scientificNameHint?: string): string {
+  return `${queryName.trim().toLowerCase()}|${(scientificNameHint ?? '').trim().toLowerCase()}`
+}
+
+/** 呼叫後端 /api/plant-search。任何失敗都回傳結構化的失敗結果，不拋例外中斷審查流程。
+ *  成功結果會快取 30 天，相同植物名稱重複查詢不再重新呼叫網路搜尋。*/
 export async function searchOfficialPlantData(
   queryName: string,
   scientificNameHint?: string,
   contextNote?: string,
 ): Promise<PlantSearchResponse> {
+  const key = searchCacheKey(queryName, scientificNameHint)
+  const cache = readSearchCache()
+  const cached = cache[key]
+  if (cached && Date.now() - cached.cachedAt < CACHE_TTL_MS) {
+    console.debug(`[plant-search] 快取命中："${queryName}"，略過 AI 網路查詢`)
+    return { ok: true, result: cached.result }
+  }
+
   try {
     const res = await fetch('/api/plant-search', {
       method: 'POST',
@@ -22,7 +52,12 @@ export async function searchOfficialPlantData(
       body: JSON.stringify({ queryName, scientificNameHint, contextNote }),
     })
     const data = await res.json()
-    if (data.ok) return { ok: true, result: data.result as PlantSearchResult }
+    if (data.ok) {
+      const result = data.result as PlantSearchResult
+      cache[key] = { result, cachedAt: Date.now() }
+      writeSearchCache(cache)
+      return { ok: true, result }
+    }
     return { ok: false, queryName, reason: data.reason || '目前查無足夠官方資料，建議人工確認。' }
   } catch (err) {
     return {

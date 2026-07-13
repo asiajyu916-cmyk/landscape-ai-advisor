@@ -14,7 +14,7 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import { Search, Loader2, Sparkles, X as XIcon } from 'lucide-react'
 import type { CsvPlantRecord, PlantImageData } from '@/types/csvPlant'
-import { loadPlantsFromStorage, savePlantsToStorage } from '@/data/plantStore'
+import { savePlantsToStorage, loadPlantsWithCsvMerge } from '@/data/plantStore'
 import { loadImageStore, saveImageStore, upsertPlantImage } from '@/data/plantStore'
 import {
   CONDITIONS, parseTypeIntent, matchesCategory, getAdvisorReply, type AdvisorReply, type PlantCondition,
@@ -196,7 +196,13 @@ export default function PlantAdvisorChatPage() {
   }, [])
 
   useEffect(() => {
-    setPlants(loadPlantsFromStorage() ?? [])
+    loadPlantsWithCsvMerge().then(res => {
+      console.group('🌱 植栽資料庫載入（AI 配植助理）')
+      console.debug(`來源: ${res.source}　CSV 檔名: ${res.csvFileName}　CSV 總筆數: ${res.csvTotal}　CSV 最後一筆: ${res.csvLastPlantName || '(無)'}`)
+      console.debug(`本次從 CSV 補進的新植物數: ${res.addedFromCsv}　最終植物總筆數: ${res.plants.length}`)
+      console.groupEnd()
+      setPlants(res.plants)
+    })
     setImageStore(loadImageStore())
   }, [])
 

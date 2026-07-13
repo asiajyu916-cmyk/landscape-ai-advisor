@@ -12,11 +12,11 @@ type FieldKey = keyof CsvPlantRecord | 'imageUrl'
 
 const HEADER_ALIASES: Record<FieldKey, string[]> = {
   id:                  [],   // 不從 CSV 讀取，程式自動產生
-  name:                ['植物名稱', '中文名稱', '名稱'],
+  name:                ['植物名稱', '中文名稱', '名稱', '植栽名稱', '植物名', '中文名', '品名'],
   category:            ['喬木.灌木.草本', '喬木/灌木/草本', '分類', '大分類'],
   normalizedCategory:  [],   // 由 category 推導，不從 CSV 讀取
   subCategory:         ['細分類', '子分類'],
-  scientificName:      ['學名'],
+  scientificName:      ['學名', '拉丁學名', '學名/拉丁名', 'scientificname'],
 
   height:              ['樹高'],
   crownWidth:          ['樹冠'],
