@@ -329,8 +329,14 @@ export function detectZonesFromText(
   const ZONE_LAYER_RE = /AREA|區域定義|區域|分區|ZONE/i
   const zoneLayerPolysStrict = closedPolygons.filter(p =>
     p.source !== 'HATCH' && ZONE_LAYER_RE.test(p.layer))
+  // 圖層名稱本身要能辨識出具體是哪一區（含字母/數字/中文數字 + 區），才算「per-zone」
+  // 候選；沒有分區前綴的通用「評估範圍」（涵蓋全場）不算，只留給 pointInScope 做
+  // 整體範圍過濾。否則分區標籤若剛好落在通用大框內（即使也在自己的小框外一點點，
+  // 例如標籤位置略偏出自己那條線），會被這個通用大框搶走，導致該區綁錯邊界。
+  const ZONE_SPECIFIC_LAYER_RE = /[A-Za-z0-9一二三四五六七八九十]\s*區/
   const perZoneEvalPolys = (scope?.evalBoundaries.length ?? 0) >= 2
-    ? closedPolygons.filter(p => p.source !== 'HATCH' && EVAL_BOUNDARY_LAYER_RE.test(p.layer))
+    ? closedPolygons.filter(p =>
+        p.source !== 'HATCH' && EVAL_BOUNDARY_LAYER_RE.test(p.layer) && ZONE_SPECIFIC_LAYER_RE.test(p.layer))
     : []
   const zoneLayerPolys = zoneLayerPolysStrict.length >= 2 ? zoneLayerPolysStrict : perZoneEvalPolys
 
@@ -385,10 +391,16 @@ export function detectZonesFromText(
     const used = new Set<DxfPolygon>()
 
     // Pass 1：標籤在 polyline 內
+    // 若標籤同時落在多條候選 polyline 內（例如「B區評估範圍」與涵蓋全場的通用
+    // 「評估範圍」大框重疊），取 bbox 面積最小者（最貼合該區的框），而非陣列
+    // 中第一個命中的——否則标籤會被無關的大框「搶走」，導致該區綁錯邊界。
     const unmatched: typeof candidates = []
     for (const cand of candidates) {
       if (seenNames.has(cand.name)) continue
-      const hit = zoneLayerPolys.find(p => !used.has(p) && pointInPolygon(cand.x, cand.y, p.vertices))
+      const containing = zoneLayerPolys.filter(p => !used.has(p) && pointInPolygon(cand.x, cand.y, p.vertices))
+      const hit = containing.length > 0
+        ? containing.reduce((a, b) => bboxArea(a) <= bboxArea(b) ? a : b)
+        : undefined
       if (hit) {
         used.add(hit); seenNames.add(cand.name)
         zones.push({ name: cand.name, labelPosition: { x: cand.x, y: cand.y }, boundary: hit, confidence: 'high', source: 'text-in-polygon' })
