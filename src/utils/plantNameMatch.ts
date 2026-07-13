@@ -6,6 +6,41 @@
 import type { CsvPlantRecord } from '@/types/csvPlant'
 import type { PlantMatchCandidate, SimilarPlantCandidate } from '@/types/plantSearch'
 
+// ── 全形/半形統一 + 去空白 ────────────────────────────────────────────────────
+// 注意：這段（含 normalizeForCompare）一定要放在 ALIAS_GROUPS/ALIAS_MAP 之前——
+// 下面 buildAliasMap() 會在模組載入時立即執行、呼叫 normalizeForCompare()，
+// 若 normalizeForCompare 依賴的 const 宣告在它之後，打包後會出現「暫時死區」
+// ReferenceError（模組整個載入失敗、畫面空白），曾經因此讓正式站掛掉過一次。
+function toHalfWidth(s: string): string {
+  return s.replace(/[！-～]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+          .replace(/　/g, ' ')   // 全形空白
+}
+
+// 常見異體字統一（僅限比對用途，不影響原始資料顯示）：
+// 「臺」為「台」的傳統寫法，索引表/CSV/使用者輸入常混用，例如「臺北草」應視為「台北草」。
+function unifyVariantChars(s: string): string {
+  return s.replace(/臺/g, '台')
+}
+
+// 常見不可見字元（零寬空白、位元組順序記號等）：CSV / 索引表文字複製貼上時常見的雜訊，
+// 比對前先移除，避免「看起來一樣」卻因為藏了不可見字元而判定為不同植物。
+// 用 RegExp 建構函式 + charCode 組字串產生，避免原始碼裡混入真正的雙向控制字元。
+const INVISIBLE_CHAR_CODES = [0x200b, 0x200c, 0x200d, 0x200e, 0x200f, 0x2060, 0xfeff, 0x00ad]
+const INVISIBLE_CHARS_RE = new RegExp(
+  '[' + INVISIBLE_CHAR_CODES.map(c => '\\u' + c.toString(16).padStart(4, '0')).join('') + ']',
+  'g',
+)
+
+/** 供比對用的正規化：去除不可見字元、換行、所有空白、全形轉半形、統一為小寫（英數部分）*/
+export function normalizeForCompare(raw: string): string {
+  return unifyVariantChars(toHalfWidth(raw))
+    .replace(INVISIBLE_CHARS_RE, '')
+    .replace(/[\s ]+/g, '')
+    .replace(/[（）]/g, m => (m === '（' ? '(' : ')'))
+    .toLowerCase()
+    .trim()
+}
+
 // ── 常見別名對照表 ────────────────────────────────────────────────────────────
 // 索引表 / 圖面常用簡稱、俗名 ↔ 資料庫慣用正式名稱。
 // 可持續擴充；左側可為多個別名對一個正式名稱。
@@ -57,32 +92,6 @@ const ALIAS_GROUP_MAP = buildAliasGroupMap()
 /** 回傳 name 所屬別名組的完整清單（含 name 本身）；查無別名組則回傳 [name] */
 export function getAliasGroup(name: string): string[] {
   return ALIAS_GROUP_MAP.get(normalizeForCompare(name)) ?? [name]
-}
-
-// ── 全形/半形統一 + 去空白 ────────────────────────────────────────────────────
-function toHalfWidth(s: string): string {
-  return s.replace(/[\uFF01-\uFF5E]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
-          .replace(/\u3000/g, ' ')   // 全形空白
-}
-
-// 常見異體字統一（僅限比對用途，不影響原始資料顯示）：
-// 「臺」為「台」的傳統寫法，索引表/CSV/使用者輸入常混用，例如「臺北草」應視為「台北草」。
-function unifyVariantChars(s: string): string {
-  return s.replace(/臺/g, '台')
-}
-
-// 常見不可見字元（零寬空白、位元組順序記號等）：CSV / 索引表文字複製貼上時常見的雜訊，
-// 比對前先移除，避免「看起來一樣」卻因為藏了不可見字元而判定為不同植物。
-const INVISIBLE_CHARS_RE = /[​-‏⁠﻿­]/g
-
-/** 供比對用的正規化：去除不可見字元、換行、所有空白、全形轉半形、統一為小寫（英數部分）*/
-export function normalizeForCompare(raw: string): string {
-  return unifyVariantChars(toHalfWidth(raw))
-    .replace(INVISIBLE_CHARS_RE, '')
-    .replace(/[\s\u00A0]+/g, '')
-    .replace(/[（）]/g, m => (m === '（' ? '(' : ')'))
-    .toLowerCase()
-    .trim()
 }
 
 /** 學名正規化：統一空白為單一半形空格、去除命名者縮寫括號等雜訊，僅比對屬種二名 */
