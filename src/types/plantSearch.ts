@@ -122,10 +122,13 @@ export interface DraftPlantRecord extends CsvPlantRecord {
 
 export const SUN_REQ_KEYWORDS: Array<{ re: RegExp; value: SunReq }> = [
   { re: /全日照.{0,3}(半日照|半陰)/, value: '全日照至半日照' },
-  { re: /半日照.{0,3}(遮陰|全陰|耐陰)/, value: '半日照至遮陰' },
+  { re: /半日照.{0,4}(遮陰|全陰|耐陰)/, value: '半日照至遮陰' },
   { re: /全日照|強光|日照充足/, value: '全日照' },
-  { re: /半日照/, value: '全日照至半日照' },
-  { re: /耐陰|遮陰|半陰|全陰/, value: '半日照至遮陰' },
+  // 真正耐陰：明確提到遮陰/全陰/耐陰/陰暗等強遮蔭字眼，可長期在低光環境生長
+  { re: /耐陰|遮陰|全陰|陰暗|背光|光線不足/, value: '半日照至遮陰' },
+  // 半日照適應／可耐半陰：只提到「半陰」「半日照」這類較弱的字眼，代表仍需部分日照、
+  // 只是能容忍半日照或部分遮陰，不能等同於真正耐陰，需另外分類避免混入耐陰查詢結果
+  { re: /半日照|半陰|可耐半陰|部分遮陰/, value: '半日照' },
 ]
 
 export const WATER_REQ_KEYWORDS: Array<{ re: RegExp; value: WaterReq }> = [

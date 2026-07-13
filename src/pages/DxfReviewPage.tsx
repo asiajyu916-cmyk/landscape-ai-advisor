@@ -772,6 +772,35 @@ function buildZoneReviews(
     }
   }
 
+  // ── Legend → 實際 HATCH → 分區 配對 Debug（依使用者需求逐欄位輸出）─────────
+  // 只在「植物名稱已透過某種命中方式對應到實際 HATCH」時呼叫，
+  // 用來確認 Legend 圖例 → 實際圖面 HATCH entity → 所屬 AREA 分區 這條鏈是否完整。
+  const logLegendToHatchToZone = (params: {
+    plantName: string
+    area: import('@/types/dxf').ZonePlantArea
+    zoneName: string
+    hitMethod: string
+    includedInEval: boolean
+  }): void => {
+    const { plantName, area, zoneName, hitMethod, includedInEval } = params
+    const legend = legendItems.find(li => li.plantName === plantName)
+    console.group(`🌱 [Legend→HATCH→Zone] 植物名稱：${plantName}`)
+    console.debug(`Legend pattern：${legend?.hatchPattern ?? '(無)'}`)
+    console.debug(`實際 HATCH pattern：${area.hatchPattern ?? '(無)'}`)
+    console.debug(`Legend color：${legend?.hatchColor ?? '(無)'}`)
+    console.debug(`實際 color：${area.hatchColor ?? '(無)'}`)
+    console.debug(`Legend scale：${legend?.hatchScale ?? '(無)'}`)
+    console.debug(`實際 scale：${area.hatchScale ?? '(無)'}`)
+    console.debug(`Legend angle：${legend?.hatchAngle ?? '(無)'}`)
+    console.debug(`實際 angle：${area.hatchAngle ?? '(無)'}`)
+    console.debug(`Layer：${area.layer || '(無)'}`)
+    console.debug(`命中方式：${hitMethod}`)
+    console.debug(`AREA overlap ratio：${area.overlapRatio !== undefined ? (area.overlapRatio * 100).toFixed(0) + '%' : '(無)'}${area.crossZone ? '（面積跨越/貼近分區邊界，需人工確認）' : ''}`)
+    console.debug(`最終分區：${zoneName}`)
+    console.debug(`最終是否納入評估：${includedInEval ? '是' : '否'}`)
+    console.groupEnd()
+  }
+
   // ── Debug Table 1: legendItems signatures ────────────────────────────────
   console.group('📋 Debug Table 1: legendItems')
   console.debug(`symbolColX=${isNaN(symbolColX) ? '(未找到圖例欄標頭)' : symbolColX.toFixed(0)}  symbolColHalfW=${symbolColHalfW.toFixed(0)}  rowHalfHeight=${rowHalfHeight.toFixed(0)}`)
@@ -1051,11 +1080,40 @@ function buildZoneReviews(
         continue
       }
 
-      // ── D-2（已降級）：圖層名稱比對移至 Section A 之後 ──────────────────
-      // 依審查優先序：legend HATCH → HATCH 特徵 → nearby TEXT → layer（僅輔助）
-      // 原本 layer 比對在圖例比對之前，導致過度依賴 layer；現移到文字搜尋之後。
+      // ── Priority 1（第一優先）：實際 HATCH layer 名稱直接命中索引表/DB 植物名稱 ──
+      // 例如 layer="草皮-台北草"：layer 名稱本身就直接點名植物，
+      // 比 pattern/scale/angle 特徵比對更可靠，優先於 Section D 的圖例特徵比對。
+      if (!matched && area.source === 'HATCH' && layerName) {
+        const layerHitPlant =
+          schedule.find(e => e.plantName && e.plantName.length >= 2 && layerName.includes(e.plantName))?.plantName
+          ?? plantDB.find(p => p.name.length >= 2 && layerName.includes(p.name))?.name
+        if (layerHitPlant) {
+          const alreadySeen = seenNames.has(layerHitPlant)
+          logLegendToHatchToZone({
+            plantName: layerHitPlant, area, zoneName: zpl.zone.name,
+            hitMethod: `layer 名稱直接命中「${layerHitPlant}」（第一優先）`,
+            includedInEval: !alreadySeen,
+          })
+          if (!alreadySeen) {
+            seenNames.add(layerHitPlant)
+            const dbP = findInDB(layerHitPlant, plantDB)
+            if (dbP) {
+              const ps = dbP.wetTolerance === '不耐積水' && dbP.droughtTolerance === '不耐旱' ? '需注意' as const : '可用' as const
+              confirmed.push({ ...dbP, instanceId: uid(), status: ps })
+              blockEntries.push({ blockName: `[HATCH圖層命中] layer:${layerName}`, plantName: dbP.name, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'db-matched' })
+            } else {
+              blockEntries.push({ blockName: `[HATCH圖層命中] layer:${layerName}`, plantName: layerHitPlant, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'name-only' })
+            }
+            if (area.crossZone) {
+              areaLayerNotes.push(`已匹配「${layerHitPlant}」，分區歸屬需確認（layer 直接命中，HATCH 與「${zpl.zone.name}」重疊比例 ${((area.overlapRatio ?? 0) * 100).toFixed(0)}%，跨越或貼近分區邊界）`)
+            }
+          }
+          matched = true
+        }
+      }
+      if (matched) continue
 
-      // ── D. HATCH pattern 圖例對照（最優先：pattern name → 索引表植物名稱）──
+      // ── D. HATCH pattern 圖例對照（第二／第三優先：pattern+color+scale+angle → 容許誤差）──
       // 即使植栽不在 DB，也要標記為 matched，不讓 Layer 名稱覆蓋辨識結果
       if (!matched && area.source === 'HATCH') {
         const _aPat = area.hatchPattern?.trim()
@@ -1088,6 +1146,7 @@ function buildZoneReviews(
         ]
         let legendPlant: string | undefined
         let matchedLookupKey: string | undefined
+        let hitMethodLabel = ''
         for (const key of lookupKeys) {
           if (key === null) continue
           const hit = lookupLegendPlant(hatchPatternToPlant, key ?? undefined)
@@ -1181,6 +1240,7 @@ function buildZoneReviews(
             if (bestPlant && bestScore >= 70) {
               legendPlant = bestPlant
               matchedLookupKey = `score:${bestScore}`
+              hitMethodLabel = `pattern 相符，scale/angle 容許誤差內（第三優先，score=${bestScore}）`
               console.log(`✅ [HATCH ScoreMatch] zone="${zpl.zone.name}" pattern="${area.hatchPattern ?? '(無)'}" ${_dbgColor()} → "${bestPlant}"(${bestCode}) score=${bestScore}`)
             } else if (bestPlant && bestScore >= 40) {
               // 候選：進 blockEntries 但標記需人工確認，不進 confirmed
@@ -1206,12 +1266,22 @@ function buildZoneReviews(
           const whichKey = drawingCompositeKeyFull && hatchPatternToPlant.has(drawingCompositeKeyFull) ? 'composite+color'
             : drawingCompositeKey && hatchPatternToPlant.has(drawingCompositeKey) ? 'composite'
             : 'pattern-only'
+          hitMethodLabel = whichKey === 'composite+color'
+            ? 'pattern+color+scale+angle 完全相符（第二優先）'
+            : whichKey === 'composite'
+              ? 'pattern+scale+angle 相符（color 未知，第二優先）'
+              : 'pattern 相符（geometry fingerprint，第三優先）'
           console.log(`✅ [HATCH Match] zone="${zpl.zone.name}"  pattern="${area.hatchPattern}"  →  "${legendPlant}"  via=${whichKey}`)
         }
         if (legendPlant) {
           const nameKey = legendPlant
           const alreadySeen = seenNames.has(nameKey)
           console.debug(`  ├─ seenNames.has("${nameKey}") = ${alreadySeen}  (seenNames=[${[...seenNames].join(', ')}])`)
+          logLegendToHatchToZone({
+            plantName: legendPlant, area, zoneName: zpl.zone.name,
+            hitMethod: hitMethodLabel || `建表 key="${matchedLookupKey ?? '(無)'}"`,
+            includedInEval: !alreadySeen,
+          })
           if (!alreadySeen) {
             seenNames.add(nameKey)
             const dbP = findInDB(legendPlant, plantDB)
@@ -1222,6 +1292,9 @@ function buildZoneReviews(
               blockEntries.push({ blockName: `[HATCH圖例] ${matchedLookupKey ?? area.hatchPattern ?? 'symbol'}`, plantName: dbP.name, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'db-matched' })
             } else {
               blockEntries.push({ blockName: `[HATCH圖例] ${matchedLookupKey ?? area.hatchPattern ?? 'symbol'}`, plantName: legendPlant, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'name-only' })
+            }
+            if (area.crossZone) {
+              areaLayerNotes.push(`已匹配「${legendPlant}」，分區歸屬需確認（HATCH 與「${zpl.zone.name}」重疊比例 ${((area.overlapRatio ?? 0) * 100).toFixed(0)}%，跨越或貼近分區邊界）`)
             }
             console.debug(`  └─ ✅ PlantEntity PUSHED`, {
               sourceType: 'HATCH',
@@ -1326,29 +1399,8 @@ function buildZoneReviews(
       } // end Section A (HATCH only)
       if (matched) continue
 
-      // ── B. Layer 輔助比對（第 4 順位：legend → HATCH 特徵 → nearby text 都失敗才用）──
-      // layer 只能輔助，不可作為主判斷；比對結果標記 layer-assisted 供 UI 顯示信心
-      if (!matched && area.source === 'HATCH' && layerName) {
-        const layerPlant =
-          schedule.find(e => e.plantName && e.plantName.length >= 2 && layerName.includes(e.plantName))?.plantName
-          ?? plantDB.find(p => p.name.length >= 2 && layerName.includes(p.name))?.name
-        if (layerPlant) {
-          console.log(`🟡 [HATCH LayerAssist] zone="${zpl.zone.name}" layer="${layerName}" → "${layerPlant}"（圖層名輔助，前 3 順位皆未命中）`)
-          if (!seenNames.has(layerPlant)) {
-            seenNames.add(layerPlant)
-            const dbP = findInDB(layerPlant, plantDB)
-            if (dbP) {
-              const ps = dbP.wetTolerance === '不耐積水' && dbP.droughtTolerance === '不耐旱' ? '需注意' as const : '可用' as const
-              confirmed.push({ ...dbP, instanceId: uid(), status: ps })
-              blockEntries.push({ blockName: `[HATCH候選] score:50 layer:${layerName}`, plantName: dbP.name, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'db-matched' })
-            } else {
-              blockEntries.push({ blockName: `[HATCH候選] score:50 layer:${layerName}`, plantName: layerPlant, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'name-only' })
-            }
-          }
-          matched = true
-          continue
-        }
-      }
+      // （原 Section B「layer 輔助比對」已併入前面的 Priority 1 區塊，
+      //   layer 直接命中改為最優先，故此處不再重複判斷。）
 
       // ── E. LWPOLYLINE / POLYLINE 繼承重疊 HATCH 的植物名稱 ───────────────
       // 當面積多邊形是 LWPOLYLINE（CAD 封閉折線）且 Legend Mapping 有值，

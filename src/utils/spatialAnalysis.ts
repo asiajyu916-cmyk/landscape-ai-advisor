@@ -973,7 +973,7 @@ export interface InstanceDebug {
   rotation?: number
   layer: string
   assignedZone: string   // 分區名稱 或 '未歸區'
-  method: 'bbox-center' | 'insert-point' | 'none'
+  method: 'bbox-center' | 'insert-point' | 'canopy-overlap' | 'none'
   reason: string
 }
 

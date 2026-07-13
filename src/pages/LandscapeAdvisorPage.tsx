@@ -873,7 +873,7 @@ function ConditionSearchCard({ r }: { r: AdvisorReply }) {
   )
 }
 
-function AdvisorReplyCard({ r }: { r: AdvisorReply }) {
+export function AdvisorReplyCard({ r, hidePairCategories }: { r: AdvisorReply; hidePairCategories?: boolean }) {
   if (r.kind === 'condition_search') return <ConditionSearchCard r={r} />
   return (
     <div className="space-y-2.5 text-sm">
@@ -890,7 +890,7 @@ function AdvisorReplyCard({ r }: { r: AdvisorReply }) {
           }`}>配置評分 {r.score} / 100</span>
         )}
       </div>
-      {r.pairCategories && r.pairCategories.length > 0 && (
+      {!hidePairCategories && r.pairCategories && r.pairCategories.length > 0 && (
         <div>
           <p className="text-xs font-bold text-emerald-700 mb-1.5">✓ 建議搭配植栽</p>
           <div className="space-y-2">
@@ -1263,7 +1263,25 @@ export function getSuitability(plant: CsvPlantRecord): { label: string; cls: str
 
 // ── PlantCardItem ──────────────────────────────────────────────────────────────
 
-export function PlantCardItem({ plant, imageData, added, fresh, isActive, onDetail, onAdd }: {
+// AI 配植助理用：卡片附加的「符合度」資訊。僅在有傳入時才會多顯示花期/落葉/毒性/
+// 適配原因/注意事項與符合度徽章，一般植栽資料庫／AI 配植評估卡片不受影響。
+export type PlantMatchTier = 'full' | 'partial' | 'caution'
+export interface PlantMatchInfo {
+  tier?: PlantMatchTier
+  reason?: string
+  caution?: string
+}
+
+const MATCH_TIER_LABEL: Record<PlantMatchTier, string> = {
+  full: '高度符合', partial: '部分符合', caution: '需注意',
+}
+const MATCH_TIER_STYLE: Record<PlantMatchTier, string> = {
+  full: 'bg-emerald-100 text-emerald-700 border-emerald-300',
+  partial: 'bg-amber-100 text-amber-700 border-amber-300',
+  caution: 'bg-orange-100 text-orange-700 border-orange-300',
+}
+
+export function PlantCardItem({ plant, imageData, added, fresh, isActive, onDetail, onAdd, matchInfo }: {
   plant: CsvPlantRecord
   imageData?: PlantImageData
   added: boolean
@@ -1271,6 +1289,7 @@ export function PlantCardItem({ plant, imageData, added, fresh, isActive, onDeta
   isActive: boolean
   onDetail: () => void
   onAdd: () => void
+  matchInfo?: PlantMatchInfo
 }) {
   const approvedUrl = (!imageData?.imageReviewStatus || imageData.imageReviewStatus === 'approved')
     ? imageData?.imageUrl : undefined
@@ -1318,6 +1337,15 @@ export function PlantCardItem({ plant, imageData, added, fresh, isActive, onDeta
         )}
       </div>
 
+      {/* ①.5 AI 配植助理符合度徽章（僅在有 matchInfo.tier 時顯示）*/}
+      {matchInfo?.tier && (
+        <div className="px-3.5 pt-2.5">
+          <span className={`inline-block text-[10px] px-2 py-0.5 rounded-full font-semibold border ${MATCH_TIER_STYLE[matchInfo.tier]}`}>
+            {MATCH_TIER_LABEL[matchInfo.tier]}
+          </span>
+        </div>
+      )}
+
       {/* ② Name */}
       <div className="px-3.5 pt-3 pb-1">
         <p className="font-bold text-stone-900 text-[15px] leading-tight">{plant.name}</p>
@@ -1350,6 +1378,35 @@ export function PlantCardItem({ plant, imageData, added, fresh, isActive, onDeta
           </div>
         ))}
       </div>
+
+      {/* ③.5 AI 配植助理額外欄位：花期／落葉／毒性（僅在有 matchInfo 時顯示）*/}
+      {matchInfo && (
+        <div className="px-3.5 pb-2 flex flex-wrap gap-x-2.5 gap-y-1 text-[11px] text-stone-500">
+          <span>🌸 花期：{plant.flowerPeriod || plant.flowerMonth || '無明顯花期'}</span>
+          <span>🍂 {plant.leafDropStatus || '落葉性未特別標註'}</span>
+          {plant.toxicity && /有毒|毒性(強|中)/.test(plant.toxicity) ? (
+            <span className="text-red-600 font-semibold">☠ 有毒性</span>
+          ) : (
+            <span>☠ 無明顯毒性</span>
+          )}
+        </div>
+      )}
+
+      {/* ③.6 適配原因／注意事項（僅在有 matchInfo 時顯示）*/}
+      {matchInfo?.reason && (
+        <div className="px-3.5 pb-1.5">
+          <p className="text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1.5 leading-snug">
+            <span className="font-semibold">適配原因：</span>{matchInfo.reason}
+          </p>
+        </div>
+      )}
+      {matchInfo?.caution && (
+        <div className="px-3.5 pb-1.5">
+          <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1.5 leading-snug">
+            <span className="font-semibold">注意事項：</span>{matchInfo.caution}
+          </p>
+        </div>
+      )}
 
       {/* ④ Risk chips */}
       {plant.riskTags.length > 0 && (
@@ -2340,7 +2397,8 @@ function PlantDatabaseModal({ plants, onClose, onSelect, selectedIds, imageStore
             <span className="text-xs text-stone-400 font-medium w-10 flex-shrink-0">日照</span>
             <Chip label="全日照" color="amber" active={filterSun === '全日照'} onClick={() => setFilterSun(filterSun === '全日照' ? '' : '全日照')} />
             <Chip label="全日照至半日照" color="amber" active={filterSun === '全日照至半日照'} onClick={() => setFilterSun(filterSun === '全日照至半日照' ? '' : '全日照至半日照')} />
-            <Chip label="半日照至遮陰" color="amber" active={filterSun === '半日照至遮陰'} onClick={() => setFilterSun(filterSun === '半日照至遮陰' ? '' : '半日照至遮陰')} />
+            <Chip label="半日照（可耐半陰）" color="amber" active={filterSun === '半日照'} onClick={() => setFilterSun(filterSun === '半日照' ? '' : '半日照')} />
+            <Chip label="半日照至遮陰（真耐陰）" color="amber" active={filterSun === '半日照至遮陰'} onClick={() => setFilterSun(filterSun === '半日照至遮陰' ? '' : '半日照至遮陰')} />
           </div>
           {/* Row 3: water + wet */}
           <div className="flex gap-1.5 flex-wrap items-center">

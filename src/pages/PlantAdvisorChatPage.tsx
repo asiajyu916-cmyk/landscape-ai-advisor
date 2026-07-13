@@ -17,11 +17,91 @@ import type { CsvPlantRecord, PlantImageData } from '@/types/csvPlant'
 import { loadPlantsFromStorage, savePlantsToStorage } from '@/data/plantStore'
 import { loadImageStore, saveImageStore, upsertPlantImage } from '@/data/plantStore'
 import {
-  CONDITIONS, parseTypeIntent, matchesCategory, getAdvisorReply,
+  CONDITIONS, parseTypeIntent, matchesCategory, getAdvisorReply, type AdvisorReply, type PlantCondition,
 } from '@/utils/plantAdvisor'
-import { PlantCardItem, PlantDetailDrawer } from './LandscapeAdvisorPage'
+import { PlantCardItem, PlantDetailDrawer, AdvisorReplyCard, type PlantMatchTier } from './LandscapeAdvisorPage'
 
 type CategoryKey = 'tree' | 'shrub' | 'groundcover' | 'lawn'
+
+// ── AI 推薦植栽結果卡片（右側）用的資料結構 ─────────────────────────────────
+interface ResultCard {
+  plant: CsvPlantRecord
+  tier?: PlantMatchTier
+  reason?: string
+  caution?: string
+}
+
+const TIER_ORDER: Record<PlantMatchTier, number> = { full: 0, partial: 1, caution: 2 }
+
+/** 依目前類型/條件篩選本地資料庫，並依符合度分類為 高度符合／部分符合／需注意 */
+function buildFilterCards(
+  plants: CsvPlantRecord[], activeType: CategoryKey | null, activeConds: Set<string>,
+): ResultCard[] {
+  let list = plants
+  if (activeType) list = list.filter(p => matchesCategory(p, activeType))
+  const conds = [...activeConds]
+    .map(k => CONDITIONS.find(c => c.key === k))
+    .filter((c): c is PlantCondition => !!c)
+
+  if (conds.length === 0) return list.map(p => ({ plant: p }))
+
+  const cards: ResultCard[] = list
+    .map(p => ({ plant: p, matched: conds.filter(c => c.test(p)) }))
+    .filter(s => s.matched.length > 0)
+    .map(({ plant, matched }) => {
+      const missing = conds.filter(c => !matched.includes(c)).map(c => c.label)
+      const reason = matched.map(c => c.why(plant)).join('・')
+      const caution = buildCautionNote(plant, missing)
+      const tier: PlantMatchTier = missing.length > 0 ? 'partial' : caution ? 'caution' : 'full'
+      return { plant, tier, reason, caution }
+    })
+
+  return cards.sort((a, b) => TIER_ORDER[a.tier!] - TIER_ORDER[b.tier!])
+}
+
+function buildCautionNote(p: CsvPlantRecord, missingLabels: string[]): string | undefined {
+  const notes: string[] = []
+  if (missingLabels.length > 0) notes.push(`未符合：${missingLabels.join('、')}`)
+  if (!p.dataComplete) notes.push('部分欄位資料屬初步判定，建議人工核實')
+  if (p.riskTags.includes('有毒性注意')) notes.push('具毒性，需留意兒童／寵物活動區配置')
+  if (p.riskTags.includes('積水風險') || p.riskTags.includes('排水敏感')) notes.push('不耐積水，需確保排水')
+  if (p.riskTags.includes('病蟲害注意')) notes.push('易有病蟲害，需定期巡查')
+  if (p.maintenanceLevel === '高') notes.push('維護需求較高')
+  return notes.length > 0 ? notes.join('；') : undefined
+}
+
+/** 短摘要，取代原本逐一列出植物的長篇文字 */
+function summarizeFilterCards(cards: ResultCard[], condLabel: string, typeLabel: string): string {
+  const label = [typeLabel, condLabel].filter(Boolean).join('、') || '所選條件'
+  if (cards.length === 0) return `本地資料庫查無符合「${label}」的植物，正在搜尋官方資料補充建議…`
+  const full = cards.filter(c => c.tier === 'full').length
+  const partial = cards.filter(c => c.tier === 'partial').length
+  const caution = cards.filter(c => c.tier === 'caution').length
+  const bits: string[] = []
+  if (full > 0) bits.push(`${full} 種高度適配`)
+  if (partial > 0) bits.push(`${partial} 種部分符合`)
+  if (caution > 0) bits.push(`${caution} 種需注意日照或養護條件`)
+  const detail = bits.length > 0 ? `，其中${bits.join('、')}` : ''
+  return `共找到 ${cards.length} 種符合「${label}」條件的植物${detail}。詳細資料請見右側卡片。`
+}
+
+/** 單一植物搭配建議（plant_pairing）：把 pairCategories 的 picks 對回本地資料庫植株，組成卡片 */
+function buildCardsFromPairCategories(
+  pairCategories: NonNullable<AdvisorReply['pairCategories']>, plants: CsvPlantRecord[],
+): ResultCard[] {
+  const cards: ResultCard[] = []
+  for (const cat of pairCategories) {
+    for (const pick of cat.picks) {
+      const p = pick as { name: string; reason: string; why?: string; fromFallback?: boolean; fromDB?: boolean }
+      if (p.fromFallback === true || p.fromDB === false) continue   // 系統預設建議，本地資料庫無完整欄位，無法組成卡片
+      const plant = plants.find(x => x.name === p.name)
+      if (!plant) continue
+      if (cards.some(c => c.plant.id === plant.id)) continue
+      cards.push({ plant, reason: p.why || p.reason })
+    }
+  }
+  return cards
+}
 
 const TYPE_FILTERS: Array<{ key: CategoryKey; label: string }> = [
   { key: 'tree', label: '喬木' },
@@ -36,7 +116,8 @@ const QUICK_CONDITION_KEYS = ['drought', 'shade', 'lowmaint', 'showy', 'leafdrop
 
 interface ChatMsg {
   role: 'user' | 'assistant'
-  text: string
+  text?: string
+  reply?: AdvisorReply   // 有值時以 AdvisorReplyCard 呈現豐富格式（搭配徽章／風險清單／完整搭配方案）
 }
 
 interface ApiSuggestion { name: string; reason: string; sourceUrl?: string }
@@ -119,26 +200,28 @@ export default function PlantAdvisorChatPage() {
     setImageStore(loadImageStore())
   }, [])
 
-  // ── 目前篩選條件下的比對結果（本地資料庫，優先）────────────────────────────
-  const matches = useMemo(() => {
-    let list = plants
-    if (activeType) list = list.filter(p => matchesCategory(p, activeType))
-    for (const key of activeConds) {
-      const cond = CONDITIONS.find(c => c.key === key)
-      if (cond) list = list.filter(cond.test)
-    }
-    return list
-  }, [plants, activeType, activeConds])
+  // ── 目前篩選條件下的比對結果（本地資料庫，優先，依符合度分類＋排序）────────────
+  const filterCards = useMemo(
+    () => buildFilterCards(plants, activeType, activeConds),
+    [plants, activeType, activeConds],
+  )
+  // 自然語言問句若命中「單一植物搭配建議」，改用這組卡片覆蓋掉篩選結果
+  const [pairingCards, setPairingCards] = useState<ResultCard[] | null>(null)
+  const [pairingLabel, setPairingLabel] = useState('')
+
+  const isSearchMode = activeType !== null || activeConds.size > 0 || pairingCards !== null
+  const displayCards = pairingCards ?? filterCards
 
   const typeLabel = activeType ? TYPE_FILTERS.find(t => t.key === activeType)?.label ?? '' : ''
   const condLabels = [...activeConds].map(k => CONDITIONS.find(c => c.key === k)?.label).filter(Boolean) as string[]
+  const resultsHeaderLabel = pairingCards !== null ? pairingLabel : [typeLabel, ...condLabels].filter(Boolean).join('、')
 
   const toggleType = (key: CategoryKey) => {
-    setApiSuggestions(null); setApiNote('')
+    setApiSuggestions(null); setApiNote(''); setPairingCards(null)
     setActiveType(prev => prev === key ? null : key)
   }
   const toggleCond = (key: string) => {
-    setApiSuggestions(null); setApiNote('')
+    setApiSuggestions(null); setApiNote(''); setPairingCards(null)
     setActiveConds(prev => {
       const next = new Set(prev)
       if (next.has(key)) next.delete(key); else next.add(key)
@@ -168,9 +251,13 @@ export default function PlantAdvisorChatPage() {
     }
   }, [])
 
-  // 篩選結果變動時，若本地完全查無資料，自動觸發 API 補充建議
+  // 篩選條件變動時：推送簡短摘要訊息（取代逐一列出植物的長篇文字），
+  // 本地完全查無資料時才自動觸發 API 補充建議
   useEffect(() => {
-    if (matches.length === 0 && (activeType || activeConds.size > 0) && plants.length > 0) {
+    if (!activeType && activeConds.size === 0) return
+    setPairingCards(null)
+    setMessages(prev => [...prev, { role: 'assistant', text: summarizeFilterCards(filterCards, condLabels.join('、'), typeLabel) }])
+    if (filterCards.length === 0 && plants.length > 0) {
       callApiFallback(typeLabel, condLabels)
     } else {
       setApiSuggestions(null); setApiNote('')
@@ -189,35 +276,30 @@ export default function PlantAdvisorChatPage() {
     const parsedConds = CONDITIONS.filter(c => c.pattern.test(q))
 
     if (parsedTypes.length > 0 || parsedConds.length > 0) {
-      // 看起來是「找符合條件的植物」類型的問題 → 用篩選條件 + 卡片呈現
-      const nextType = parsedTypes.length > 0 ? parsedTypes[0] : null
-      const nextConds = new Set(parsedConds.map(c => c.key))
-      setActiveType(nextType)
-      setActiveConds(nextConds)
-      const tLabel = nextType ? TYPE_FILTERS.find(t => t.key === nextType)?.label ?? '' : '植物'
-      const cLabels = parsedConds.map(c => c.label)
-      const list = plants
-        .filter(p => !nextType || matchesCategory(p, nextType))
-        .filter(p => [...nextConds].every(k => CONDITIONS.find(c => c.key === k)?.test(p)))
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        text: list.length > 0
-          ? `本地資料庫找到 ${list.length} 種符合「${cLabels.join('、') || '條件'}」的${tLabel}，已列在右側。`
-          : `本地資料庫查無符合「${cLabels.join('、') || '條件'}」的${tLabel}，正在搜尋官方資料補充建議…`,
-      }])
+      // 看起來是「找符合條件的植物」類型的問題 → 交給上面的 useEffect 統一產生摘要與卡片
+      setPairingCards(null)
+      setActiveType(parsedTypes.length > 0 ? parsedTypes[0] : null)
+      setActiveConds(new Set(parsedConds.map(c => c.key)))
     } else {
       // 不是條件式列表查詢（例如「哪些植物不建議混植」這類相容性問題）
       // → 交給既有規則引擎（跟「AI 配植評估」頁下方那個助理同一套邏輯）
       setActiveType(null); setActiveConds(new Set())
       try {
         const reply = await getAdvisorReply(q, { db: plants })
-        const parts: string[] = [reply.verdict]
-        if (reply.badPairs.length > 0) {
-          parts.push('不建議混植：' + reply.badPairs.map(b => `${b.name}（${b.reason}）`).join('；'))
+
+        if (reply.pairCategories && reply.pairCategories.length > 0) {
+          // 單一植物搭配建議：可搭配植栽整理成右側卡片，聊天區用完整格式卡呈現
+          // 判斷／不建議搭配／風險／完整搭配方案（建議植栽清單交給卡片，這裡不重複列出）
+          const cards = buildCardsFromPairCategories(reply.pairCategories, plants)
+          setPairingCards(cards)
+          setPairingLabel('可搭配植栽建議')
+          const verdict = cards.length > 0 ? `${reply.verdict}已整理 ${cards.length} 種可搭配植栽，詳細資料請見右側卡片。` : reply.verdict
+          setMessages(prev => [...prev, { role: 'assistant', reply: { ...reply, verdict } }])
+          return
         }
-        if (reply.risks.length > 0) parts.push('風險提醒：' + reply.risks.join('；'))
-        if (reply.fixes.length > 0) parts.push('建議：' + reply.fixes.join('；'))
-        setMessages(prev => [...prev, { role: 'assistant', text: parts.filter(Boolean).join('\n') }])
+
+        setPairingCards(null)
+        setMessages(prev => [...prev, { role: 'assistant', reply }])
       } catch {
         setMessages(prev => [...prev, { role: 'assistant', text: '目前無法產生回覆，請稍後再試。' }])
       }
@@ -226,7 +308,7 @@ export default function PlantAdvisorChatPage() {
 
   const clearFilters = () => {
     setActiveType(null); setActiveConds(new Set())
-    setApiSuggestions(null); setApiNote('')
+    setApiSuggestions(null); setApiNote(''); setPairingCards(null)
   }
 
   return (
@@ -268,11 +350,21 @@ export default function PlantAdvisorChatPage() {
         {/* 左側：對話區（寬度可拖曳調整）*/}
         <div style={{ width: chatWidth }} className="flex-shrink-0 bg-white flex flex-col">
           <div className="flex-1 overflow-y-auto p-4 space-y-3">
-            {messages.map((m, i) => (
-              <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm whitespace-pre-line ${
-                  m.role === 'user' ? 'bg-green-700 text-white' : 'bg-stone-100 text-stone-700'
-                }`}>
+            {messages.map((m, i) => m.role === 'user' ? (
+              <div key={i} className="flex justify-end">
+                <div className="max-w-[85%] rounded-2xl rounded-br-md px-3.5 py-2.5 text-sm bg-green-700 text-white whitespace-pre-line">
+                  {m.text}
+                </div>
+              </div>
+            ) : m.reply ? (
+              <div key={i} className="flex justify-start">
+                <div className="max-w-[95%] bg-stone-50 border border-stone-100 rounded-2xl rounded-bl-md px-3.5 py-3">
+                  <AdvisorReplyCard r={m.reply} hidePairCategories />
+                </div>
+              </div>
+            ) : (
+              <div key={i} className="flex justify-start">
+                <div className="max-w-[85%] rounded-2xl rounded-bl-md px-3.5 py-2.5 text-sm bg-stone-100 text-stone-700 whitespace-pre-line">
                   {m.text}
                 </div>
               </div>
@@ -300,25 +392,26 @@ export default function PlantAdvisorChatPage() {
           <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 bg-stone-300 group-hover:bg-green-500" />
         </div>
 
-        {/* 右側：符合條件的植栽卡片 */}
+        {/* 右側：AI 推薦植栽結果卡片 */}
         <div className="flex-1 overflow-y-auto p-5 relative">
           <div className="flex items-center justify-between mb-4">
             <p className="text-sm text-stone-500">
-              {activeType || activeConds.size > 0
-                ? <>符合「{[typeLabel, ...condLabels].filter(Boolean).join('、')}」，本地資料庫共 <strong className="text-stone-800">{matches.length}</strong> 種</>
+              {isSearchMode
+                ? <>{resultsHeaderLabel && <>符合「{resultsHeaderLabel}」，</>}共 <strong className="text-stone-800">{displayCards.length}</strong> 種</>
                 : <>植栽資料庫共 <strong className="text-stone-800">{plants.length}</strong> 種，使用上方篩選或左側對話查詢</>}
             </p>
           </div>
 
-          {matches.length > 0 ? (
+          {displayCards.length > 0 ? (
             <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))' }}>
-              {matches.map(p => (
-                <PlantCardItem key={p.id} plant={p} imageData={imageStore[p.name]}
-                  added={false} fresh={false} isActive={detail?.id === p.id}
-                  onDetail={() => setDetail(prev => prev?.id === p.id ? null : p)} onAdd={() => {}} />
+              {displayCards.map(c => (
+                <PlantCardItem key={c.plant.id} plant={c.plant} imageData={imageStore[c.plant.name]}
+                  added={false} fresh={false} isActive={detail?.id === c.plant.id}
+                  matchInfo={{ tier: c.tier, reason: c.reason, caution: c.caution }}
+                  onDetail={() => setDetail(prev => prev?.id === c.plant.id ? null : c.plant)} onAdd={() => {}} />
               ))}
             </div>
-          ) : (activeType || activeConds.size > 0) ? (
+          ) : isSearchMode ? (
             <div className="py-10">
               {apiLoading ? (
                 <div className="flex items-center gap-2 text-stone-400 text-sm">

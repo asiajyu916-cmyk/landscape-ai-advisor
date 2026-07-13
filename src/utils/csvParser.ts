@@ -109,9 +109,12 @@ function normalizeCategory(raw: string): NormalizedCategory {
 
 function normalizeSun(raw: string): SunReq {
   if (!raw || raw === '' || raw.includes('待查')) return '待查'
-  if (raw.includes('全日照') && raw.includes('半日照')) return '全日照至半日照'
-  if (raw.includes('半日照') || raw.includes('遮陰') || raw.includes('耐陰')) return '半日照至遮陰'
+  if (raw.includes('全日照') && (raw.includes('半日照') || raw.includes('半陰'))) return '全日照至半日照'
   if (raw.includes('全日照')) return '全日照'
+  // 真正耐陰：明確提到遮陰/全陰/陰暗等強遮蔭字眼，可長期在低光環境生長
+  if (/耐陰|遮陰|全陰|陰暗|背光|光線不足/.test(raw)) return '半日照至遮陰'
+  // 半日照適應／可耐半陰：仍需部分日照，只是能容忍半日照或部分遮陰，不等於真正耐陰
+  if (/半日照|半陰|可耐半陰|部分遮陰/.test(raw)) return '半日照'
   return '待查'
 }
 
@@ -176,6 +179,7 @@ function deriveRiskTags(
   if (drought === '不耐旱') tags.push('不耐旱')
   if (sun === '全日照') tags.push('全日照需求')
   if (sun === '半日照至遮陰') tags.push('耐陰')
+  if (sun === '半日照') tags.push('半日照適應')
   if (maintenance.includes('定期修剪') || maintenance.includes('修剪')) tags.push('修剪需求')
   if (maintenance.includes('支柱')) tags.push('需立支柱')
   if (maintenance.includes('病蟲') || maintenance.includes('蟲害') || maintenance.includes('病害')) tags.push('病蟲害注意')

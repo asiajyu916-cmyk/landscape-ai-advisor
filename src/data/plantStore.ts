@@ -6,11 +6,13 @@ const IMAGE_STORAGE_KEY = 'landscape_advisor_images_v1'
 
 // ── Persistence ───────────────────────────────────────────────────────────────
 
-export function savePlantsToStorage(plants: CsvPlantRecord[]): void {
+export function savePlantsToStorage(plants: CsvPlantRecord[]): boolean {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(plants))
+    return true
   } catch {
-    // localStorage quota exceeded — skip silently
+    // localStorage quota exceeded
+    return false
   }
 }
 

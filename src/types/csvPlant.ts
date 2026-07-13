@@ -1,7 +1,9 @@
 // ── CSV-based plant record ────────────────────────────────────────────────────
 
 export type NormalizedCategory = 'tree' | 'shrub' | 'groundcover'
-export type SunReq = '全日照' | '全日照至半日照' | '半日照至遮陰' | '待查'
+export type SunReq = '全日照' | '全日照至半日照' | '半日照' | '半日照至遮陰' | '待查'
+// '半日照至遮陰' = 真正耐陰（可在低光/遮陰環境長期生長）
+// '半日照'       = 半日照適應／可耐半陰（仍需部分日照，只能容忍部分遮陰，不可直接視為耐陰）
 export type WaterReq = '低' | '低至中' | '中' | '中至高' | '高' | '待查'
 export type DroughtTolerance = '耐旱' | '稍耐旱' | '不耐旱' | '待查'
 export type WetTolerance = '耐濕' | '稍耐濕' | '不耐積水' | '待查'

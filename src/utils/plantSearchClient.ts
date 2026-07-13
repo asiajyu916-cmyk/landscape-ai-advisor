@@ -78,6 +78,10 @@ export function searchResultToDraft(result: PlantSearchResult): DraftPlantRecord
     treeForm: '',
     soilDepth: val('soilDepth'),
     plantingSpacing: val('plantingSpacing'),
+    minimumPlantSpacing: '',
+    leafDropStatus: val('deciduous'),
+    toxicity: '',
+    plantSafetyNote: '',
 
     flowerColor: val('flowerColor'),
     flowerMonth: '',

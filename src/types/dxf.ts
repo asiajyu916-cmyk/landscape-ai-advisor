@@ -169,6 +169,8 @@ export interface ZonePlantArea {
   hatchAngle?: number
   hatchColor?: number
   vertices?: Array<{ x: number; y: number }>
+  overlapRatio?: number   // 交集面積 / HATCH 自身面積（供跨區判斷）
+  crossZone?: boolean     // true = 面積比在 20~60% 之間，分區歸屬需人工確認
 }
 
 export interface ZonePlantList {

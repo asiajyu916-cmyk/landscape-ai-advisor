@@ -337,14 +337,18 @@ export const CONDITIONS: PlantCondition[] = [
     fallbackNote: '耐旱性佳',
   },
   {
-    key: 'halfsun', label: '半日照植物', pattern: /半日照/,
-    test: p => p.sunRequirement.includes('半日照'),
+    key: 'halfsun', label: '半日照植物', pattern: /半日照|可耐半陰|部分遮陰/,
+    // 半日照適應／可耐半陰：仍偏好日照、只是能容忍半日照或部分遮陰，
+    // 不含真正耐陰（'半日照至遮陰'）——避免與 shade 條件混在一起
+    test: p => p.sunRequirement === '半日照' || p.sunRequirement === '全日照至半日照',
     why: p => `日照${p.sunRequirement}`,
     fallbackNote: '半日照環境適生',
   },
   {
     key: 'shade', label: '耐陰植物', pattern: /耐陰|樹下|遮陰|陰暗|背光|光線不足/,
-    test: p => p.sunRequirement.includes('遮陰'),
+    // 只有明確標記為「半日照至遮陰」（真正耐陰、可在低光環境長期生長）才算，
+    // 單純「半日照」（仍需部分日照、只能容忍部分遮陰）不可混入耐陰結果
+    test: p => p.sunRequirement === '半日照至遮陰',
     why: p => `日照${p.sunRequirement}，樹蔭下仍可穩定生長`,
     fallbackNote: '耐陰性佳，適合樹下',
   },
