@@ -43,6 +43,22 @@ function buildAliasMap(): Map<string, string> {
 }
 const ALIAS_MAP = buildAliasMap()
 
+/** 建立「正規化寫法 → 該別名組完整清單」的查表，供需要「所有同義寫法」的場景使用
+ *（resolveAlias 只回傳代表名，無法反查同組其他別名，例如由「今葉石菖蒲」查不到「石菖蒲」）*/
+function buildAliasGroupMap(): Map<string, string[]> {
+  const m = new Map<string, string[]>()
+  for (const group of ALIAS_GROUPS) {
+    for (const alt of group) m.set(normalizeForCompare(alt), group)
+  }
+  return m
+}
+const ALIAS_GROUP_MAP = buildAliasGroupMap()
+
+/** 回傳 name 所屬別名組的完整清單（含 name 本身）；查無別名組則回傳 [name] */
+export function getAliasGroup(name: string): string[] {
+  return ALIAS_GROUP_MAP.get(normalizeForCompare(name)) ?? [name]
+}
+
 // ── 全形/半形統一 + 去空白 ────────────────────────────────────────────────────
 function toHalfWidth(s: string): string {
   return s.replace(/[\uFF01-\uFF5E]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))

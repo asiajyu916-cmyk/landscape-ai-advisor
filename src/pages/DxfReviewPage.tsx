@@ -12,7 +12,7 @@ import { evaluate } from '@/utils/plantEvaluator'
 import type { EvalResult } from '@/utils/plantEvaluator'
 import { loadPlantsFromStorage, savePlantsToStorage } from '@/data/plantStore'
 import { searchOfficialPlantData, searchResultToDraft } from '@/utils/plantSearchClient'
-import { existsExactInLocalDatabase } from '@/utils/plantNameMatch'
+import { existsExactInLocalDatabase, getAliasGroup } from '@/utils/plantNameMatch'
 import type { PlantSearchResult, DraftPlantRecord } from '@/types/plantSearch'
 import PlantAutoAddModal from '@/components/modals/PlantAutoAddModal'
 import {
@@ -497,7 +497,7 @@ interface ZoneBlockEntry {
   plantName?: string        // 若已對應植栽資料庫
   detectedType?: string     // 喬木圖塊 / 灌木圖塊 等
   count: number             // 此分區內數量
-  matchStatus: 'db-matched' | 'name-only' | 'unmatched'
+  matchStatus: 'db-matched' | 'name-only' | 'unmatched' | 'same-hatch-disambiguated-by-layer'
 }
 
 // 地被/鋪面 HATCH 判讀結果（正式 UI 資料來源）
@@ -535,6 +535,61 @@ function findInDB(name: string | undefined, db: CsvPlantRecord[]): CsvPlantRecor
   return db.find(p => p.name === n)                           // 完全相等
     ?? db.find(p => p.name.trim() === n)                      // trim 後相等
     ?? db.find(p => p.name.replace(/\s/g, '') === n.replace(/\s/g, ''))  // 忽略空白
+}
+
+// ── 圖層名稱 → 植物 對照（防止同 HATCH 圖樣誤判）───────────────────────────────
+// 目的：當不同植物在圖例中使用相同/高度相似的 HATCH pattern＋scale＋angle 時
+// （例如今葉石菖蒲 vs 蝦蟆草），純靠 HATCH 特徵比對必然混淆。若 DWG 已將兩者
+// 分在不同圖層（如 LAYER-今葉石菖蒲 / LAYER-蝦蟆草），圖層名稱是更可靠的依據，
+// 應優先於 HATCH pattern/scale/angle 相似度比對。
+
+/** 正規化圖層名稱以供比對：全形轉半形、去空白、去常見符號、忽略大小寫 */
+function normalizeLayerToken(s: string): string {
+  return s
+    .replace(/[！-～]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)) // 全形→半形
+    .replace(/[\s　]/g, '')                                    // 去空白（含全形空白）
+    .replace(/[-_./\\()（）【】[\]:：,，、'"]/g, '')                 // 去常見符號
+    .toLowerCase()
+}
+
+/**
+ * 動態建立「正規化關鍵字 → 候選植物名稱清單」對照表：
+ * 中文名稱、既有別名庫（plantNameMatch.ts）、學名，皆可作為圖層名稱比對關鍵字。
+ * 例："今葉石菖蒲"、"石菖蒲"（別名）、其學名 → 都指向同一植物。
+ */
+function buildLayerPlantKeywordMap(
+  schedule: PlantScheduleEntry[],
+  plantDB: CsvPlantRecord[],
+): Map<string, string[]> {
+  const map = new Map<string, string[]>()
+  const add = (keyword: string | undefined, plantName: string) => {
+    if (!keyword) return
+    const k = normalizeLayerToken(keyword)
+    if (k.length < 2) return   // 太短的關鍵字（單一字母/字）容易誤判，不收錄
+    const arr = map.get(k) ?? []
+    if (!arr.includes(plantName)) arr.push(plantName)
+    map.set(k, arr)
+  }
+  for (const e of schedule) {
+    if (!e.plantName) continue
+    for (const alias of getAliasGroup(e.plantName)) add(alias, e.plantName)
+  }
+  for (const p of plantDB) {
+    for (const alias of getAliasGroup(p.name)) add(alias, p.name)
+    add(p.scientificName, p.name)
+  }
+  return map
+}
+
+/** 圖層名稱（正規化後）是否包含任一植物關鍵字，可能同時命中多個候選（回傳全部供後續判斷） */
+function findPlantsByLayerName(layerName: string, keywordMap: Map<string, string[]>): string[] {
+  const norm = normalizeLayerToken(layerName)
+  if (!norm) return []
+  const hits = new Set<string>()
+  for (const [kw, plants] of keywordMap) {
+    if (norm.includes(kw)) for (const p of plants) hits.add(p)
+  }
+  return [...hits]
 }
 
 /** Legend / site HATCH lookup key — pattern name if present, else stable geometry fingerprint */
@@ -585,6 +640,9 @@ function buildZoneReviews(
   polygons: import('@/types/dxf').DxfPolygon[] = [],
   layerColors: Record<string, number> = {},
 ): ZoneReviewResult[] {
+  // ── 圖層名稱 → 植物 對照表（優先於 HATCH pattern，防止同 HATCH 圖樣誤判）───
+  const layerPlantKeywordMap = buildLayerPlantKeywordMap(schedule, plantDB)
+
   // ── effectiveColor：ByLayer(256)/ByBlock(0)/null 時改讀 LAYER 表顏色 ─────
   // 回傳 null = 真正無法取得顏色（colorUnknown）
   const effectiveColor = (rawColor: number | null | undefined, layerName: string | undefined): number | null => {
@@ -1082,35 +1140,70 @@ function buildZoneReviews(
         continue
       }
 
-      // ── Priority 1（第一優先）：實際 HATCH layer 名稱直接命中索引表/DB 植物名稱 ──
-      // 例如 layer="草皮-台北草"：layer 名稱本身就直接點名植物，
-      // 比 pattern/scale/angle 特徵比對更可靠，優先於 Section D 的圖例特徵比對。
-      if (!matched && area.source === 'HATCH' && layerName) {
-        const layerHitPlant =
-          schedule.find(e => e.plantName && e.plantName.length >= 2 && layerName.includes(e.plantName))?.plantName
-          ?? plantDB.find(p => p.name.length >= 2 && layerName.includes(p.name))?.name
-        if (layerHitPlant) {
+      // ── Priority 1（第一優先）：植物專屬圖層名稱 / HATCH·封閉區域所屬 layer ──
+      // 用正規化＋別名庫＋學名比對，例如 layer="LAYER-今葉石菖蒲" 直接命中，
+      // 不需 layer 名稱與植物全名完全相符（原本 layerName.includes(plantName)
+      // 只支援「圖層含完整植物全名」，遇到 layer 只寫短名/別名/學名就會漏判）。
+      // 這一步優先於任何 HATCH pattern/scale/angle 比對——當不同植物共用相同
+      // HATCH 圖樣時（例如今葉石菖蒲 vs 蝦蟆草），圖層才是唯一可靠依據。
+      if (!matched && layerName) {
+        const layerHits = findPlantsByLayerName(layerName, layerPlantKeywordMap)
+        if (layerHits.length === 1) {
+          const layerHitPlant = layerHits[0]
           const alreadySeen = seenNames.has(layerHitPlant)
-          logLegendToHatchToZone({
-            plantName: layerHitPlant, area, zoneName: zpl.zone.name,
-            hitMethod: `layer 名稱直接命中「${layerHitPlant}」（第一優先）`,
-            includedInEval: !alreadySeen,
-          })
+
+          // 若同一 HATCH 圖例特徵原本會指向「不同」植物 → 記錄衝突，仍以圖層為準
+          const _aPat = area.hatchPattern?.trim()
+          const _aSc  = area.hatchScale
+          const _aAng = area.hatchAngle ?? 0
+          const _aClr = area.hatchColor ?? 0
+          const legendPeekKeys = area.source === 'HATCH'
+            ? [
+                _aPat && _aSc !== undefined ? `${_aPat}@${_aSc.toFixed(2)}@${_aAng.toFixed(1)}@c${_aClr}` : null,
+                _aPat && _aSc !== undefined ? `${_aPat}@${_aSc.toFixed(2)}@${_aAng.toFixed(1)}` : null,
+                area.hatchPattern ?? null,
+              ]
+            : []
+          let legendPeekPlant: string | undefined
+          for (const k of legendPeekKeys) {
+            const hit = lookupLegendPlant(hatchPatternToPlant, k ?? undefined)
+            if (hit) { legendPeekPlant = hit; break }
+          }
+          const hasConflict = !!legendPeekPlant && legendPeekPlant !== layerHitPlant
+          const finalMatchStatusIfNew = hasConflict ? 'same-hatch-disambiguated-by-layer' as const : undefined
+
+          console.group(`🧬 [Layer→Plant] zone="${zpl.zone.name}"`)
+          console.debug(`植物名稱：${layerHitPlant}`)
+          console.debug(`圖層名稱：${layerName}`)
+          console.debug(`HATCH pattern：${area.hatchPattern ?? '(無)'}`)
+          console.debug(`matchSource：layer-name`)
+          console.debug(`matchScore：${hasConflict ? 70 : 95}`)
+          console.debug(`最終判讀依據：圖層名稱正規化比對命中「${layerHitPlant}」${hasConflict ? `（HATCH 圖例原本指向「${legendPeekPlant}」，衝突，已依圖層判讀）` : ''}`)
+          console.groupEnd()
+
+          if (hasConflict) {
+            areaLayerNotes.push(`「圖層名稱與圖例 HATCH 對應不一致，已依圖層判讀」：layer="${layerName}" → ${layerHitPlant}（HATCH 圖例原指向 ${legendPeekPlant}）`)
+          }
+
           if (!alreadySeen) {
             seenNames.add(layerHitPlant)
             const dbP = findInDB(layerHitPlant, plantDB)
+            const statusFinal = finalMatchStatusIfNew ?? (dbP ? 'db-matched' as const : 'name-only' as const)
             if (dbP) {
               const ps = dbP.wetTolerance === '不耐積水' && dbP.droughtTolerance === '不耐旱' ? '需注意' as const : '可用' as const
               confirmed.push({ ...dbP, instanceId: uid(), status: ps })
-              blockEntries.push({ blockName: `[HATCH圖層命中] layer:${layerName}`, plantName: dbP.name, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'db-matched' })
+              blockEntries.push({ blockName: `[HATCH圖層命中] layer:${layerName}`, plantName: dbP.name, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: statusFinal })
             } else {
-              blockEntries.push({ blockName: `[HATCH圖層命中] layer:${layerName}`, plantName: layerHitPlant, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: 'name-only' })
+              blockEntries.push({ blockName: `[HATCH圖層命中] layer:${layerName}`, plantName: layerHitPlant, detectedType: zoneLabel(area.zoneType), count: 1, matchStatus: statusFinal })
             }
             if (area.crossZone) {
               areaLayerNotes.push(`已匹配「${layerHitPlant}」，分區歸屬需確認（layer 直接命中，HATCH 與「${zpl.zone.name}」重疊比例 ${((area.overlapRatio ?? 0) * 100).toFixed(0)}%，跨越或貼近分區邊界）`)
             }
           }
           matched = true
+        } else if (layerHits.length >= 2) {
+          // 圖層名稱本身同時命中多個候選植物（罕見：圖層命名含糊）→ 無法用圖層消歧，交由下一優先序處理
+          console.debug(`⚠️ [Layer→Plant] layer="${layerName}" 同時命中多個候選：${layerHits.join('、')}，圖層本身無法消歧，改用下一優先序`)
         }
       }
       if (matched) continue
@@ -1592,7 +1685,8 @@ function buildZoneReviews(
     // ── Debug Table 3: matches（每個分區的對應結果）────────────────────────
     {
       const matchRows = blockEntries.map(b => {
-        const src = b.blockName.startsWith('[HATCH圖例]')  ? 'legend hatch'
+        const src = b.blockName.startsWith('[HATCH圖層命中]')  ? 'layer-name'
+          : b.blockName.startsWith('[HATCH圖例]')  ? 'legend hatch'
           : b.blockName.startsWith('[HATCH繼承]')          ? 'LWPOLYLINE→HATCH inherit'
           : b.blockName.startsWith('[面狀代號]')            ? 'nearby text (code)'
           : b.blockName.startsWith('[面狀文字]')            ? 'nearby text (Chinese)'
@@ -1600,7 +1694,9 @@ function buildZoneReviews(
           : b.blockName.startsWith('[m²候選]')              ? 'schedule m² candidate ⚠️'
           : b.blockName.startsWith('[未辨識')               ? 'unmatched ❌'
           : 'INSERT block'
-        const score = b.matchStatus === 'db-matched' ? 100 : b.matchStatus === 'name-only' ? 65 : 0
+        const score = b.matchStatus === 'db-matched' ? 100
+          : b.matchStatus === 'same-hatch-disambiguated-by-layer' ? 70
+          : b.matchStatus === 'name-only' ? 65 : 0
         return {
           zoneName:    zpl.zone.name,
           plantName:   b.plantName ?? '(未對應)',
@@ -3647,7 +3743,8 @@ function ZoneReviewTab({ reviews, onAskAI }: { reviews: ZoneReviewResult[]; onAs
                       {visibleEntries.map((b, i) => (
                         <tr key={i} className={`border border-stone-100 ${
                           b.matchStatus === 'db-matched' ? 'bg-emerald-50/40' :
-                          b.matchStatus === 'name-only'  ? 'bg-amber-50/40'   : 'bg-red-50/20'
+                          b.matchStatus === 'name-only'  ? 'bg-amber-50/40'   :
+                          b.matchStatus === 'same-hatch-disambiguated-by-layer' ? 'bg-sky-50/40' : 'bg-red-50/20'
                         }`}>
                           {/* 來源（替代原始 blockName，避免 DXF 技術字串污染 UI）*/}
                           <td className="px-3 py-1.5 text-xs text-stone-500">{sourceLabel(b)}</td>
@@ -3662,6 +3759,7 @@ function ZoneReviewTab({ reviews, onAskAI }: { reviews: ZoneReviewResult[]; onAs
                           <td className="px-3 py-1.5">
                             {b.matchStatus === 'db-matched' && <span className="text-emerald-600 text-xs">✅ DB</span>}
                             {b.matchStatus === 'name-only'  && <span className="text-amber-600 text-xs">⚠ 索引表名稱</span>}
+                            {b.matchStatus === 'same-hatch-disambiguated-by-layer' && <span className="text-sky-600 text-xs">🔀 同HATCH·已依圖層消歧</span>}
                             {b.matchStatus === 'unmatched'  && <span className="text-red-500 text-xs">❌ 未識別</span>}
                           </td>
                         </tr>

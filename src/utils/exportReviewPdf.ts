@@ -557,7 +557,7 @@ export interface ZoneBlockPdfEntry {
   plantName?: string
   detectedType?: string
   count: number
-  matchStatus: 'db-matched' | 'name-only' | 'unmatched'
+  matchStatus: 'db-matched' | 'name-only' | 'unmatched' | 'same-hatch-disambiguated-by-layer'
 }
 
 export interface ZoneReviewPdfData {
@@ -576,7 +576,7 @@ function zoneBlockTable(entries: ZoneBlockPdfEntry[]): string {
       <th style="text-align:center">數量</th><th>狀態</th>
     </tr></thead>
     <tbody>${entries.map(b => `
-      <tr style="background:${b.matchStatus==='db-matched'?'#ecfdf5':b.matchStatus==='name-only'?'#fffbeb':'#fef2f2'}">
+      <tr style="background:${b.matchStatus==='db-matched'?'#ecfdf5':b.matchStatus==='name-only'?'#fffbeb':b.matchStatus==='same-hatch-disambiguated-by-layer'?'#f0f9ff':'#fef2f2'}">
         <td style="font-family:monospace">${esc(b.blockName)}</td>
         <td style="font-weight:600">${b.plantName ? esc(b.plantName) : '<span style="color:#9ca3af">未對應</span>'}</td>
         <td>${esc(b.detectedType ?? '—')}</td>
