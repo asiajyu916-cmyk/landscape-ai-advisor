@@ -9,7 +9,7 @@ import {
 } from 'lucide-react'
 import { loadPlantsFromStorage } from '@/data/plantStore'
 import type { CsvPlantRecord } from '@/types/csvPlant'
-import { parsePdfZonePlantingTable, type ZonePlantingRow } from '@/utils/parsePdfZones'
+import { parsePdfZonePlantingTable, detectJointZoneTitle, type ZonePlantingRow, type ZoneConfidence } from '@/utils/parsePdfZones'
 import { evaluateZone, type ZoneReviewResult } from '@/utils/evaluateZone'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
@@ -132,6 +132,11 @@ interface ZoneTableResult {
   parseSuccess: boolean
   failReason?: string
   headerDetected?: string   // 偵測到的欄位標頭
+  confidence: ZoneConfidence
+  // 偵測到「A、B、C區配置圖」這類聯合標題，但表格解析涵蓋不到全部分區時填入：
+  // 代表不可信任逐區解析結果，改採整體混植配置評估。
+  jointZoneNames?: string[]
+  jointConfigNote?: string
 }
 
 /** 從 PDF 原始文字解析「分區｜灌木配置｜喬木配置」表格 */
@@ -168,7 +173,7 @@ function parseZoneTable(rawText: string): ZoneTableResult {
     const zoneLines = lines.filter(l => ZONE_CELL_PATTERN.test(l))
     if (zoneLines.length < 2) {
       return {
-        rows: [], parseSuccess: false,
+        rows: [], parseSuccess: false, confidence: 'low',
         failReason: '未偵測到分區表格欄位（需包含「分區」+「灌木配置」/「喬木配置」欄頭），請確認 PDF 表格結構。',
       }
     }
@@ -218,13 +223,13 @@ function parseZoneTable(rawText: string): ZoneTableResult {
 
   if (rows.length === 0) {
     return {
-      rows: [], parseSuccess: false,
+      rows: [], parseSuccess: false, confidence: 'low',
       headerDetected: headerText || undefined,
       failReason: '已偵測植物名稱，但未成功解析分區表格，請確認 PDF 表格欄位是否包含：分區、灌木配置、喬木配置。',
     }
   }
 
-  return { rows, parseSuccess: true, headerDetected: headerText || undefined }
+  return { rows, parseSuccess: true, confidence: 'medium', headerDetected: headerText || undefined }
 }
 
 // parsePdfZonePlantingTable 已移至 @/utils/parsePdfZones（避免 Vite Fast Refresh export 衝突）
@@ -291,11 +296,28 @@ function extractPlants(rawText: string, db: CsvPlantRecord[]): ExtractResult {
     }
   }
 
-  // 優先用三欄群組解析；若取不到 5 區才 fallback 到 parseZoneTable
+  // 優先用三欄群組解析；若取不到 ≥2 區才 fallback 到 parseZoneTable
   const newRows = parsePdfZonePlantingTable(rawText)
-  const zoneTable: ZoneTableResult = newRows.length >= 2
-    ? { rows: newRows, parseSuccess: true }
+  let zoneTable: ZoneTableResult = newRows.length >= 2
+    ? { rows: newRows, parseSuccess: true, confidence: 'medium' }
     : parseZoneTable(rawText)
+
+  // 防呆：PDF 逐區表格解析純靠文字行序，pdfjs 擷取順序不保證與版面一致。
+  // 若圖面標題本身就是「A、B、C區配置圖」這種聯合標題，但上面解析出的分區
+  // 沒有涵蓋標題列出的全部分區（典型錯誤：只抓到最後一個「C區」），
+  // 代表解析結果不可信 —— 不可假裝完成各區獨立檢核，整體改採聯合配置評估。
+  const jointZoneNames = detectJointZoneTitle(rawText)
+  if (jointZoneNames && jointZoneNames.length >= 2) {
+    const parsedNames = new Set(zoneTable.rows.map(r => r.zoneName))
+    const coversAll = jointZoneNames.every(n => parsedNames.has(n))
+    if (!coversAll) {
+      zoneTable = {
+        rows: [], parseSuccess: false, confidence: 'low',
+        jointZoneNames,
+        jointConfigNote: `本圖為 ${jointZoneNames.join('、')} 聯合配置區，目前未辨識各區獨立幾何邊界，本次採整體混植配置評估。`,
+      }
+    }
+  }
 
   if (zoneTable.parseSuccess && zoneTable.rows.length > 0) {
     console.table(zoneTable.rows.map(r => ({
@@ -642,32 +664,30 @@ setProcMsg('正在比對植栽資料庫及分區表格…')
           {/* 右側：操作區 */}
           <div className="space-y-5">
 
-            {/* ── PDF 分區解析結果（驗收區塊）──────────────────────────────────── */}
+            {/* ── 分區可信度徽章 ──────────────────────────────────────────────── */}
             {result?.zoneTable && (() => {
-              const rows = result.zoneTable!.rows
-              const ok = rows.length === 5
+              const zt = result.zoneTable!
+              const badge: Record<ZoneConfidence, { label: string; desc: string; cls: string }> = {
+                low:    { label: '可信度：低', desc: '僅文字辨識', cls: 'bg-stone-100 text-stone-600 border-stone-300' },
+                medium: { label: '可信度：中', desc: '文字＋表格結構', cls: 'bg-amber-100 text-amber-700 border-amber-300' },
+                high:   { label: '可信度：高', desc: '具可確認的封閉區域', cls: 'bg-emerald-100 text-emerald-700 border-emerald-300' },
+              }
+              const b = badge[zt.confidence]
               return (
-                <div className={`border rounded-xl px-4 py-3 text-sm ${ok ? 'border-blue-200 bg-blue-50' : 'border-red-200 bg-red-50'}`}>
-                  <p className={`font-semibold mb-2 ${ok ? 'text-blue-800' : 'text-red-800'}`}>
-                    PDF 分區解析結果
-                  </p>
-                  {ok ? (
-                    <div className="space-y-1">
-                      {rows.map(r => (
-                        <div key={r.zoneName} className="text-xs text-blue-700">
-                          <span className="font-medium">{r.zoneName}</span>
-                          　灌木：{r.shrubs.join('、') || '—'}　喬木：{r.trees.join('、') || '—'}
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="text-xs text-red-700">
-                      PDF 分區表格解析失敗（偵測到 {rows.length} 區，需 5 區）
-                    </p>
-                  )}
+                <div className={`inline-flex items-center gap-2 border rounded-lg px-3 py-1.5 text-xs font-medium ${b.cls}`}>
+                  <span>{b.label}</span>
+                  <span className="opacity-70">（{b.desc}）</span>
                 </div>
               )
             })()}
+
+            {/* ── 聯合配置區提示（無法取得各區獨立幾何邊界時）────────────────────── */}
+            {result?.zoneTable?.jointConfigNote && (
+              <div className="border border-sky-200 rounded-xl px-4 py-3 bg-sky-50 flex items-start gap-3">
+                <AlertTriangle size={16} className="text-sky-500 flex-shrink-0 mt-0.5" />
+                <p className="text-xs text-sky-800">{result.zoneTable.jointConfigNote}</p>
+              </div>
+            )}
 
             {/* ── 分區植栽表格解析結果 ─────────────────────────────────────────── */}
             {result?.zoneTable && (() => {
@@ -743,7 +763,7 @@ setProcMsg('正在比對植栽資料庫及分區表格…')
                     <AlertTriangle size={16} className="text-amber-500 flex-shrink-0 mt-0.5" />
                     <div>
                       <p className="text-sm font-semibold text-amber-800">分區表格解析失敗</p>
-                      <p className="text-xs text-amber-700 mt-1">{zt.failReason}</p>
+                      <p className="text-xs text-amber-700 mt-1">{zt.failReason ?? zt.jointConfigNote ?? '無法解析分區表格。'}</p>
                       {zt.headerDetected && <p className="text-xs text-amber-600 mt-0.5">偵測到表頭：{zt.headerDetected}</p>}
                       <p className="text-xs text-amber-600 mt-1.5">AI 審查將以全案植栽清單模式進行，不分區評估。</p>
                     </div>

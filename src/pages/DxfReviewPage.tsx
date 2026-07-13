@@ -4,7 +4,7 @@ import {
   ChevronDown, X, ArrowRight, Layers, Trash2, BookOpen, Table2, FileOutput, FileDown,
 } from 'lucide-react'
 import { parseDxf, detectPlantSchedule, findNearbyTexts } from '@/utils/dxfParser'
-import { analyzeMultiLayer, zoneLabel, detectZonesFromText, buildZonePlantList, buildZoneAssignDebug, polygonBBox, pointInPolygon, detectAnalysisScope } from '@/utils/spatialAnalysis'
+import { analyzeMultiLayer, zoneLabel, detectZonesFromText, buildZonePlantList, buildZoneAssignDebug, polygonBBox, polygonArea, pointInPolygon, detectAnalysisScope } from '@/utils/spatialAnalysis'
 import type { ZoneAssignDebug } from '@/utils/spatialAnalysis'
 import { exportZoneReviewPdf } from '@/utils/exportReviewPdf'
 import type { ZoneReviewPdfData } from '@/utils/exportReviewPdf'
@@ -516,6 +516,7 @@ interface ZoneReviewResult {
   areaTypes: string[]
   areaLayerNotes: string[]
   status: ZoneReviewStatus
+  boundaryArea?: number   // 分區邊界面積（圖面座標單位，圖面為公尺時即 m²；無邊界則 undefined）
   evalResult?: EvalResult
   finalReviewResults: FinalReviewResult[]  // 最終審查結果（UI/PDF 唯一來源）
   hatchPlants: {
@@ -1756,6 +1757,7 @@ function buildZoneReviews(
       areaTypes: [...new Set(areaLabels)],
       areaLayerNotes,
       status,
+      boundaryArea: zpl.zone.boundary ? polygonArea(zpl.zone.boundary.vertices) : undefined,
       evalResult,
       hatchPlants: { confirmed: hatchConfirmed, candidates: hatchCandidates, unmatchedCount: hatchUnmatchedCount },
       finalReviewResults: zoneResults,
@@ -3350,6 +3352,11 @@ function ZoneReviewTab({ reviews, onAskAI }: { reviews: ZoneReviewResult[]; onAs
               {/* 分區標題列 */}
               <div className="flex items-center gap-3 flex-wrap">
                 <span className="text-2xl font-bold text-stone-800">{r.zoneName}</span>
+                {r.boundaryArea !== undefined && (
+                  <span className="text-xs px-2 py-1 rounded-lg bg-stone-100 text-stone-600 font-medium">
+                    區域面積：{r.boundaryArea.toFixed(1)} ㎡
+                  </span>
+                )}
                 {onAskAI && (
                   <button
                     onClick={() => {

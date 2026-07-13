@@ -75,6 +75,17 @@ export function polygonBBox(vertices: Array<{ x: number; y: number }>): {
   return { minX, maxX, minY, maxY, width: maxX - minX, height: maxY - minY }
 }
 
+// ── Polygon area（shoelace 公式，單位與圖面座標一致，圖面為公尺時即 m²）────────
+export function polygonArea(vertices: Array<{ x: number; y: number }>): number {
+  const n = vertices.length
+  if (n < 3) return 0
+  let sum = 0
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    sum += vertices[j].x * vertices[i].y - vertices[i].x * vertices[j].y
+  }
+  return Math.abs(sum) / 2
+}
+
 // ── Zone label for display ────────────────────────────────────────────────────
 
 const ZONE_LABELS: Record<ZoneType, string> = {
@@ -323,6 +334,47 @@ export function detectZonesFromText(
 
   const candidates = buildCandidateTexts(texts)
     .filter(c => pointInScope(c.x, c.y, scope))
+
+  // ── 具名分區圖層（最高優先）──────────────────────────────────────────────
+  // 圖層直接以 AREA-A / AREA-B / ZONE-C 等具名尾碼命名時，區名可直接從圖層
+  // 名稱推導，不需仰賴文字標籤配對——避免同名圖層文字標籤缺漏、位置錯誤，
+  // 或多條同名圖層時只抓到最後一條而誤判成只有一區。
+  // 同一圖層若有多條封閉線（L 型分區常見），視為同一分區的邊界候選，
+  // 取 bbox 面積最大者為主邊界。
+  const NAMED_AREA_LAYER_RE = /^(?:AREA|ZONE)[-_\s]?([A-Za-z0-9一-鿿]+)$/i
+  const namedAreaGroups = new Map<string, DxfPolygon[]>()
+  for (const p of closedPolygons) {
+    if (p.source === 'HATCH') continue
+    const m = NAMED_AREA_LAYER_RE.exec(p.layer.trim())
+    if (!m) continue
+    const suffix = m[1].toUpperCase()
+    const zoneName = `${suffix}區`
+    const arr = namedAreaGroups.get(zoneName) ?? []
+    arr.push(p)
+    namedAreaGroups.set(zoneName, arr)
+  }
+  if (namedAreaGroups.size >= 2) {
+    for (const [zoneName, polys] of namedAreaGroups) {
+      const primary = polys.reduce((a, b) => bboxArea(a) >= bboxArea(b) ? a : b)
+      const label = candidates.find(c => c.name === zoneName)
+      const labelPos = label ?? (() => {
+        const c = polygonCenter(primary.vertices)
+        return { x: c.x, y: c.y }
+      })()
+      zones.push({
+        name: zoneName,
+        labelPosition: { x: labelPos.x, y: labelPos.y },
+        boundary: primary,
+        confidence: 'high',
+        source: 'text-in-polygon',
+      })
+      seenNames.add(zoneName)
+    }
+    const totalPolys = [...namedAreaGroups.values()].reduce((s, a) => s + a.length, 0)
+    console.debug(`[Zone] 具名分區圖層模式（AREA-X/ZONE-X）：偵測到 ${namedAreaGroups.size} 區，圖層線×${totalPolys}`)
+    zones.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hant', { numeric: true }))
+    return zones
+  }
 
   if (zoneLayerPolys.length >= 2 && candidates.length > 0) {
     const zlVerts = zoneLayerPolys.flatMap(p => p.vertices)

@@ -4,6 +4,31 @@ export interface ZonePlantingRow {
   trees: string[]
 }
 
+// PDF 分區可信度：純文字解析先天上限是「中」——沒有幾何座標可確認邊界。
+// 「高」保留給未來具備視覺/向量路徑分析、可確認封閉區域時使用（目前不會出現）。
+export type ZoneConfidence = 'low' | 'medium' | 'high'
+
+/**
+ * 掃描全文尋找「A、B、C區」這類聯合分區標題（常見於「A、B、C區配置圖」圖名）。
+ * 用途：防呆——PDF 逐區表格解析器（parsePdfZonePlantingTable / parseZoneTable）
+ * 是純文字/行序解析，pdfjs 擷取順序不保證與版面一致，容易把這種聯合標題誤判
+ * 成「只有最後一個字母（如 C區）」的單一分區資料。呼叫端應比對：解析出的分區
+ * 集合是否涵蓋聯合標題列出的全部分區，若沒有涵蓋全部，代表結果不可信，
+ * 必須整體改採「聯合配置評估」，不可假裝完成各區獨立檢核。
+ */
+export function detectJointZoneTitle(rawText: string): string[] | null {
+  const re = /([A-Za-z0-9](?:\s*[、,，]\s*[A-Za-z0-9]){1,9})\s*區/g
+  let best: string[] | null = null
+  let m: RegExpExecArray | null
+  while ((m = re.exec(rawText)) !== null) {
+    const letters = [...new Set(m[1].split(/[、,，]/).map(s => s.trim()).filter(Boolean))]
+    if (letters.length >= 2 && (!best || letters.length > best.length)) {
+      best = letters.map(l => `${l}區`)
+    }
+  }
+  return best
+}
+
 /**
  * 從 pdfjs 逐格輸出的原始文字解析「分區｜灌木配置｜喬木配置」三欄表格
  * 每個分區以 [zone, shrubs, trees] 三行為一組
