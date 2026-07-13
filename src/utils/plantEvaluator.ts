@@ -276,6 +276,15 @@ export function evaluate(plants: SelectedCsvPlant[], allPlants: CsvPlantRecord[]
     reviewText = `本區植栽配置計畫，選用植栽包含 ${plantNames}，整體配置相容性評估分數為 ${score}/100，評估結果為「${compatLevel}」。\n\n${dangerNotes}\n\n修正方向：\n${adjustmentPlan.map(p => `• ${p}`).join('\n')}`
   }
 
+  // ── 相近植物替代評估標記（與 LandscapeAdvisorPage 本地 evaluate 一致）───────
+  const substitutePlants = plants.filter(p => p.evaluationMode === 'similar-plant-substitute')
+  if (substitutePlants.length > 0) {
+    const substituteList = substitutePlants
+      .map(p => `${p.originalPlantName ?? '(原始植物名稱未記錄)'} → 暫代：${p.substitutePlantName ?? p.name}`)
+      .join('\n')
+    reviewText += `\n\n【相近植物替代評估】\n本次評估中，以下植物因本地資料庫查無完全相符資料，經人工確認以名稱相近植物暫代進行模擬評估：\n${substituteList}\n\n本結果使用相近植物資料進行模擬，不代表原植物品種的正式生育特性，僅供初步參考，正式設計文件請另行查證原始植物之官方生育資料。`
+  }
+
   void allPlants // 保留參數以維持與 LandscapeAdvisorPage 相同介面
   return { score, compatLevel, categories, issues, aiSuggestion, adjustmentPlan, reviewText }
 }

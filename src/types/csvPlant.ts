@@ -88,9 +88,18 @@ export interface CsvPlantRecord {
 
 // ── Selected plant (with evaluation status) ───────────────────────────────────
 
+export type EvaluationMode = 'normal' | 'similar-plant-substitute'
+
 export interface SelectedCsvPlant extends CsvPlantRecord {
   instanceId: string
   status: PlantStatus
+  // ── 相近植物替代測試（選填）───────────────────────────────────────────────
+  // 原始植物在資料庫查無完全相符項目，使用者人工確認以「相近植物」暫代評估時填入。
+  // 本記錄其餘 CsvPlantRecord 欄位（含 name）皆為代用植物（substitutePlantName）
+  // 的資料，不會覆寫成原始植物名稱——originalPlantName 才是使用者實際想評估的植物。
+  evaluationMode?: EvaluationMode
+  originalPlantName?: string
+  substitutePlantName?: string
 }
 
 // ── Plant image data (stored separately from CSV, keyed by plant name) ────────

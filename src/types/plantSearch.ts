@@ -97,6 +97,17 @@ export interface PlantMatchCandidate {
   score: number   // 0~100
 }
 
+// ── 相近植物替代測試（人工確認流程）────────────────────────────────────────────
+// 本地資料庫找不到完全相符的植物時，列出名稱最相近的候選供人工確認，
+// 不得自動視為同一植物。
+
+export interface SimilarPlantCandidate {
+  plant: CsvPlantRecord
+  nameSimilarity: number       // 0~100，名稱相似度
+  genus: string | null         // 候選植物學名屬名（取自 scientificName 第一個字）
+  sameGenus: boolean | null    // 與原始植物是否同屬；null = 無法判斷（缺學名資料比對）
+}
+
 // ── 確認新增流程狀態 ──────────────────────────────────────────────────────────
 
 export type MissingPlantResolution = 'pending' | 'searching' | 'found' | 'not_found' | 'confirmed' | 'skipped' | 'editing'

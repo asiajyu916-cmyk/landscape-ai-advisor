@@ -4,7 +4,7 @@
 // 就誤判「資料庫查無」而觸發不必要的搜尋。
 
 import type { CsvPlantRecord } from '@/types/csvPlant'
-import type { PlantMatchCandidate } from '@/types/plantSearch'
+import type { PlantMatchCandidate, SimilarPlantCandidate } from '@/types/plantSearch'
 
 // ── 常見別名對照表 ────────────────────────────────────────────────────────────
 // 索引表 / 圖面常用簡稱、俗名 ↔ 資料庫慣用正式名稱。
@@ -181,4 +181,70 @@ export function existsInLocalDatabase(
   scientificNameHint?: string,
 ): boolean {
   return findLocalPlantMatch(queryName, plants, scientificNameHint).length > 0
+}
+
+// ── 相近植物搜尋（供「相近植物替代測試」人工確認流程使用）─────────────────────
+// 用途：本地資料庫找不到完全相符植物時，找出名稱最相近的候選——僅供使用者
+// 參考、人工確認是否要暫代評估，程式本身不得自動判定為同一植物。
+
+/** Levenshtein 編輯距離 */
+function levenshteinDistance(a: string, b: string): number {
+  const m = a.length; const n = b.length
+  if (m === 0) return n
+  if (n === 0) return m
+  const dp: number[] = Array.from({ length: n + 1 }, (_, i) => i)
+  for (let i = 1; i <= m; i++) {
+    let prevDiag = dp[0]
+    dp[0] = i
+    for (let j = 1; j <= n; j++) {
+      const tmp = dp[j]
+      dp[j] = a[i - 1] === b[j - 1] ? prevDiag : 1 + Math.min(prevDiag, dp[j], dp[j - 1])
+      prevDiag = tmp
+    }
+  }
+  return dp[n]
+}
+
+/** 名稱相似度 0~100（正規化後比對；100 = 完全相同，0 = 完全不同）*/
+function nameSimilarityScore(a: string, b: string): number {
+  const na = normalizeForCompare(a); const nb = normalizeForCompare(b)
+  if (!na || !nb) return 0
+  if (na === nb) return 100
+  const maxLen = Math.max(na.length, nb.length)
+  if (maxLen === 0) return 0
+  const dist = levenshteinDistance(na, nb)
+  return Math.round((1 - dist / maxLen) * 100)
+}
+
+/** 取學名屬名（scientificName 的第一個字詞）*/
+function genusOf(scientificName: string | undefined): string | null {
+  if (!scientificName) return null
+  const parts = scientificName.trim().split(/\s+/).filter(Boolean)
+  return parts[0] || null
+}
+
+/**
+ * 找出資料庫中名稱最相近的候選植物，供「相近植物替代測試」人工確認流程使用。
+ * 只回傳「名稱相近但不完全相同」的候選（完全相同的名稱應該已由 findLocalPlantMatch
+ * 命中，不會走到這裡）；依相似度由高到低排序，最多回傳 topN 筆。
+ */
+export function findSimilarPlants(
+  queryName: string,
+  plants: CsvPlantRecord[],
+  scientificNameHint?: string,
+  topN = 3,
+): SimilarPlantCandidate[] {
+  const queryGenus = genusOf(scientificNameHint)
+  return plants
+    .map((plant): SimilarPlantCandidate => {
+      const nameSimilarity = nameSimilarityScore(queryName, plant.name)
+      const candidateGenus = genusOf(plant.scientificName)
+      const sameGenus = queryGenus && candidateGenus
+        ? normalizeScientificName(queryGenus) === normalizeScientificName(candidateGenus)
+        : null
+      return { plant, nameSimilarity, genus: candidateGenus, sameGenus }
+    })
+    .filter(c => c.nameSimilarity > 0 && c.nameSimilarity < 100)
+    .sort((a, b) => b.nameSimilarity - a.nameSimilarity)
+    .slice(0, topN)
 }

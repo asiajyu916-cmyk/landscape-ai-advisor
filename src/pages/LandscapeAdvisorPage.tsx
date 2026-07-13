@@ -16,11 +16,15 @@ import {
 } from '@/utils/csvParser'
 import { getAdvisorReply, type AdvisorReply } from '@/utils/plantAdvisor'
 import { buildMergePreview, applyMerge } from '@/utils/plantCsvMerge'
+import { findSimilarPlants } from '@/utils/plantNameMatch'
+import { searchOfficialPlantData, searchResultToDraft } from '@/utils/plantSearchClient'
+import PlantAutoAddModal from '@/components/modals/PlantAutoAddModal'
 import type { ImportMode, MergePreview, MergeApplyResult } from '@/types/plantMerge'
 import type {
   CsvPlantRecord, SelectedCsvPlant, ImportResult, PlantStatus,
   PlantImageData, ImageStore, CandidatePhoto, ImageReviewStatus,
 } from '@/types/csvPlant'
+import type { SimilarPlantCandidate, PlantSearchResult, DraftPlantRecord } from '@/types/plantSearch'
 
 // ── tiny helpers ──────────────────────────────────────────────────────────────
 function uid() { return Math.random().toString(36).slice(2) }
@@ -112,8 +116,10 @@ function evaluate(plants: SelectedCsvPlant[], allPlants: CsvPlantRecord[]): Eval
   if (drainLevel === 'caution') {
     deductions += 13
     if (hasNotTolerant) plants.filter(p => p.wetTolerance === '不耐積水').forEach(p => problemIds.add(p.instanceId))
+    const wetTolerantPlants = plants.filter(p => p.wetTolerance === '耐濕' || p.wetTolerance === '稍耐濕')
+    wetTolerantPlants.forEach(p => problemIds.add(p.instanceId))
     issues.push(makeIssue('排水衝突', 'caution',
-      `本區同時包含不耐積水（${plants.filter(p => p.wetTolerance === '不耐積水').map(p => p.name).join('、')}）與耐濕植物，排水條件需求相反。`,
+      `本區同時包含不耐積水（${plants.filter(p => p.wetTolerance === '不耐積水').map(p => p.name).join('、')}）與耐濕（${wetTolerantPlants.map(p => p.name).join('、')}）的植物組合，排水條件需求相反。`,
       '若採統一排水設計，不耐積水植物易發生爛根，耐濕植物則可能因過度排水而受影響。',
       '建議分區配置並設置差異化排水層，或選用排水需求相近的替代植栽。'))
   } else if (hasNotTolerant && plants.length > 1) {
@@ -415,6 +421,17 @@ function evaluate(plants: SelectedCsvPlant[], allPlants: CsvPlantRecord[]): Eval
   } else {
     const dangerNotes = allDanger.map(i => `${i.category}：${i.cause}`).join('\n')
     reviewText = `本區植栽配置計畫，選用植栽包含 ${plantNames}，整體配置相容性評估分數為 ${score}/100，評估結果為「${compatLevel}」。\n\n本配置計畫目前存在以下需優先處理之問題：\n\n${dangerNotes}\n\n本設計團隊將依評估建議進行配置調整，修正方向如下：\n${adjustmentPlan.map(p => `• ${p}`).join('\n')}\n\n修正後之配置計畫將於調整完成後另案說明，敬請審查委員惠予指導。`
+  }
+
+  // ── 相近植物替代評估標記 ─────────────────────────────────────────────────
+  // 全案報告需明確標示：本次評估中有哪些植物是用「相近植物資料」暫代原始植物，
+  // 不代表原植物品種的正式生育特性。
+  const substitutePlants = plants.filter(p => p.evaluationMode === 'similar-plant-substitute')
+  if (substitutePlants.length > 0) {
+    const substituteList = substitutePlants
+      .map(p => `${p.originalPlantName ?? '(原始植物名稱未記錄)'} → 暫代：${p.substitutePlantName ?? p.name}`)
+      .join('\n')
+    reviewText += `\n\n【相近植物替代評估】\n本次評估中，以下植物因本地資料庫查無完全相符資料，經人工確認以名稱相近植物暫代進行模擬評估：\n${substituteList}\n\n本結果使用相近植物資料進行模擬，不代表原植物品種的正式生育特性，僅供初步參考，正式設計文件請另行查證原始植物之官方生育資料。`
   }
 
   return { score, compatLevel, categories, issues, alternatives, aiSuggestion, adjustmentPlan, reviewText }
@@ -748,7 +765,14 @@ function SelectedPlantCard({ plant, onRemove, imageStore }: {
       {/* 資訊區 */}
       <div className="p-2.5 flex-1 flex flex-col gap-1.5">
         <div>
-          <p className="font-bold text-stone-800 text-sm leading-tight truncate">{plant.name}</p>
+          {plant.evaluationMode === 'similar-plant-substitute' ? (
+            <>
+              <p className="text-[10px] text-stone-400">原始植物：{plant.originalPlantName}</p>
+              <p className="font-bold text-stone-800 text-sm leading-tight truncate">暫代評估：{plant.substitutePlantName ?? plant.name}</p>
+            </>
+          ) : (
+            <p className="font-bold text-stone-800 text-sm leading-tight truncate">{plant.name}</p>
+          )}
           {plant.scientificName
             ? <p className="text-[10px] text-stone-400 italic truncate">{plant.scientificName}</p>
             : <p className="text-[10px] text-stone-300">—</p>
@@ -760,7 +784,15 @@ function SelectedPlantCard({ plant, onRemove, imageStore }: {
           {!plant.dataComplete && (
             <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-stone-100 border border-stone-200 text-stone-400 font-medium">資料待補</span>
           )}
+          {plant.evaluationMode === 'similar-plant-substitute' && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-50 border border-amber-300 text-amber-700 font-medium">近似植物模擬評估</span>
+          )}
         </div>
+        {plant.evaluationMode === 'similar-plant-substitute' && (
+          <p className="text-[9px] text-amber-600 leading-snug">
+            本結果使用相近植物資料進行模擬，不代表原植物品種的正式生育特性。
+          </p>
+        )}
         {/* 綠色方格程度顯示 */}
         <div className="space-y-1.5 mt-auto">
           <RatingBar label="日照" score={toSunScore(plant.sunRequirement)} />
@@ -1918,6 +1950,133 @@ async function searchWikimediaPhotos(plantName: string, scientificName: string):
   return []
 }
 
+// ── SimilarPlantSubstituteModal — 相近植物替代測試 ────────────────────────────
+// 使用情境：景觀公司使用的植物不在資料庫內，但資料庫可能有名稱相近/同屬的植物。
+// 不可自動把相近植物視為同一植物——一律人工確認，三個選項：
+//   A. 使用 AI 網路查詢原始植物　B. 暫時使用相近植物資料進行替代測試評估　C. 不納入本次評估
+
+function SimilarPlantSubstituteModal({ allPlants, onClose, onSubstitute, onAiConfirm }: {
+  allPlants: CsvPlantRecord[]
+  onClose: () => void
+  onSubstitute: (originalPlantName: string, substitute: CsvPlantRecord) => void
+  onAiConfirm: (record: CsvPlantRecord) => void
+}) {
+  const [queryName, setQueryName] = useState('')
+  const [searched, setSearched] = useState(false)
+  const [candidates, setCandidates] = useState<SimilarPlantCandidate[]>([])
+  const [excluded, setExcluded] = useState(false)
+  const [aiSearching, setAiSearching] = useState(false)
+  const [aiFailure, setAiFailure] = useState('')
+  const [aiActive, setAiActive] = useState<{
+    queryName: string; result: PlantSearchResult; draft: DraftPlantRecord
+  } | null>(null)
+
+  const runSearch = () => {
+    const name = queryName.trim()
+    if (!name) return
+    setCandidates(findSimilarPlants(name, allPlants))
+    setSearched(true)
+    setExcluded(false)
+    setAiFailure('')
+  }
+
+  const runAiSearch = async () => {
+    const name = queryName.trim()
+    if (!name) return
+    setAiSearching(true)
+    setAiFailure('')
+    const res = await searchOfficialPlantData(name)
+    setAiSearching(false)
+    if (res.ok) {
+      setAiActive({ queryName: name, result: res.result, draft: searchResultToDraft(res.result) })
+    } else {
+      setAiFailure(res.reason)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl max-h-[85vh] flex flex-col">
+        <div className="flex items-center justify-between p-5 border-b border-stone-100">
+          <h2 className="text-lg font-bold text-stone-800">相近植物替代測試</h2>
+          <button onClick={onClose} className="text-stone-400 hover:text-stone-600"><X size={20} /></button>
+        </div>
+        <div className="overflow-y-auto flex-1 p-5 space-y-4">
+          <p className="text-xs text-stone-500 leading-relaxed">
+            景觀公司使用的植物若不在目前植栽資料庫內，可先搜尋名稱相近的候選植物——系統不會
+            自動把候選植物視為同一種植物，須由你人工確認後才會納入評估。
+          </p>
+          <div className="flex gap-2">
+            <input
+              value={queryName}
+              onChange={e => setQueryName(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && runSearch()}
+              placeholder="輸入原始植物名稱，例如：厚葉女貞"
+              className="flex-1 px-3 py-2 rounded-xl border border-stone-200 text-sm focus:outline-none focus:border-green-500"
+            />
+            <button onClick={runSearch} disabled={!queryName.trim()}
+              className="px-4 py-2 rounded-xl bg-green-700 text-white text-sm font-medium disabled:bg-stone-200 disabled:text-stone-400">
+              搜尋
+            </button>
+          </div>
+
+          {searched && (
+            <div className="space-y-3">
+              <p className="text-xs font-semibold text-stone-500">
+                原始植物：{queryName.trim()}
+                {candidates.length > 0 ? `找到 ${candidates.length} 個名稱相近的候選植物` : '資料庫中找不到名稱相近的候選植物'}
+              </p>
+
+              {candidates.map((c, i) => (
+                <div key={i} className="border border-stone-200 rounded-xl p-3 space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <p className="font-semibold text-stone-800 text-sm">{c.plant.name}</p>
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-stone-100 text-stone-600 font-medium">相似度 {c.nameSimilarity}%</span>
+                  </div>
+                  <div className="grid grid-cols-1 gap-y-0.5 text-xs text-stone-500">
+                    <span>植物類型：{c.plant.subCategory || c.plant.category || '—'}</span>
+                    <span>科屬資料：{c.plant.scientificName || '—'}</span>
+                    <span>是否同屬：{c.sameGenus === null ? '未知（無學名資料可比對）' : c.sameGenus ? '是' : '否'}</span>
+                  </div>
+                  <button
+                    onClick={() => { onSubstitute(queryName.trim(), c.plant); onClose() }}
+                    className="mt-1 w-full py-1.5 rounded-lg bg-amber-50 border border-amber-300 text-amber-700 text-xs font-medium hover:bg-amber-100">
+                    B．暫時使用「{c.plant.name}」資料進行替代測試評估
+                  </button>
+                </div>
+              ))}
+
+              <div className="flex gap-2 pt-1">
+                <button onClick={runAiSearch} disabled={aiSearching}
+                  className="flex-1 py-2 rounded-xl border border-blue-300 text-blue-700 text-xs font-medium hover:bg-blue-50 disabled:opacity-50">
+                  {aiSearching ? '搜尋官方資料中…' : 'A．使用 AI 網路查詢原始植物'}
+                </button>
+                <button onClick={() => setExcluded(true)}
+                  className="flex-1 py-2 rounded-xl border border-stone-300 text-stone-600 text-xs font-medium hover:bg-stone-50">
+                  C．不納入本次評估
+                </button>
+              </div>
+              {aiFailure && <p className="text-xs text-red-500">{aiFailure}</p>}
+              {excluded && <p className="text-xs text-stone-500">已選擇不納入本次評估，此植物不會加入評估清單。</p>}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {aiActive && (
+        <PlantAutoAddModal
+          queryName={aiActive.queryName}
+          result={aiActive.result}
+          draft={aiActive.draft}
+          onConfirm={(record) => { onAiConfirm(record); setAiActive(null); onClose() }}
+          onSkip={() => setAiActive(null)}
+          onClose={() => setAiActive(null)}
+        />
+      )}
+    </div>
+  )
+}
+
 // ── PhotoManagerModal ─────────────────────────────────────────────────────────
 
 function PhotoManagerModal({ plants, imageStore, onSaveImage, onClose }: {
@@ -2853,6 +3012,7 @@ export default function LandscapeAdvisorPage({
   const [selectedPlants, setSelectedPlants] = useState<SelectedCsvPlant[]>([])
   const [result, setResult] = useState<EvalResult | null>(null)
   const [showDb, setShowDb] = useState(false)
+  const [showSimilarModal, setShowSimilarModal] = useState(false)
   const [showCsvImport, setShowCsvImport] = useState(false)
   const [copyDone, setCopyDone] = useState(false)
   const [activeReviewTab, setActiveReviewTab] = useState<'overview'|'categories'|'issues'|'alternatives'|'summary'|'assistant'>('overview')
@@ -3006,6 +3166,34 @@ export default function LandscapeAdvisorPage({
     setSelectedPlants(prev => prev.filter(p => p.instanceId !== instanceId))
     setResult(null)
   }, [])
+
+  // ── 相近植物替代測試：人工確認後加入的暫代植物 ─────────────────────────────
+  // 不覆蓋原始植物名稱——originalPlantName 保留使用者實際想評估的植物，
+  // 其餘欄位（含 name）皆為代用植物 substitutePlantName 的真實資料。
+  const addSubstitutePlant = useCallback((originalPlantName: string, substitute: CsvPlantRecord) => {
+    const status: PlantStatus =
+      substitute.wetTolerance === '不耐積水' && substitute.droughtTolerance === '不耐旱' ? '需注意' : '可用'
+    setSelectedPlants(prev => [...prev, {
+      ...substitute,
+      instanceId: uid(),
+      status,
+      evaluationMode: 'similar-plant-substitute',
+      originalPlantName,
+      substitutePlantName: substitute.name,
+    }])
+    setResult(null)
+  }, [])
+
+  // AI 網路查詢成功並確認後：寫入資料庫（供後續直接比對）並加入本次評估
+  const handleAiFoundPlantConfirm = useCallback((record: CsvPlantRecord) => {
+    setAllPlants(prev => {
+      if (prev.some(p => p.name === record.name)) return prev
+      const next = [...prev, record]
+      savePlantsToStorage(next)
+      return next
+    })
+    addPlant(record)
+  }, [addPlant])
 
   const handleDeletePlant = useCallback((plantId: string) => {
     setAllPlants(prev => {
@@ -3676,6 +3864,15 @@ tfoot{display:table-footer-group}
             {allPlants.length > 0 ? '從植栽資料庫加入植物' : '請先匯入植栽資料庫'}
           </button>
 
+          {/* 找不到植物？相近植物替代測試 */}
+          <button onClick={() => setShowSimilarModal(true)} disabled={allPlants.length === 0}
+            className={`w-full flex items-center justify-center gap-2 py-2 rounded-xl text-xs font-medium transition-colors ${
+              allPlants.length > 0 ? 'text-amber-700 hover:bg-amber-50' : 'text-stone-300 cursor-not-allowed'
+            }`}>
+            <Search size={13} />
+            找不到植物？相近植物替代測試
+          </button>
+
           {/* Plant cards grid */}
           {selectedPlants.length === 0
             ? <p className="text-center text-stone-400 text-sm py-6">尚未加入植栽</p>
@@ -4216,6 +4413,14 @@ tfoot{display:table-footer-group}
       )}
       {showCsvImport && (
         <CsvImportModal onClose={() => setShowCsvImport(false)} existingPlants={allPlants} onApply={handleCsvImported} />
+      )}
+      {showSimilarModal && (
+        <SimilarPlantSubstituteModal
+          allPlants={allPlants}
+          onClose={() => setShowSimilarModal(false)}
+          onSubstitute={addSubstitutePlant}
+          onAiConfirm={handleAiFoundPlantConfirm}
+        />
       )}
     </div>}
     </>
