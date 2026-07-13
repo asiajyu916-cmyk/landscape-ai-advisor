@@ -9,7 +9,7 @@ import {
 } from 'lucide-react'
 import { loadPlantsFromStorage } from '@/data/plantStore'
 import type { CsvPlantRecord } from '@/types/csvPlant'
-import { parsePdfZonePlantingTable, detectJointZoneTitle, type ZonePlantingRow, type ZoneConfidence } from '@/utils/parsePdfZones'
+import { parsePdfZonePlantingTable, detectJointZoneTitle, CAPTION_EXCLUDE_RE, type ZonePlantingRow, type ZoneConfidence } from '@/utils/parsePdfZones'
 import { evaluateZone, type ZoneReviewResult } from '@/utils/evaluateZone'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
@@ -191,7 +191,7 @@ function parseZoneTable(rawText: string): ZoneTableResult {
     text
       .split(/[、，,\n\/・•]+/)
       .map(s => s.replace(/[（(][^)）]*[）)]/g, '').replace(/[×xX]\s*\d+/g, '').trim())
-      .filter(s => s.length >= 2 && /[一-鿿]/.test(s) && !/^\d+$/.test(s))
+      .filter(s => s.length >= 2 && /[一-鿿]/.test(s) && !/^\d+$/.test(s) && !CAPTION_EXCLUDE_RE.test(s))
 
   for (const seg of zoneSegments) {
     const zoneMatch = seg.match(/^([A-Ia-i]\s*區|第[一二三四五六七八九]區)/)
