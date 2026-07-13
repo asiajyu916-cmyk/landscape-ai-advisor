@@ -1902,69 +1902,70 @@ interface UnimportableItem {
   reason: string
 }
 
-function buildImportList(
-  mappings: MappedItem[],
+// ── 全案匯入植物清單：只能是「A/B/C 各分區實際辨識到的植物」聯集 ─────────────
+// 索引表（植栽索引表 / 圖例）本身只是「圖例 / HATCH / 圖塊 → 植物名稱」的對照
+// 辭典，辭典裡列出的植物不代表這張圖實際有種——必須先透過分區空間比對
+// （buildZoneReviews 內既有的 HATCH/圖塊/圖層比對流程）確認某植物「有落在
+// A、B、C 某一分區範圍內」，才能列入全案審查。
+// 舊版 buildImportList 直接把 schedule.entries（整份索引表）裡 dbMatched 的
+// 植物全部當作「全案植物」，等同於「圖例表列了什麼，全案就審查什麼」，
+// 未落在任何分區的索引表植物也會被誤納入，導致全案分數被不存在的植物拉低。
+function buildImportListFromZones(
+  zoneReviews: ZoneReviewResult[],
   schedule: PlantScheduleEntry[],
 ): { importable: ImportableItem[]; unimportable: UnimportableItem[] } {
   const importable: ImportableItem[] = []
   const unimportable: UnimportableItem[] = []
   const seenNames = new Set<string>()
+  const zonePlantNamesByZone: Record<string, string[]> = {}
 
-  // 1. 圖塊對應：只有「已確認對應（matched）」才可匯入
-  //    「系統推測（partial）」需使用者先在圖塊對應表確認植物
-  for (const m of mappings) {
-    if (m.matchStatus === 'unmatched') {
-      unimportable.push({ label: m.blockName, reason: '未對應，無植物名稱' })
-      continue
+  for (const zr of zoneReviews) {
+    const namesInZone: string[] = []
+    for (const p of zr.plants) {
+      namesInZone.push(p.name)
+      if (seenNames.has(p.name)) continue
+      seenNames.add(p.name)
+      const schedEntry = schedule.find(e => e.plantName === p.name)
+      importable.push({
+        plantName: p.name,
+        quantity: schedEntry?.quantity ?? 1,
+        source: 'block-matched',
+        confidence: 90,
+        code: schedEntry?.code,
+        quantityNote: schedEntry?.quantityNote,
+      })
     }
-    if (m.matchStatus === 'partial') {
-      const plantHint = m.plantName ? `推測：${m.plantName}` : '植物未知'
-      const codeHint  = m.possiblePlantCode ? `代號 ${m.possiblePlantCode}` : ''
+    zonePlantNamesByZone[zr.zoneName] = [...new Set(namesInZone)]
+  }
+
+  // 索引表裡「有比對到資料庫、但沒有落在任何分區實際範圍內」的植物 → 不納入全案審查，
+  // 僅列為「未納入」並附上原因，讓使用者知道這是圖例辭典裡的植物、不是這次審查範圍內的植物。
+  const excludedScheduleNames: string[] = []
+  for (const e of schedule) {
+    if (!e.plantName || seenNames.has(e.plantName)) continue
+    if (!e.dbMatched) {
       unimportable.push({
-        label: m.blockName,
-        reason: `系統推測（${[plantHint, codeHint].filter(Boolean).join('，')}）——請在圖塊對應表點擊「本次」確認後可匯入`,
+        label: e.code ? `代號 ${e.code}（${e.plantName}）` : e.plantName,
+        reason: '植物名稱未在植栽資料庫中找到',
       })
       continue
     }
-    if (!m.plantName) {
-      unimportable.push({ label: m.blockName, reason: '已對應但植物名稱遺失' })
-      continue
-    }
-    if (seenNames.has(m.plantName)) continue
-    seenNames.add(m.plantName)
-    importable.push({
-      plantName: m.plantName,
-      quantity: m.count,
-      source: 'block-matched',
-      confidence: m.confidenceScore ?? 0,
-      blockName: m.blockName,
-      code: m.scheduleEntry?.code ?? m.possiblePlantCode,
+    excludedScheduleNames.push(e.plantName)
+    unimportable.push({
+      label: e.code ? `代號 ${e.code}（${e.plantName}）` : e.plantName,
+      reason: '索引表圖例辭典項目，未實際落在 A/B/C 任一分區範圍內，不納入全案審查',
     })
   }
 
-  // 2. 索引表已比對到資料庫、但尚未在圖塊對應出現的植物
-  for (const e of schedule) {
-    if (!e.dbMatched) {
-      if (e.plantName) {
-        unimportable.push({
-          label: e.code ? `代號 ${e.code}（${e.plantName}）` : e.plantName,
-          reason: '植物名稱未在植栽資料庫中找到',
-        })
-      }
-      continue
-    }
-    if (seenNames.has(e.plantName)) continue
-    seenNames.add(e.plantName)
-    importable.push({
-      plantName: e.plantName,
-      quantity: e.quantity ?? 1,
-      source: 'schedule',
-      confidence: e.confidence === 'high' ? 90 : 70,
-      code: e.code,
-      // 優先使用索引表解析時標記的備注，否則自行補充
-      quantityNote: e.quantityNote ?? (e.quantity == null ? '數量待確認（預設 1）' : undefined),
-    })
+  console.group('🗂 全案植物來源 Debug（索引表僅供圖例對照，全案審查以分區實際植物為準）')
+  console.debug(`索引表植物數：${schedule.filter(e => e.plantName).length}`)
+  console.debug(`實際區內植物數（A/B/C 聯集，去重後）：${importable.length}`)
+  for (const [zoneName, names] of Object.entries(zonePlantNamesByZone)) {
+    console.debug(`${zoneName}實際植物：${names.length > 0 ? names.join('、') : '(無)'}`)
   }
+  console.debug(`全案送入 AI 分析的植物：${importable.map(i => i.plantName).join('、') || '(無)'}`)
+  console.debug(`全案未納入分析的索引表植物：${excludedScheduleNames.length > 0 ? excludedScheduleNames.join('、') : '(無)'}`)
+  console.groupEnd()
 
   return { importable, unimportable }
 }
@@ -2504,7 +2505,7 @@ export default function DxfReviewPage({
 
       {/* Footer */}
       {mappings.length > 0 && (() => {
-        const { importable, unimportable } = buildImportList(mappings, plantSchedule.entries)
+        const { importable, unimportable } = buildImportListFromZones(zoneReviews, plantSchedule.entries)
         return (
           <div className="sticky bottom-0 bg-white border-t border-stone-200">
             {/* Import preview panel */}
@@ -2581,7 +2582,7 @@ export default function DxfReviewPage({
               </div>
               <div className="flex items-center gap-3">
                 <span className="text-xs text-stone-400">
-                  可匯入 {buildImportList(mappings, plantSchedule.entries).importable.length} 種
+                  可匯入 {buildImportListFromZones(zoneReviews, plantSchedule.entries).importable.length} 種
                 </span>
                 <button
                   onClick={() => setShowImportPreview(v => !v)}
