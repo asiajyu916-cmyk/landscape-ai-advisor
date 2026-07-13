@@ -733,6 +733,7 @@ export function parseDxf(text: string): DxfParseResult {
   const inserts: DxfInsert[] = []
   const texts: DxfText[] = []
   const polygons: DxfPolygon[] = []
+  const splineSegments: Array<{ layer: string; points: Array<{ x: number; y: number }> }> = []
   const layerColors = parseLayerColors(groups)
 
   // 預先解析 BLOCKS section（block 定義內的文字）
@@ -1010,6 +1011,27 @@ export function parseDxf(text: string): DxfParseResult {
         })
       }
 
+    // ── SPLINE ───────────────────────────────────────────────────────────────
+    // 分區邊界有時用曲線工具（SPLINE）繪製而非 LWPOLYLINE，尤其是造型自然的
+    // 灌木/草皮區塊或分區輪廓。取控制點（code 10/20）近似曲線頂點；同層的多段
+    // SPLINE（常見於一條分區邊界被拆成數段曲線）於下方 chainSplineSegments 串接。
+    } else if (g.code === 0 && g.value === 'SPLINE') {
+      let layer = ''
+      const points: Array<{ x: number; y: number }> = []
+      let pendingX: number | null = null
+      i++
+      while (i < groups.length && groups[i].code !== 0) {
+        const eg = groups[i]
+        if (eg.code === 8)  layer = eg.value
+        if (eg.code === 10) pendingX = parseFloat(eg.value) || 0
+        if (eg.code === 20 && pendingX !== null) {
+          points.push({ x: pendingX, y: parseFloat(eg.value) || 0 })
+          pendingX = null
+        }
+        i++
+      }
+      if (points.length >= 2) splineSegments.push({ layer, points })
+
     // ── HATCH ────────────────────────────────────────────────────────────────
     } else if (g.code === 0 && g.value === 'HATCH') {
       let layer = ''
@@ -1088,6 +1110,16 @@ export function parseDxf(text: string): DxfParseResult {
     }
   }
 
+  // ── SPLINE 分區邊界：串接同層曲線段 → 封閉多邊形 ──────────────────────────
+  for (const { layer, vertices } of chainSplineSegments(splineSegments)) {
+    polygons.push({
+      layer, vertices,
+      closed: true,
+      zoneType: classifyZone(layer),
+      source: 'LWPOLYLINE',
+    })
+  }
+
   const blockGroups = Array.from(groupMap.values()).sort((a, b) => b.count - a.count)
   const allLayers = [...new Set([
     ...inserts.map(e => e.layer),
@@ -1124,6 +1156,71 @@ export function parseDxf(text: string): DxfParseResult {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * 串接同層的多段 SPLINE 控制點路徑成封閉多邊形。
+ * 分區邊界常見用曲線工具（SPLINE）拆成數段畫成，需先依「端點吻合」串成一條完整曲線，
+ * 再視頭尾距離決定是否封閉。
+ *
+ * 兩種容差分開處理，避免用同一寬鬆容差時，把同層裡「不同分區」的相近端點誤接在一起：
+ *   joinTol  = 段與段之間的銜接容差（小、嚴格——同一條曲線斷開的兩段，端點應幾乎重合）
+ *   closeTol = 串好的單一鏈條「頭尾是否算封閉」的容差（較寬鬆——曲線工具常留一點縫隙），
+ *              只套用在同一條已串好的鏈條自身頭尾，不會跨鏈條誤判。
+ */
+function chainSplineSegments(
+  segments: Array<{ layer: string; points: Array<{ x: number; y: number }> }>,
+): Array<{ layer: string; vertices: Array<{ x: number; y: number }> }> {
+  const JOIN_TOL = 2
+  const dist = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.hypot(a.x - b.x, a.y - b.y)
+  const results: Array<{ layer: string; vertices: Array<{ x: number; y: number }> }> = []
+
+  const byLayer = new Map<string, Array<Array<{ x: number; y: number }>>>()
+  for (const seg of segments) {
+    if (seg.points.length < 2) continue
+    const arr = byLayer.get(seg.layer) ?? []
+    arr.push(seg.points)
+    byLayer.set(seg.layer, arr)
+  }
+
+  for (const [layer, segs] of byLayer) {
+    const remaining = [...segs]
+    while (remaining.length > 0) {
+      let chain = remaining.shift()!
+      let extended = true
+      while (extended) {
+        extended = false
+        for (let idx = 0; idx < remaining.length; idx++) {
+          const seg = remaining[idx]
+          const chainEnd = chain[chain.length - 1]
+          const chainStart = chain[0]
+          const segStart = seg[0]
+          const segEnd = seg[seg.length - 1]
+          if (dist(chainEnd, segStart) <= JOIN_TOL) {
+            chain = chain.concat(seg.slice(1)); remaining.splice(idx, 1); extended = true; break
+          } else if (dist(chainEnd, segEnd) <= JOIN_TOL) {
+            chain = chain.concat([...seg].reverse().slice(1)); remaining.splice(idx, 1); extended = true; break
+          } else if (dist(chainStart, segEnd) <= JOIN_TOL) {
+            chain = seg.slice(0, -1).concat(chain); remaining.splice(idx, 1); extended = true; break
+          } else if (dist(chainStart, segStart) <= JOIN_TOL) {
+            chain = [...seg].reverse().slice(0, -1).concat(chain); remaining.splice(idx, 1); extended = true; break
+          }
+        }
+      }
+
+      if (chain.length < 3) continue
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+      for (const p of chain) {
+        if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x
+        if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y
+      }
+      const closeTol = Math.max(20, Math.hypot(maxX - minX, maxY - minY) * 0.02)
+      // 頭尾已吻合就視為封閉；否則補一段連回起點（曲線工具常見未精確閉合，但語意上是邊界）
+      if (dist(chain[0], chain[chain.length - 1]) > closeTol) continue   // 缺口過大，不強行封閉，避免誤造假邊界
+      results.push({ layer, vertices: chain })
+    }
+  }
+  return results
+}
 
 function isApproxClosed(vertices: Array<{ x: number; y: number }>): boolean {
   if (vertices.length < 3) return false
