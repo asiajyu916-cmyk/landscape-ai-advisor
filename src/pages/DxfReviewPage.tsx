@@ -4563,6 +4563,27 @@ function ZonesTab({ polygons }: { polygons: DxfParseResult['polygons'] }) {
 
 // ── Schedule tab ─────────────────────────────────────────────────────────────
 
+const TIER_LABELS: Record<string, string> = {
+  cloud_db: '雲端資料庫', site_search: '指定網站', ai_web_search: 'AI 網路搜尋',
+}
+
+/** 把各層查詢的 telemetry 摘要成一段簡短說明，避免所有失敗原因都顯示成同一句「查無資料」*/
+function summarizeTelemetry(telemetry?: { tier: string; failureReason?: string }[]): string {
+  if (!telemetry || telemetry.length === 0) return ''
+  const parts = telemetry.map(t => {
+    const label = TIER_LABELS[t.tier] ?? t.tier
+    if (!t.failureReason) return `${label}：已查`
+    if (t.failureReason === 'not_found_in_cloud_db') return `${label}：查無`
+    if (t.failureReason === 'not_found') return `${label}：查無`
+    if (t.failureReason === 'not_found_in_designated_sites') return `${label}：查無`
+    if (t.failureReason === 'timeout') return `${label}：逾時`
+    if (t.failureReason === 'json_parse_error') return `${label}：解析失敗`
+    if (t.failureReason?.startsWith('anthropic_api_error')) return `${label}：服務錯誤`
+    return `${label}：${t.failureReason}`
+  })
+  return `（已查：${parts.join('、')}）`
+}
+
 function ScheduleTab({ schedule, mappings, plants, onPlantAdded }: {
   schedule: PlantSchedule; mappings: MappedItem[]
   plants: CsvPlantRecord[]; onPlantAdded: (record: CsvPlantRecord, dataSource?: DraftPlantRecord['dataSource'], sourceUrl?: string) => void
@@ -4587,7 +4608,7 @@ function ScheduleTab({ schedule, mappings, plants, onPlantAdded }: {
       setSearchStates(prev => ({ ...prev, [key]: 'idle' }))
     } else {
       setSearchStates(prev => ({ ...prev, [key]: 'failed' }))
-      setFailureNotes(prev => ({ ...prev, [key]: res.reason }))
+      setFailureNotes(prev => ({ ...prev, [key]: `${res.reason}${summarizeTelemetry(res.telemetry)}` }))
     }
   }, [])
 

@@ -10,6 +10,7 @@ import {
   DRAINAGE_KEYWORDS, MAINTENANCE_KEYWORDS, NORMALIZED_CATEGORY_KEYWORDS,
 } from '@/types/plantSearch'
 import { searchCloudPlant } from '@/services/plantCloudService'
+import { getAliasGroup } from '@/utils/plantNameMatch'
 
 // ── 搜尋結果本地快取 ──────────────────────────────────────────────────────────
 // AI 網路搜尋一次要 ~20 秒，同一個植物名稱不該每次都重新查詢。成功結果寫入
@@ -100,13 +101,14 @@ interface SiteSearchApiResult {
 async function searchDesignatedSitePlantData(
   queryName: string,
   scientificNameHint?: string,
+  aliasHints?: string[],
 ): Promise<{ ok: true; result: SiteSearchApiResult; telemetry?: PlantSearchTelemetry[] }
   | { ok: false; reason: string; telemetry?: PlantSearchTelemetry[] }> {
   try {
     const res = await fetch('/api/plant-site-search', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ queryName, scientificNameHint }),
+      body: JSON.stringify({ queryName, scientificNameHint, aliasHints }),
     })
     const data = await res.json()
     const telemetry: PlantSearchTelemetry[] | undefined = data.telemetry
@@ -240,8 +242,9 @@ export async function searchPlantAllTiers(
     }
   }
 
-  // 第三層：指定植物網站
-  const siteRes = await searchDesignatedSitePlantData(queryName, scientificNameHint)
+  // 第三層：指定植物網站（帶上本地別名表，主要名稱查無結果時可改用別名再試）
+  const aliasHints = getAliasGroup(queryName).filter(a => a !== queryName)
+  const siteRes = await searchDesignatedSitePlantData(queryName, scientificNameHint, aliasHints)
   if (siteRes.telemetry) telemetry.push(...siteRes.telemetry)
   if (siteRes.ok) {
     return { ok: true, result: siteResultToPlantSearchResult({ ...siteRes.result, queryName }), telemetry }

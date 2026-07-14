@@ -26,8 +26,10 @@ const SYSTEM_PROMPT = `你是景觀工程植栽資料查證助理，任務是「
 搜尋規則：
 1. 依序嘗試：site:future.url.tw/plant 中文名稱 → site:future.url.tw/plant 學名（若有提供）
    → site:kmweb.moa.gov.tw 中文名稱 → site:kmweb.moa.gov.tw 學名（若有提供）。
-2. 只要任一次搜尋在這兩個網域內找到明確符合的植物頁面，立即停止後續搜尋、根據該頁面內容作答。
-3. 最多搜尋 4 次（對應上面 4 種查詢），不要超過。
+2. 若使用者提供的中文名稱、學名都查無明確頁面，且有提供「已知別名」，請改用每個別名
+   依序重複上述 site: 查詢（同一植物常有多種俗名寫法，官網頁面可能是用別名而非主要名稱建檔）。
+3. 只要任一次搜尋在這兩個網域內找到明確符合的植物頁面，立即停止後續搜尋、根據該頁面內容作答。
+4. 最多搜尋 8 次，不要超過；找到就立刻停止，不要為了保險又多搜尋。
 4. 只能使用 web_search 工具實際搜尋到、且網域屬於上述兩個來源的內容作為依據，不能憑訓練知識或常識填寫欄位值，也不能採信這兩個網域以外的搜尋結果。
 5. 兩個來源都找不到符合的植物頁面時，found 填 false，不要編造任何欄位。
 6. sourceUrl 必須是實際搜尋到、真實存在於這兩個網域內的完整網址。
@@ -56,6 +58,7 @@ const SYSTEM_PROMPT = `你是景觀工程植栽資料查證助理，任務是「
 interface SiteSearchRequestBody {
   queryName: string
   scientificNameHint?: string
+  aliasHints?: string[]   // 已知別名（例如本地別名表），同一植物常有多種俗名寫法，任一命中即可
 }
 
 function buildUserPrompt(body: SiteSearchRequestBody): string {
@@ -64,6 +67,10 @@ function buildUserPrompt(body: SiteSearchRequestBody): string {
     `植物名稱：${body.queryName}`,
   ]
   if (body.scientificNameHint) lines.push(`學名線索：${body.scientificNameHint}`)
+  const aliases = (body.aliasHints ?? []).filter(a => a && a !== body.queryName)
+  if (aliases.length > 0) {
+    lines.push(`已知別名（同一植物的其他常見寫法，若主要名稱查無結果，請改用這些別名再試一次 site: 查詢）：${aliases.join('、')}`)
+  }
   return lines.join('\n')
 }
 
@@ -102,7 +109,7 @@ export default async function handler(req: Request): Promise<Response> {
         messages: [{ role: 'user', content: buildUserPrompt(body) }],
         tools: [{
           type: 'web_search_20250305', name: 'web_search',
-          allowed_domains: SITE_DOMAINS, max_uses: 4,
+          allowed_domains: SITE_DOMAINS, max_uses: 8,
         }],
       }),
     })
