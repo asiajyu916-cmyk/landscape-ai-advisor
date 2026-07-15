@@ -396,8 +396,15 @@ export const CONDITIONS: PlantCondition[] = [
   },
   {
     key: 'leafdrop', label: '容易落葉植物', pattern: /容易落葉|落葉性強|落葉量大|掉葉/,
-    test: p => !!p.leafDropStatus && /落葉性強|容易落葉/.test(p.leafDropStatus),
-    why: p => `落葉性：${p.leafDropStatus}`,
+    // 優先看「是否容易落葉」專用欄位（AI 搜尋補建的資料通常有填）；CSV 內建資料庫這欄
+    // 目前多半空白，退回從 category/subCategory/treeForm/maintenanceNote 文字判斷是否
+    // 標註為「落葉」樹種（與下面 evergreen 規則的判斷邏輯對稱，避免這條規則永遠查無結果）。
+    test: p => {
+      if (p.leafDropStatus) return /落葉性強|容易落葉/.test(p.leafDropStatus)
+      const text = p.category + p.subCategory + p.treeForm + p.maintenanceNote
+      return /落葉/.test(text) && !/常綠/.test(text)
+    },
+    why: p => p.leafDropStatus ? `落葉性：${p.leafDropStatus}` : `類型標註「${p.category}」，屬落葉性植物`,
     fallbackNote: '落葉性較明顯，需留意清理',
   },
 ]
