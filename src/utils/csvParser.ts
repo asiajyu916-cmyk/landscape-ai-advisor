@@ -131,9 +131,11 @@ function normalizeWater(raw: string): WaterReq {
 
 function normalizeDrought(raw: string): DroughtTolerance {
   if (!raw || raw.includes('待查')) return '待查'
-  if (raw.includes('耐旱') && !raw.includes('稍')) return '耐旱'
-  if (raw.includes('稍耐旱')) return '稍耐旱'
+  // 「不耐旱」本身就包含「耐旱」子字串，必須最先檢查，否則會被下面的「耐旱」條件誤判成
+  // 意思完全相反的「耐旱」（實測：石菖蒲、腎蕨等 10 種植物皆受影響）。
   if (raw.includes('不耐旱')) return '不耐旱'
+  if (raw.includes('稍耐旱')) return '稍耐旱'
+  if (raw.includes('耐旱')) return '耐旱'
   return '待查'
 }
 
