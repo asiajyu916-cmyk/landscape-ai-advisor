@@ -41,6 +41,7 @@ export interface DxfInsert {
   scaleY: number    // default 1
   rotation: number  // degrees, default 0
   attributes: DxfAttrib[]   // 緊接在 INSERT 後的 ATTRIB 實體，已連結
+  handle?: string   // DXF entity handle（code 5，巢狀展開時為祖先 handle 組合鍵），供去重用
 }
 
 export interface DxfText {
@@ -82,6 +83,10 @@ export interface DxfPolygon {
   hatchScale?: number     // code 41：pattern scale
   hatchAngle?: number     // code 52：pattern angle（degrees）
   hatchColor?: number     // code 62：color number（ACI）
+  handle?: string   // DXF entity handle（code 5，巢狀展開時為祖先 handle 組合鍵）。
+                     // 同一 HATCH 實體的多個 loop（外邊界＋孔洞／多個不連續面域）共用同一 handle。
+  parentBlockName?: string   // 若此幾何巢狀在某個 BLOCK 定義內（由 INSERT 展開而來），此為該
+                              // BLOCK 的名稱（例如 "TREE_茄苳"）；頂層（非巢狀）entity 為 undefined。
 }
 
 // block 定義的本地 bbox（以 block origin 為原點的本地座標系）
@@ -105,6 +110,8 @@ export interface DxfParseResult {
   blockExtents: Record<string, BlockExtent>
   // LAYER 表顏色（ACI），key = layerName，供 ByLayer/ByBlock HATCH 解析 effectiveColor
   layerColors: Record<string, number>
+  // HEADER $INSUNITS 原始代碼（4=mm, 5=cm, 6=m，其餘/undefined=無法辨識，需由 UI 詢問使用者）
+  insUnits?: number
   stats: {
     totalInserts: number
     totalTexts: number
@@ -203,4 +210,53 @@ export interface MultiLayerResult {
   underlayerDesc: string  // 所在範圍描述
   riskReasons: string[]
   suggestions: string[]
+}
+
+// ── 分區植栽面積與喬木數量統計 ──────────────────────────────────────────────────
+
+export type DrawingUnit = 'mm' | 'cm' | 'm'
+
+export type PlantStatCategory = 'tree' | 'shrub' | 'groundcover' | 'lawn' | 'unknown'
+
+export interface ZoneHatchPlantStat {
+  plantName: string        // 已比對到植栽時為植物名稱，否則為標準化後圖層名稱
+  category: PlantStatCategory
+  layerName: string
+  hatchCount: number       // 去重後、屬於此分區的 HATCH 區塊數
+  areaM2: number            // 與分區交集後的實際面積（m²，已去重、已扣除孔洞）
+  entityHandles: string[]
+}
+
+export interface ZoneTreePlantStat {
+  plantName: string        // 未能解析植物名稱時 fallback 為 blockName
+  blockName: string
+  layerName: string
+  count: number
+  entityHandles: string[]
+}
+
+export interface ZoneUnknownPlantStat {
+  source: 'hatch' | 'block'
+  layerName: string
+  blockName?: string
+  hatchCount?: number
+  areaM2?: number
+  count?: number
+  entityHandles: string[]
+  // 'generic_green_area'：圖層名稱僅為通用色塊/範圍代號（例如含「綠」字但無具體植物名稱），
+  // 不得因此推定為草皮、地被或任何特定植物；未設定時預設為一般「待確認植栽」。
+  category?: 'unknown' | 'generic_green_area'
+}
+
+export interface ZoneStatisticsResult {
+  zoneId: string
+  zoneAreaM2: number
+  shrubAreaM2: number
+  groundLawnAreaM2: number       // 草皮＋地被合計
+  plantingAreaM2: number         // 灌木＋草皮＋地被合計（不含喬木）
+  plantingCoveragePercent: number
+  treeTotalCount: number
+  hatchPlants: ZoneHatchPlantStat[]
+  treePlants: ZoneTreePlantStat[]
+  unknownPlants: ZoneUnknownPlantStat[]
 }

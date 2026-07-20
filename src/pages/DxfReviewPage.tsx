@@ -5,14 +5,15 @@ import {
 } from 'lucide-react'
 import { parseDxf, detectPlantSchedule, findNearbyTexts } from '@/utils/dxfParser'
 import { analyzeMultiLayer, zoneLabel, detectZonesFromText, buildZonePlantList, buildZoneAssignDebug, polygonBBox, polygonArea, pointInPolygon, detectAnalysisScope, SCHEDULE_KEYWORD_RE } from '@/utils/spatialAnalysis'
-import type { ZoneAssignDebug } from '@/utils/spatialAnalysis'
+import type { ZoneAssignDebug, AnalysisScope } from '@/utils/spatialAnalysis'
+import { buildZoneStatistics, unitFromInsUnits } from '@/utils/zoneStatistics'
 import { exportZoneReviewPdf } from '@/utils/exportReviewPdf'
 import type { ZoneReviewPdfData } from '@/utils/exportReviewPdf'
 import { evaluate } from '@/utils/plantEvaluator'
 import type { EvalResult } from '@/utils/plantEvaluator'
 import { loadPlantsFromStorage, savePlantsToStorage, loadPlantsWithCsvMerge } from '@/data/plantStore'
 import { searchPlantAllTiers, searchResultToDraft } from '@/utils/plantSearchClient'
-import { existsExactInLocalDatabase, getAliasGroup } from '@/utils/plantNameMatch'
+import { existsExactInLocalDatabase, normalizeLayerToken, buildLayerPlantKeywordMap, findPlantsByLayerName } from '@/utils/plantNameMatch'
 import { persistConfirmedPlant } from '@/services/plantCloudService'
 import type { PlantSearchResult, DraftPlantRecord } from '@/types/plantSearch'
 import { PLANT_DATA_SOURCE_LABELS } from '@/types/plantSearch'
@@ -22,7 +23,7 @@ import {
   loadSessionRules, upsertSessionRule,
   isNonPlant, readDxfWithEncoding,
 } from '@/data/dxfMappingStore'
-import type { DxfParseResult, DxfText, MappedItem, MatchStatus, MultiLayerResult, MultiLayerJudgment, PlantSchedule, PlantScheduleEntry, ZoneType, DetectedZone, ZonePlantList } from '@/types/dxf'
+import type { DxfParseResult, DxfText, MappedItem, MatchStatus, MultiLayerResult, MultiLayerJudgment, PlantSchedule, PlantScheduleEntry, ZoneType, DetectedZone, ZonePlantList, DrawingUnit, ZoneStatisticsResult } from '@/types/dxf'
 import type { CsvPlantRecord, SelectedCsvPlant } from '@/types/csvPlant'
 import type { DxfBlockRule } from '@/data/dxfMappingStore'
 
@@ -347,6 +348,26 @@ function buildMappings(
   return { active, excluded }
 }
 
+// ── 分區植栽面積與喬木數量統計（需已確定圖面單位）──────────────────────────────
+function computeZoneStatistics(
+  dxf: DxfParseResult,
+  zones: DetectedZone[],
+  scope: AnalysisScope,
+  unit: DrawingUnit,
+  sched: PlantScheduleEntry[],
+  plantDB: CsvPlantRecord[],
+  activeMappings: MappedItem[],
+): ZoneStatisticsResult[] {
+  const keywordMap = buildLayerPlantKeywordMap(sched, plantDB)
+  return buildZoneStatistics(dxf, zones, scope, unit, keywordMap, activeMappings)
+}
+
+// 面積結果明顯不合理（極大或極小）通常代表單位選錯——僅在此時才主動提示使用者確認，
+// 一般情況不出現，不能因 DXF 缺單位資訊就中斷解析或強制要求使用者選擇。
+function detectUnitAnomaly(stats: ZoneStatisticsResult[]): boolean {
+  return stats.some(s => s.zoneAreaM2 > 500000 || (s.zoneAreaM2 > 0 && s.zoneAreaM2 < 0.01))
+}
+
 // ── Badges ────────────────────────────────────────────────────────────────────
 
 function StatusBadge({ status }: { status: MatchStatus }) {
@@ -387,6 +408,160 @@ function MultiLayerBadge({ judgment }: { judgment: MultiLayerJudgment }) {
     <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-100 border border-emerald-300 text-emerald-700 text-xs font-bold">
       🟢 合理複層配置
     </span>
+  )
+}
+
+// ── 分區植栽面積與喬木數量統計：UI ─────────────────────────────────────────────
+
+const PLANT_CATEGORY_LABELS: Record<string, string> = {
+  tree: '喬木', shrub: '灌木', groundcover: '地被', lawn: '草皮', unknown: '待確認',
+}
+
+// 常駐、非阻擋式的圖面單位標示＋切換按鈕。景觀 CAD 圖面繪製慣例以 cm 為主，
+// $INSUNITS 無法辨識時直接預設 cm 並照常計算，不強制使用者每次匯入都要選一次。
+function UnitStatusBar({ unit, autoDefaulted, onPick }: {
+  unit: DrawingUnit
+  autoDefaulted: boolean
+  onPick: (u: DrawingUnit) => void
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="flex items-center gap-2 text-xs text-stone-500 flex-wrap">
+      <span>圖面單位：<strong className="text-stone-700">{unit}</strong>{autoDefaulted && <span className="text-stone-400">（自動預設，圖面未內建單位資訊）</span>}</span>
+      <span className="text-stone-300">｜</span>
+      <span>面積輸出：m²</span>
+      <div className="relative">
+        <button onClick={() => setOpen(o => !o)}
+          className="px-2 py-0.5 rounded-md border border-stone-200 text-stone-500 hover:bg-stone-50 transition-colors">
+          變更單位
+        </button>
+        {open && (
+          <div className="absolute z-20 mt-1 flex gap-1 bg-white border border-stone-200 rounded-lg p-1 shadow-md">
+            {(['mm', 'cm', 'm'] as const).map(u => (
+              <button key={u} onClick={() => { onPick(u); setOpen(false) }}
+                className={`px-2.5 py-1 rounded text-xs font-semibold transition-colors ${
+                  u === unit ? 'bg-emerald-100 text-emerald-800' : 'text-stone-600 hover:bg-stone-100'
+                }`}>
+                {u}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// 僅在面積結果明顯異常（極大或極小，通常代表單位選錯）時才主動提示；一般情況不出現，
+// 不能因 DXF 缺單位資訊就中斷解析或強制要求使用者選擇。
+function UnitAnomalyBanner({ unit, onPick }: { unit: DrawingUnit; onPick: (u: DrawingUnit) => void }) {
+  return (
+    <div className="p-3 rounded-xl border border-amber-300 bg-amber-50 text-amber-800 text-sm flex items-center gap-3 flex-wrap">
+      <AlertTriangle size={16} className="shrink-0" />
+      <span>目前以 {unit} 解析，但分區面積結果明顯異常，請確認圖面單位是否正確：</span>
+      <div className="flex gap-2">
+        {(['mm', 'cm', 'm'] as const).map(u => (
+          <button key={u} onClick={() => onPick(u)}
+            className="px-3 py-1 rounded-lg bg-white border border-amber-300 text-amber-800 text-xs font-semibold hover:bg-amber-100 transition-colors">
+            {u}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function ZoneStatsCard({ stats }: { stats: ZoneStatisticsResult | undefined }) {
+  if (!stats) return null
+  return (
+    <div className="rounded-xl border border-stone-200 overflow-hidden bg-white w-full">
+      <div className="px-4 py-2.5 bg-stone-50 border-b border-stone-100">
+        <p className="text-xs font-bold text-stone-700">植栽數量與面積</p>
+      </div>
+      <div className="p-4 space-y-4">
+        <div className="flex gap-2 flex-wrap text-xs">
+          <span className="px-2.5 py-1 rounded-lg bg-stone-100 text-stone-600 font-medium">分區總面積：{stats.zoneAreaM2.toFixed(2)} m²</span>
+          <span className="px-2.5 py-1 rounded-lg bg-lime-50 text-lime-700 font-medium">灌木總面積：{stats.shrubAreaM2.toFixed(2)} m²</span>
+          <span className="px-2.5 py-1 rounded-lg bg-teal-50 text-teal-700 font-medium">草皮/地被總面積：{stats.groundLawnAreaM2.toFixed(2)} m²</span>
+          <span className="px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 font-medium">植栽覆蓋總面積：{stats.plantingAreaM2.toFixed(2)} m²</span>
+          <span className="px-2.5 py-1 rounded-lg bg-emerald-100 text-emerald-800 font-medium">植栽覆蓋率：{stats.plantingCoveragePercent.toFixed(2)}%</span>
+          <span className="px-2.5 py-1 rounded-lg bg-amber-50 text-amber-700 font-medium">喬木總數：{stats.treeTotalCount} 株</span>
+        </div>
+
+        {stats.hatchPlants.length > 0 && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs border-collapse">
+              <thead>
+                <tr className="text-left text-stone-500 border-b border-stone-200">
+                  <th className="py-1.5 pr-3 font-semibold">植栽類型</th>
+                  <th className="py-1.5 pr-3 font-semibold">植栽名稱</th>
+                  <th className="py-1.5 pr-3 font-semibold">圖層名稱</th>
+                  <th className="py-1.5 pr-3 font-semibold text-right">HATCH 區塊數</th>
+                  <th className="py-1.5 pr-3 font-semibold text-right">種植面積 m²</th>
+                  <th className="py-1.5 font-semibold text-right">占分區比例</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stats.hatchPlants.map((p, i) => (
+                  <tr key={i} className="border-b border-stone-100 last:border-0">
+                    <td className="py-1.5 pr-3 text-stone-600">{PLANT_CATEGORY_LABELS[p.category]}</td>
+                    <td className="py-1.5 pr-3 font-medium text-stone-800">{p.plantName}</td>
+                    <td className="py-1.5 pr-3 text-stone-500 font-mono">{p.layerName}</td>
+                    <td className="py-1.5 pr-3 text-right text-stone-600">{p.hatchCount}</td>
+                    <td className="py-1.5 pr-3 text-right text-stone-600">{p.areaM2.toFixed(2)}</td>
+                    <td className="py-1.5 text-right text-stone-600">
+                      {stats.zoneAreaM2 > 0 ? ((p.areaM2 / stats.zoneAreaM2) * 100).toFixed(1) : '0.0'}%
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {stats.treePlants.length > 0 && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs border-collapse">
+              <thead>
+                <tr className="text-left text-stone-500 border-b border-stone-200">
+                  <th className="py-1.5 pr-3 font-semibold">樹種名稱</th>
+                  <th className="py-1.5 pr-3 font-semibold">BLOCK 名稱</th>
+                  <th className="py-1.5 font-semibold text-right">株數</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stats.treePlants.map((p, i) => (
+                  <tr key={i} className="border-b border-stone-100 last:border-0">
+                    <td className="py-1.5 pr-3 font-medium text-stone-800">{p.plantName}</td>
+                    <td className="py-1.5 pr-3 text-stone-500 font-mono">{p.blockName}</td>
+                    <td className="py-1.5 text-right text-stone-600">{p.count}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {stats.hatchPlants.length === 0 && stats.treePlants.length === 0 && (
+          <p className="text-xs text-stone-400">本區尚未偵測到已分類的灌木/草皮/喬木植栽。</p>
+        )}
+
+        {stats.unknownPlants.length > 0 && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50/60 p-3">
+            <p className="text-xs font-bold text-amber-800 mb-1.5">待確認植栽（圖層或圖塊尚未對應植物名稱）</p>
+            <ul className="text-xs text-amber-700 space-y-1">
+              {stats.unknownPlants.map((u, i) => (
+                <li key={i} className="font-mono">
+                  · {u.source === 'hatch' ? 'HATCH' : 'BLOCK'} layer=&quot;{u.layerName}&quot;{u.blockName ? ` block="${u.blockName}"` : ''}
+                  {u.hatchCount !== undefined ? ` 區塊數=${u.hatchCount} 面積=${(u.areaM2 ?? 0).toFixed(2)}m²` : ''}
+                  {u.count !== undefined ? ` 數量=${u.count}` : ''}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -537,61 +712,6 @@ function findInDB(name: string | undefined, db: CsvPlantRecord[]): CsvPlantRecor
   return db.find(p => p.name === n)                           // 完全相等
     ?? db.find(p => p.name.trim() === n)                      // trim 後相等
     ?? db.find(p => p.name.replace(/\s/g, '') === n.replace(/\s/g, ''))  // 忽略空白
-}
-
-// ── 圖層名稱 → 植物 對照（防止同 HATCH 圖樣誤判）───────────────────────────────
-// 目的：當不同植物在圖例中使用相同/高度相似的 HATCH pattern＋scale＋angle 時
-// （例如今葉石菖蒲 vs 蝦蟆草），純靠 HATCH 特徵比對必然混淆。若 DWG 已將兩者
-// 分在不同圖層（如 LAYER-今葉石菖蒲 / LAYER-蝦蟆草），圖層名稱是更可靠的依據，
-// 應優先於 HATCH pattern/scale/angle 相似度比對。
-
-/** 正規化圖層名稱以供比對：全形轉半形、去空白、去常見符號、忽略大小寫 */
-function normalizeLayerToken(s: string): string {
-  return s
-    .replace(/[！-～]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)) // 全形→半形
-    .replace(/[\s　]/g, '')                                    // 去空白（含全形空白）
-    .replace(/[-_./\\()（）【】[\]:：,，、'"]/g, '')                 // 去常見符號
-    .toLowerCase()
-}
-
-/**
- * 動態建立「正規化關鍵字 → 候選植物名稱清單」對照表：
- * 中文名稱、既有別名庫（plantNameMatch.ts）、學名，皆可作為圖層名稱比對關鍵字。
- * 例："今葉石菖蒲"、"石菖蒲"（別名）、其學名 → 都指向同一植物。
- */
-function buildLayerPlantKeywordMap(
-  schedule: PlantScheduleEntry[],
-  plantDB: CsvPlantRecord[],
-): Map<string, string[]> {
-  const map = new Map<string, string[]>()
-  const add = (keyword: string | undefined, plantName: string) => {
-    if (!keyword) return
-    const k = normalizeLayerToken(keyword)
-    if (k.length < 2) return   // 太短的關鍵字（單一字母/字）容易誤判，不收錄
-    const arr = map.get(k) ?? []
-    if (!arr.includes(plantName)) arr.push(plantName)
-    map.set(k, arr)
-  }
-  for (const e of schedule) {
-    if (!e.plantName) continue
-    for (const alias of getAliasGroup(e.plantName)) add(alias, e.plantName)
-  }
-  for (const p of plantDB) {
-    for (const alias of getAliasGroup(p.name)) add(alias, p.name)
-    add(p.scientificName, p.name)
-  }
-  return map
-}
-
-/** 圖層名稱（正規化後）是否包含任一植物關鍵字，可能同時命中多個候選（回傳全部供後續判斷） */
-function findPlantsByLayerName(layerName: string, keywordMap: Map<string, string[]>): string[] {
-  const norm = normalizeLayerToken(layerName)
-  if (!norm) return []
-  const hits = new Set<string>()
-  for (const [kw, plants] of keywordMap) {
-    if (norm.includes(kw)) for (const p of plants) hits.add(p)
-  }
-  return [...hits]
 }
 
 /** Legend / site HATCH lookup key — pattern name if present, else stable geometry fingerprint */
@@ -1999,6 +2119,13 @@ export default function DxfReviewPage({
   const [detectedZones, setDetectedZones] = useState<DetectedZone[]>([])
   const [zoneReviews, setZoneReviews] = useState<ZoneReviewResult[]>([])
   const [pdfHtml, setPdfHtml] = useState<string | null>(null)
+  // 分區植栽面積與喬木數量統計：圖面單位優先採用 DXF 內建 $INSUNITS；辨識不到時
+  // 直接預設 cm（景觀 CAD 圖面繪製慣例）並照常計算，不阻擋、不強制使用者選擇——
+  // unitAutoDefaulted 只用來在介面上標示「這是自動預設，非圖面內建」。
+  const [zoneStatistics, setZoneStatistics] = useState<ZoneStatisticsResult[]>([])
+  const [drawingUnit, setDrawingUnit] = useState<DrawingUnit>('cm')
+  const [unitAutoDefaulted, setUnitAutoDefaulted] = useState(false)
+  const [unitAnomaly, setUnitAnomaly] = useState(false)
 
   // 每次 zoneReviews 更新就持久化到 localStorage，供 AI配植頁與 PDF 讀取
   const saveZoneReviews = (reviews: ZoneReviewResult[], caller = 'unknown') => {
@@ -2146,6 +2273,20 @@ export default function DxfReviewPage({
       saveZoneReviews(buildZoneReviews(zpl, loaded, sched.entries, result.texts, radius, result.polygons, result.layerColors ?? {}), 'handleFile [polygons=' + result.polygons.length + ']')
       setZoneDebug(buildZoneAssignDebug(zones, zpl, active, result.inserts, result.blockExtents))
 
+      // ── 分區植栽面積與喬木數量統計：優先採用 DXF 內建 $INSUNITS；辨識不到時直接
+      // 預設 cm（景觀 CAD 圖面繪製慣例）並照常計算，不阻擋、不強制使用者選擇 ──────
+      const detectedUnit = unitFromInsUnits(result.insUnits)
+      const effectiveUnit = detectedUnit ?? 'cm'
+      const autoDefaulted = !detectedUnit
+      if (autoDefaulted) {
+        console.debug(`[分區統計] 無法辨識圖面單位（$INSUNITS=${result.insUnits ?? '(無)'}），依景觀 CAD 慣例自動採用 cm 計算`)
+      }
+      setDrawingUnit(effectiveUnit)
+      setUnitAutoDefaulted(autoDefaulted)
+      const newStats = computeZoneStatistics(result, zones, scope, effectiveUnit, sched.entries, loaded, active)
+      setZoneStatistics(newStats)
+      setUnitAnomaly(detectUnitAnomaly(newStats))
+
       // ── Debug：資料流追蹤 ──────────────────────────────────────────────────
       console.group('[DXF Zone Setup]')
       console.debug('Total texts:', result.texts.length)
@@ -2202,10 +2343,26 @@ export default function DxfReviewPage({
     )
     setMappings(active)
     setExcluded(exc)
-    const zpl2 = buildZonePlantList(detectedZones, active, parseResult.polygons, parseResult.inserts, parseResult.blockExtents, detectAnalysisScope(parseResult.texts, parseResult.polygons))
+    const scope = detectAnalysisScope(parseResult.texts, parseResult.polygons)
+    const zpl2 = buildZonePlantList(detectedZones, active, parseResult.polygons, parseResult.inserts, parseResult.blockExtents, scope)
     setZonePlantLists(zpl2)
     saveZoneReviews(buildZoneReviews(zpl2, plantList, plantSchedule.entries, parseResult.texts, drawingRadius, parseResult.polygons, parseResult.layerColors ?? {}), 'rebuildMappings [polygons=' + parseResult.polygons.length + ']')
     setZoneDebug(buildZoneAssignDebug(detectedZones, zpl2, active, parseResult.inserts, parseResult.blockExtents))
+    // 植栽比對規則／資料庫變更會影響植物名稱解析，一併重算面積統計（單位一律已有值，不再是 null）
+    const newStats = computeZoneStatistics(parseResult, detectedZones, scope, drawingUnit, plantSchedule.entries, plantList, active)
+    setZoneStatistics(newStats)
+    setUnitAnomaly(detectUnitAnomaly(newStats))
+  }
+
+  // 使用者手動變更圖面單位：套用整份圖面，所有分區與 HATCH 面積立即依新單位重新計算
+  const pickDrawingUnit = (unit: DrawingUnit) => {
+    setDrawingUnit(unit)
+    setUnitAutoDefaulted(false)
+    if (!parseResult) return
+    const scope = detectAnalysisScope(parseResult.texts, parseResult.polygons)
+    const newStats = computeZoneStatistics(parseResult, detectedZones, scope, unit, plantSchedule.entries, plants, mappings)
+    setZoneStatistics(newStats)
+    setUnitAnomaly(detectUnitAnomaly(newStats))
   }
 
   const applyOnce = (blockName: string, plantName: string) => {
@@ -2420,6 +2577,13 @@ export default function DxfReviewPage({
       {/* ── Content ── */}
       <main className="flex-1 px-4 md:px-8 py-4 md:py-6">
 
+        {/* 圖面單位常駐標示＋切換按鈕，無論目前在哪個 tab 都看得到；異常提示僅在
+            面積結果明顯不合理時才出現，一般情況不阻擋、不強制使用者選擇 */}
+        <div className="mb-4 flex flex-col gap-2">
+          <UnitStatusBar unit={drawingUnit} autoDefaulted={unitAutoDefaulted} onPick={pickDrawingUnit} />
+          {unitAnomaly && <UnitAnomalyBanner unit={drawingUnit} onPick={pickDrawingUnit} />}
+        </div>
+
         {/* ── Schedule tab ── */}
         {tab === 'schedule' && (
           <ScheduleTab schedule={plantSchedule} mappings={mappings} plants={plants} onPlantAdded={handlePlantAdded} />
@@ -2427,10 +2591,13 @@ export default function DxfReviewPage({
 
         {/* ── Zone review tab ── */}
         {tab === 'zonereview' && (
-          <ZoneReviewTab reviews={zoneReviews} onAskAI={q => {
-            try { sessionStorage.setItem('advisor-prefill', q) } catch { /* ignore */ }
-            onTabChange?.('landscape')
-          }} />
+          <ZoneReviewTab
+            reviews={zoneReviews}
+            zoneStatistics={zoneStatistics}
+            onAskAI={q => {
+              try { sessionStorage.setItem('advisor-prefill', q) } catch { /* ignore */ }
+              onTabChange?.('landscape')
+            }} />
         )}
 
         {/* ── Zone plan tab ── */}
@@ -2444,6 +2611,7 @@ export default function DxfReviewPage({
             totalInserts={parseResult?.stats.totalInserts ?? 0}
             zoneDebug={zoneDebug}
             zoneReviews={zoneReviews}
+            zoneStatistics={zoneStatistics}
           />
         )}
 
@@ -3187,7 +3355,11 @@ const ISSUE_CLS: Record<string, string> = {
   ok:      'border-l-4 border-emerald-300 bg-emerald-50',
 }
 
-function ZoneReviewTab({ reviews, onAskAI }: { reviews: ZoneReviewResult[]; onAskAI?: (q: string) => void }) {
+function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
+  reviews: ZoneReviewResult[]
+  onAskAI?: (q: string) => void
+  zoneStatistics: ZoneStatisticsResult[]
+}) {
   const [activeTab, setActiveTab] = useState<string>('overview')
 
   if (reviews.length === 0) return (
@@ -3457,6 +3629,7 @@ function ZoneReviewTab({ reviews, onAskAI }: { reviews: ZoneReviewResult[]; onAs
           const totalCount     = plantCount(r)
           const dangerCnt      = r.evalResult?.issues.filter(i => i.level === 'danger').length ?? 0
           const cautionCnt     = r.evalResult?.issues.filter(i => i.level === 'caution').length ?? 0
+          const stats          = zoneStatistics.find(s => s.zoneId === r.zoneName)
 
           return (
             <div className="p-5 space-y-4">
@@ -3479,6 +3652,8 @@ function ZoneReviewTab({ reviews, onAskAI }: { reviews: ZoneReviewResult[]; onAs
                     詢問 AI
                   </button>
                 )}
+
+              <ZoneStatsCard stats={stats} />
 
               {/* ── 索引表 HATCH 圖例對照結果（最優先顯示）── */}
               {r.finalReviewResults.length > 0 && (
@@ -3827,6 +4002,46 @@ function ZoneReviewTab({ reviews, onAskAI }: { reviews: ZoneReviewResult[]; onAs
 const DIAG_ZONE_RE =
   /^([A-Z一二三四五六七八九十甲乙丙丁戊己庚辛壬癸]{1,3}[區区]|[A-Z0-9]{1,2}[區区]|景觀[A-Z0-9一二三四五六]|植栽[A-Z0-9一二三四五六]|分區[A-Z0-9一二三四五六])$/
 
+function ZonePlantSummary({ stats }: { stats: ZoneStatisticsResult | undefined }) {
+  const dedupe = (arr: string[]) => [...new Set(arr)]
+  const groups = stats ? [
+    { label: '喬木', names: dedupe(stats.treePlants.map(p => p.plantName)) },
+    { label: '灌木', names: dedupe(stats.hatchPlants.filter(p => p.category === 'shrub').map(p => p.plantName)) },
+    { label: '草皮地被', names: dedupe(stats.hatchPlants.filter(p => p.category === 'lawn' || p.category === 'groundcover').map(p => p.plantName)) },
+  ].filter(g => g.names.length > 0) : []
+  // generic_green_area：僅為通用色塊/範圍圖層（例如含「綠」字但無具體植物名稱），不得推定
+  // 為草皮、地被或任何特定植物，與真正「待確認」的植栽分開顯示，避免混淆。
+  const unknownNames = stats ? dedupe(stats.unknownPlants.filter(u => u.category !== 'generic_green_area').map(u => u.blockName ?? u.layerName)) : []
+  const genericGreenNames = stats ? dedupe(stats.unknownPlants.filter(u => u.category === 'generic_green_area').map(u => u.layerName)) : []
+
+  if (groups.length === 0 && unknownNames.length === 0 && genericGreenNames.length === 0) {
+    return <p className="text-sm text-stone-400">此分區尚未辨識到植栽</p>
+  }
+
+  return (
+    <div className="space-y-2">
+      {groups.map(g => (
+        <p key={g.label} className="text-[15px] leading-[1.6]">
+          <span className="font-semibold text-stone-800">{g.label}：</span>
+          <span className="text-stone-700">{g.names.join('、')}</span>
+        </p>
+      ))}
+      {unknownNames.length > 0 && (
+        <p className="text-[15px] leading-[1.6] bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
+          <span className="font-semibold text-amber-800">待確認植栽：</span>
+          <span className="text-amber-700">{unknownNames.join('、')}</span>
+        </p>
+      )}
+      {genericGreenNames.length > 0 && (
+        <p className="text-[15px] leading-[1.6] bg-stone-50 border border-stone-200 rounded-lg px-3 py-1.5">
+          <span className="font-semibold text-stone-600">未指定植栽範圍：</span>
+          <span className="text-stone-500">{genericGreenNames.join('、')}</span>
+        </p>
+      )}
+    </div>
+  )
+}
+
 function ZonePlanTab({
   zonePlantLists,
   detectedZones,
@@ -3836,6 +4051,7 @@ function ZonePlanTab({
   totalInserts,
   zoneDebug,
   zoneReviews,
+  zoneStatistics,
 }: {
   zonePlantLists: ZonePlantList[]
   detectedZones: DetectedZone[]
@@ -3845,6 +4061,7 @@ function ZonePlanTab({
   totalInserts: number
   zoneDebug: ZoneAssignDebug | null
   zoneReviews: ZoneReviewResult[]
+  zoneStatistics: ZoneStatisticsResult[]
 }) {
   // ── 原始資料（不過任何 filter）──────────────────────────────────────────────
   const rawTextsWithZone = texts.filter(t => t.content.includes('區') || t.content.includes('区') ||
@@ -4336,74 +4553,7 @@ function ZonePlanTab({
                   </div>
                 )}
 
-                <div className="grid grid-cols-2 gap-3">
-                  {/* 圖塊 */}
-                  <div className="bg-white rounded-xl border border-stone-100 p-3">
-                    <p className="text-xs font-semibold text-stone-600 mb-2">
-                      區內圖塊（INSERT）— {zpl.treeBlocks.length} 種
-                    </p>
-                    {zpl.treeBlocks.length === 0
-                      ? <p className="text-xs text-stone-400">{z.boundary ? '邊界內無圖塊' : '無邊界，無法判斷'}</p>
-                      : zpl.treeBlocks.map((tb, i) => (
-                          <div key={i} className="flex items-center gap-2 mb-1">
-                            <span className="font-mono text-xs bg-stone-100 px-1.5 py-0.5 rounded">{tb.blockName}</span>
-                            {tb.plantName
-                              ? <span className="text-xs font-medium text-green-700">{tb.plantName}</span>
-                              : <span className="text-xs text-amber-500">植物未確認</span>}
-                            <span className="text-xs text-stone-400 ml-auto">{tb.positionsInZone}/{tb.totalCount} 株</span>
-                          </div>
-                        ))}
-                  </div>
-
-                  {/* HATCH / 面狀範圍 */}
-                  <div className="bg-white rounded-xl border border-stone-100 p-3">
-                    <p className="text-xs font-semibold text-stone-600 mb-2">
-                      區內 HATCH / polyline — {totalAreas} 個
-                    </p>
-                    {totalAreas === 0
-                      ? <p className="text-xs text-stone-400">{z.boundary ? '邊界內無面狀範圍' : '無邊界，無法判斷'}</p>
-                      : (() => {
-                          // 從 zoneReviews 找此區已解析的植物名稱（HATCH 植栽）
-                          const review = zoneReviews.find(r => r.zoneName === z.name)
-                          // 根據 hatchPattern 或面積類型 lookup 已解析植物
-                          const resolvedPlantForArea = (a: import('@/types/dxf').ZonePlantArea, typeLabel: string): string | null => {
-                            if (!review) return null
-                            // 優先：用 hatchPattern 精確比對
-                            if (a.hatchPattern) {
-                              const e = review.blockEntries.find(b =>
-                                b.plantName && (b.blockName.includes(a.hatchPattern!) || b.blockName.includes(`[HATCH圖例] ${a.hatchPattern}`))
-                              )
-                              if (e?.plantName) return e.plantName
-                            }
-                            // 次：找同類型的面狀植栽 entry
-                            const e = review.blockEntries.find(b =>
-                              b.plantName && b.detectedType === typeLabel &&
-                              (b.blockName.startsWith('[HATCH') || b.blockName.startsWith('[面狀'))
-                            )
-                            return e?.plantName ?? null
-                          }
-                          // 直接讀 review.hatchPlants（與分區審查 tab 同一資料來源）
-                          const hp = review?.hatchPlants
-                          const items = hp ? [...hp.confirmed, ...hp.candidates] : []
-                          return items.length > 0 ? (
-                            <>
-                              {items.map((h, i) => (
-                                <p key={i} className="text-xs text-green-700 font-medium">
-                                  {h.plantName}
-                                  {h.legendCode && <span className="text-stone-400 font-normal ml-1">索引表 {h.legendCode}</span>}
-                                  <span className="text-stone-400 font-normal ml-1">{h.confidence}%</span>
-                                </p>
-                              ))}
-                              {(hp?.unmatchedCount ?? 0) > 0 && (
-                                <p className="text-xs text-stone-400">＋{hp!.unmatchedCount} 個未對應索引表</p>
-                              )}
-                            </>
-                          ) : (
-                            <p className="text-xs text-stone-400">尚未對應索引表圖例</p>
-                          )
-                        })()}
-                  </div>
-                </div>
+                <ZonePlantSummary stats={zoneStatistics.find(s => s.zoneId === z.name)} />
               </div>
             )
           })}

@@ -496,7 +496,7 @@ export function polygonsOverlap(a: DxfPolygon, b: DxfPolygon): boolean {
 
 // ── World bbox center 計算（套用 INSERT 的 scale + rotation + translation）────
 
-function computeWorldCenter(
+export function computeWorldCenter(
   insertX: number, insertY: number,
   scaleX: number, scaleY: number,
   rotationDeg: number,
@@ -514,14 +514,14 @@ function computeWorldCenter(
 
 // ── 判斷單一插入點是否屬於某分區（依優先順序）────────────────────────────────
 
-interface PositionCheckResult {
+export interface PositionCheckResult {
   inZone: boolean
   method: 'bbox-center' | 'insert-point' | 'canopy-overlap' | 'none'
   bboxCenter?: { x: number; y: number }
 }
 
 // 樹冠世界半徑：block local bbox 的長邊一半 × |scale| 最大者
-function canopyWorldRadius(ins: DxfInsert, extent: BlockExtent): number {
+export function canopyWorldRadius(ins: DxfInsert, extent: BlockExtent): number {
   const w = extent.localMaxX - extent.localMinX
   const h = extent.localMaxY - extent.localMinY
   return (Math.max(w, h) / 2) * Math.max(Math.abs(ins.scaleX), Math.abs(ins.scaleY))
@@ -580,7 +580,7 @@ function samplePolygonPoints(vertices: Array<{ x: number; y: number }>): Array<{
   return fb
 }
 
-function checkPositionInZone(
+export function checkPositionInZone(
   pos: { x: number; y: number },
   ins: DxfInsert | undefined,
   extent: BlockExtent | undefined,

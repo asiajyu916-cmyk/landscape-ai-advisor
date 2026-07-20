@@ -407,6 +407,149 @@ export function classifyZone(layerName: string): ZoneType {
 // 關鍵修正：必須在 code 75 前停止，否則 HATCH 填充線的 10/20 座標
 // 會被誤判為邊界頂點，污染分區 polygon。
 
+/** 標準 De Boor 演算法：對（有理）B-spline 曲線在參數 t 求值 */
+function evalBSplinePoint(
+  degree: number,
+  knots: number[],
+  ctrlPts: Array<{ x: number; y: number; w: number }>,
+  t: number,
+): { x: number; y: number } {
+  const n = ctrlPts.length - 1
+  let k = degree
+  while (k < n && knots[k + 1] <= t) k++
+  const d: Array<{ x: number; y: number; w: number }> = []
+  for (let j = 0; j <= degree; j++) {
+    const p = ctrlPts[k - degree + j]
+    d.push({ x: p.x * p.w, y: p.y * p.w, w: p.w })
+  }
+  for (let r = 1; r <= degree; r++) {
+    for (let j = degree; j >= r; j--) {
+      const idx = k - degree + j
+      const denom = knots[idx + degree - r + 1] - knots[idx]
+      const alpha = denom !== 0 ? (t - knots[idx]) / denom : 0
+      d[j] = {
+        x: (1 - alpha) * d[j - 1].x + alpha * d[j].x,
+        y: (1 - alpha) * d[j - 1].y + alpha * d[j].y,
+        w: (1 - alpha) * d[j - 1].w + alpha * d[j].w,
+      }
+    }
+  }
+  const res = d[degree]
+  return res.w !== 0 ? { x: res.x / res.w, y: res.y / res.w } : { x: res.x, y: res.y }
+}
+
+/**
+ * HATCH 邊界的 spline edge（code 72=4）切分成折線點，供面積計算用。
+ * 過去完全未處理 spline edge：control point 被直接當成直線頂點連起來，用「控制多邊形」
+ * 取代真正的平滑曲線——B-spline 的控制多邊形面積必定 ≥ 曲線本身涵蓋的面積（曲線內縮於
+ * 控制多邊形之內），導致孔洞面積被高估、淨面積被低估（實測某筆真實 HATCH：AutoCAD
+ * 顯示 7.64 ㎡，控制多邊形近似只算出 4.79 ㎡，短少達 3 成）。
+ */
+function tessellateBSplineEdge(
+  degree: number,
+  knots: number[],
+  ctrlPts: Array<{ x: number; y: number; w: number }>,
+): Array<{ x: number; y: number }> {
+  const n = ctrlPts.length - 1
+  if (n < 1 || knots.length < degree + n + 2) return ctrlPts.map(p => ({ x: p.x, y: p.y }))
+  const tMin = knots[degree]
+  const tMax = knots[n + 1]
+  if (!(tMax > tMin)) return ctrlPts.map(p => ({ x: p.x, y: p.y }))
+
+  // 固定取樣點數（例如原本的 16 點）對「不同尺寸/不同曲率」的曲線無法一體適用：曲率大或
+  // 參數範圍長的曲線會取樣不足、面積系統性低估（實測：三塊灌木床皆用 spline 邊界，
+  // 固定 16 點取樣時面積都偏低 1.7~2.4%，且偏低方向一致——典型的弦近似取樣不足徵狀）。
+  // 改為遞迴弦偏離量（sagitta）自適應細分：每段中點偏離弦的垂直距離若超過弦長的相對容忍值，
+  // 就再切一半，直到夠平滑為止——不論圖面單位（mm/cm/m）或曲線大小，都用同一個相對準則，
+  // 確保不同尺寸、不同形狀的 DXF 都能獨立收斂到正確面積，而不是針對特定檔案調整的固定值。
+  const pStart = evalBSplinePoint(degree, knots, ctrlPts, tMin)
+  const pEnd = evalBSplinePoint(degree, knots, ctrlPts, tMax)
+  const pts: Array<{ x: number; y: number }> = [pStart]
+
+  const subdivide = (t0: number, t1: number, p0: { x: number; y: number }, p1: { x: number; y: number }, depth: number): void => {
+    if (depth >= 16) { pts.push(p1); return }
+    const tm = (t0 + t1) / 2
+    const pm = evalBSplinePoint(degree, knots, ctrlPts, tm)
+    const dx = p1.x - p0.x; const dy = p1.y - p0.y
+    const chordLen = Math.hypot(dx, dy)
+    const dev = chordLen > 1e-12
+      ? Math.abs((pm.x - p0.x) * dy - (pm.y - p0.y) * dx) / chordLen   // 中點到弦的垂直距離
+      : Math.hypot(pm.x - p0.x, pm.y - p0.y)
+    const flatEnough = dev <= Math.max(1e-9, chordLen * 0.0005)
+    if (flatEnough) { pts.push(p1); return }
+    subdivide(t0, tm, p0, pm, depth + 1)
+    subdivide(tm, t1, pm, p1, depth + 1)
+  }
+  subdivide(tMin, tMax, pStart, pEnd, 0)
+  return pts
+}
+
+// 圓弧切分角度步進：與 spline 自適應細分（tessellateBSplineEdge）採同一套「相對弦弓高
+// 容忍值」標準，而非固定 10° 這種與半徑無關、可能不夠精細的經驗值。對圓弧而言
+// sagitta = r·(1-cos(θ/2))，若改用「相對於半徑」的容忍值，θ 上限與半徑無關（是常數角度），
+// 不必逐段遞迴，直接算出一次性夠用的角度步進即可套用在所有大小的圓弧上。
+const ARC_RELATIVE_SAGITTA_TOL = 0.0005
+const ARC_STEP_ANGLE = 2 * Math.acos(1 - ARC_RELATIVE_SAGITTA_TOL)
+
+/**
+ * Bulge → 弧線中繼點：LWPOLYLINE／HATCH polyline-type 邊界的逐頂點凸度值（code 42）。
+ * bulge = tan(θ/4)，θ 為該線段對應弧的圓心角（正值＝從起點到終點逆時針彎曲，負值＝順時針）。
+ * 過去完全未讀取 code 42，所有帶弧邊的多邊形（分區邊界、HATCH 外框）都被當成直線頂點連接，
+ * 弧線凸出的部分整個漏算（實測某分區邊界因此少算面積）。回傳起訖點之間的中繼弧線點
+ * （不含起點/終點本身，由呼叫端負責串接）；bulge=0 時回傳空陣列，代表純直線段。
+ */
+function tessellateBulge(
+  p1: { x: number; y: number },
+  p2: { x: number; y: number },
+  bulge: number,
+): Array<{ x: number; y: number }> {
+  if (!bulge) return []
+  const dx = p2.x - p1.x; const dy = p2.y - p1.y
+  const chord = Math.hypot(dx, dy)
+  if (chord < 1e-9) return []
+  const theta = 4 * Math.atan(bulge)
+  const sinHalf = Math.sin(theta / 2)
+  if (Math.abs(sinHalf) < 1e-9) return []
+  const radius = chord / (2 * Math.abs(sinHalf))
+  const dist = chord / 2
+  const apothem = Math.sign(bulge) * Math.sqrt(Math.max(0, radius * radius - dist * dist))
+  const midX = (p1.x + p2.x) / 2; const midY = (p1.y + p2.y) / 2
+  const perpX = -dy / chord; const perpY = dx / chord   // 弦的垂直單位向量（逆時針旋轉 90°）
+  const cx = midX + perpX * apothem
+  const cy = midY + perpY * apothem
+  const a0 = Math.atan2(p1.y - cy, p1.x - cx)
+  const a1raw = Math.atan2(p2.y - cy, p2.x - cx)
+  let delta = a1raw - a0
+  if (bulge > 0) { while (delta < 0) delta += Math.PI * 2 }
+  else { while (delta > 0) delta -= Math.PI * 2 }
+  const steps = Math.max(1, Math.ceil(Math.abs(delta) / ARC_STEP_ANGLE))
+  const pts: Array<{ x: number; y: number }> = []
+  for (let s = 1; s < steps; s++) {
+    const a = a0 + delta * (s / steps)
+    pts.push({ x: cx + radius * Math.cos(a), y: cy + radius * Math.sin(a) })
+  }
+  return pts
+}
+
+/** 展開一串「頂點 + 逐頂點 outgoing bulge」為完整折線點（含弧線中繼點）；closed=true 時最後一點的 bulge 會補上回到起點的弧 */
+function expandPolylineBulges(
+  verts: Array<{ x: number; y: number }>,
+  bulges: number[],
+  closed: boolean,
+): Array<{ x: number; y: number }> {
+  if (!bulges.some(b => b)) return verts
+  const out: Array<{ x: number; y: number }> = []
+  const segCount = closed ? verts.length : verts.length - 1
+  for (let idx = 0; idx < verts.length; idx++) {
+    out.push(verts[idx])
+    if (idx >= segCount) continue
+    const next = verts[(idx + 1) % verts.length]
+    const b = bulges[idx] ?? 0
+    if (b) out.push(...tessellateBulge(verts[idx], next, b))
+  }
+  return out
+}
+
 function parseHatchBoundary(groups: GroupCode[], startIdx: number): {
   loops: Array<Array<{ x: number; y: number }>>; end: number
   hatchScale?: number; hatchAngle?: number
@@ -422,7 +565,11 @@ function parseHatchBoundary(groups: GroupCode[], startIdx: number): {
   //    來源正確解析後，不再需要任何統計淨化。
   const loops: Array<Array<{ x: number; y: number }>> = []
   let current: Array<{ x: number; y: number }> = []
-  const flush = () => { if (current.length >= 3) loops.push(current); current = [] }
+  let currentBulges: number[] = []   // 與 current 平行，僅 polyline path 頂點才可能非 0
+  const flush = () => {
+    if (current.length >= 3) loops.push(expandPolylineBulges(current, currentBulges, true))
+    current = []; currentBulges = []
+  }
   let i = startIdx
 
   if (i < groups.length && groups[i].code !== 91) {
@@ -435,12 +582,23 @@ function parseHatchBoundary(groups: GroupCode[], startIdx: number): {
   i++ // 跳過 code 91
 
   let isPoly = false      // 此 path 是否為 polyline path（92 flags bit 2）
-  let edgeType = 0        // 非 polyline path 的當前 edge type（code 72）
+  let edgeType = 0        // 非 polyline path 的當前 edge type（code 72；4=spline）
   let pendX: number | null = null
   let pendX2: number | null = null
-  let arcCx = 0; let arcCy = 0; let arcR = 0; let arcA0 = 0
+  let arcCx = 0; let arcCy = 0; let arcR = 0; let arcA0 = 0; let arcCcw = true
   let hasArcC = false; let hasArcR = false
   let ellCx = 0; let ellCy = 0; let hasEllC = false
+  // spline edge（code 72=4）狀態：degree(94)/rational(73)/numKnots(95)/numCtrlPts(96)/
+  // knots(40 重複)/control points(10-20，rational 時每點後接 42=weight)
+  let splineDegree = 3; let splineRational = false
+  let splineNumCtrl = 0
+  let splineKnots: number[] = []
+  let splineCtrl: Array<{ x: number; y: number; w: number }> = []
+
+  const resetSplineState = () => {
+    splineDegree = 3; splineRational = false; splineNumCtrl = 0
+    splineKnots = []; splineCtrl = []
+  }
 
   while (i < groups.length && groups[i].code !== 0 && groups[i].code !== 75) {
     const g = groups[i]
@@ -449,18 +607,55 @@ function parseHatchBoundary(groups: GroupCode[], startIdx: number): {
       case 92:
         flush()
         isPoly = ((parseInt(g.value) || 0) & 2) !== 0
-        edgeType = 0; hasArcC = false; hasArcR = false; hasEllC = false
+        edgeType = 0; hasArcC = false; hasArcR = false; hasEllC = false; arcCcw = true
+        resetSplineState()
         break
       case 72:
         // polyline path 的 72 是 has-bulge flag，不是 edge type
-        if (!isPoly) { edgeType = parseInt(g.value) || 0; hasArcC = false; hasArcR = false; hasEllC = false }
+        if (!isPoly) {
+          edgeType = parseInt(g.value) || 0
+          hasArcC = false; hasArcR = false; hasEllC = false; arcCcw = true
+          resetSplineState()
+        }
+        break
+      case 94:
+        if (!isPoly && edgeType === 4) splineDegree = parseInt(g.value) || 3
+        break
+      case 95:
+        // spline knot 數量（本身不需要，僅供除錯核對用）
+        break
+      case 96:
+        if (!isPoly && edgeType === 4) splineNumCtrl = parseInt(g.value) || 0
+        break
+      case 40:
+        if (!isPoly && edgeType === 2) { arcR = val; hasArcR = true }
+        else if (!isPoly && edgeType === 4) splineKnots.push(val)
+        break
+      case 42:
+        if (isPoly && currentBulges.length > 0) {
+          // polyline path 頂點的 outgoing bulge（該頂點到下一頂點的弧線凸度）
+          currentBulges[currentBulges.length - 1] = val
+        } else if (!isPoly && edgeType === 4 && splineRational && splineCtrl.length > 0) {
+          // control point weight（僅 rational spline 才有，緊接在該點的 10/20 之後）
+          splineCtrl[splineCtrl.length - 1].w = val
+        }
         break
       case 10: pendX = val; break
       case 20:
         if (pendX !== null) {
-          if (!isPoly && edgeType === 2)      { arcCx = pendX; arcCy = val; hasArcC = true }   // 圓弧圓心（不在弧上）
-          else if (!isPoly && edgeType === 3) { ellCx = pendX; ellCy = val; hasEllC = true }   // 橢圓中心
-          else current.push({ x: pendX, y: val })   // polyline 頂點 / line 起點 / spline 控制點
+          if (isPoly) {
+            current.push({ x: pendX, y: val })
+            currentBulges.push(0)   // 若緊接著出現 code 42，會覆寫成該頂點的 outgoing bulge
+          } else if (edgeType === 2) { arcCx = pendX; arcCy = val; hasArcC = true }   // 圓弧圓心（不在弧上）
+          else if (edgeType === 3) { ellCx = pendX; ellCy = val; hasEllC = true }   // 橢圓中心
+          else if (edgeType === 4) {
+            // spline 控制點：先收集，湊滿 numCtrlPts 後一次切分成折線點（見 tessellateBSplineEdge
+            // 頂部註解——曲線本身內縮於控制多邊形之內，直接連控制點會嚴重高估邊界範圍）
+            splineCtrl.push({ x: pendX, y: val, w: 1 })
+            if (splineNumCtrl > 0 && splineCtrl.length === splineNumCtrl) {
+              for (const p of tessellateBSplineEdge(splineDegree, splineKnots, splineCtrl)) current.push(p)
+            }
+          } else current.push({ x: pendX, y: val })   // line edge 起點
           pendX = null
         }
         break
@@ -479,18 +674,27 @@ function parseHatchBoundary(groups: GroupCode[], startIdx: number): {
           pendX2 = null
         }
         break
-      case 40:
-        if (!isPoly && edgeType === 2) { arcR = val; hasArcR = true }
-        break
       case 50:
         if (!isPoly && edgeType === 2) arcA0 = val
         break
+      case 73:
+        // edge type 2（圓弧）：is-counterclockwise flag；edge type 4（spline）：is-rational flag
+        if (!isPoly && edgeType === 2) arcCcw = val !== 0
+        else if (!isPoly && edgeType === 4) splineRational = val !== 0
+        break
       case 51:
         if (!isPoly && edgeType === 2 && hasArcC && hasArcR) {
+          // 弧線切分：依 73 旗標決定掃描方向，依 ARC_STEP_ANGLE（相對弓高容忍值換算）取點，
+          // 避免弧形邊界只取頭尾兩點造成的面積失真（見二.3「曲線或圓弧邊界的近似轉換」）
           const r0 = arcA0 * Math.PI / 180
-          const r1 = val * Math.PI / 180
-          current.push({ x: arcCx + arcR * Math.cos(r0), y: arcCy + arcR * Math.sin(r0) })
-          current.push({ x: arcCx + arcR * Math.cos(r1), y: arcCy + arcR * Math.sin(r1) })
+          let delta = (val * Math.PI / 180) - r0
+          if (arcCcw) { while (delta < 0) delta += Math.PI * 2 }
+          else { while (delta > 0) delta -= Math.PI * 2 }
+          const steps = Math.max(1, Math.ceil(Math.abs(delta) / ARC_STEP_ANGLE))
+          for (let s = 0; s <= steps; s++) {
+            const a = r0 + delta * (s / steps)
+            current.push({ x: arcCx + arcR * Math.cos(a), y: arcCy + arcR * Math.sin(a) })
+          }
         }
         break
     }
@@ -516,8 +720,8 @@ interface BlockDef {
   baseX: number
   baseY: number
   texts: Array<{ content: string; layer: string; localX: number; localY: number; type: 'TEXT' | 'MTEXT' }>
-  inserts: Array<{ blockName: string; layer: string; localX: number; localY: number; scaleX: number; scaleY: number; rotation: number }>
-  polygons: Array<{ layer: string; vertices: Array<{x:number;y:number}>; closed: boolean; source: 'LWPOLYLINE'|'HATCH'|'POLYLINE'; hatchPattern?: string; hatchScale?: number; hatchAngle?: number; hatchColor?: number }>
+  inserts: Array<{ blockName: string; layer: string; localX: number; localY: number; scaleX: number; scaleY: number; rotation: number; handle?: string }>
+  polygons: Array<{ layer: string; vertices: Array<{x:number;y:number}>; closed: boolean; source: 'LWPOLYLINE'|'HATCH'|'POLYLINE'; hatchPattern?: string; hatchScale?: number; hatchAngle?: number; hatchColor?: number; handle?: string }>
   // 本地 bbox（以 block origin 為原點），供計算世界座標 bbox 中心使用
   localBBox?: { minX: number; maxX: number; minY: number; maxY: number; cx: number; cy: number }
 }
@@ -575,7 +779,7 @@ function parseBlockDefs(groups: GroupCode[]): Map<string, BlockDef> {
             // 會蓋掉真實插入點 → 遇到 101 後停止解析座標
             if (groups[i].code === 101) inEmbedded = true
             if (!inEmbedded) {
-              if (groups[i].code === 8)  layer   = groups[i].value
+              if (groups[i].code === 8)  layer   = decodeUnicodeEscapes(groups[i].value)
               if (groups[i].code === 1)  content = (eType === 'MTEXT') ? stripMtextCodes(groups[i].value) : decodeUnicodeEscapes(groups[i].value)
               if (groups[i].code === 10 && !gotXY) lx = parseFloat(groups[i].value) || 0
               if (groups[i].code === 20 && !gotXY) { ly = parseFloat(groups[i].value) || 0; gotXY = true }
@@ -604,9 +808,11 @@ function parseBlockDefs(groups: GroupCode[]): Map<string, BlockDef> {
           let layer = ''; let bname = ''; let lx = 0; let ly = 0
           let sx = 1; let sy = 1; let rot = 0
           let extZ = 1  // code 230：OCS 鏡射（見 ENTITIES INSERT 分支說明）
+          let handle = ''
           i++
           while (i < groups.length && groups[i].code !== 0) {
-            if (groups[i].code === 8)   layer = groups[i].value
+            if (groups[i].code === 5)   handle = groups[i].value
+            if (groups[i].code === 8)   layer = decodeUnicodeEscapes(groups[i].value)
             if (groups[i].code === 2)   bname = groups[i].value
             if (groups[i].code === 10)  lx    = parseFloat(groups[i].value) || 0
             if (groups[i].code === 20)  ly    = parseFloat(groups[i].value) || 0
@@ -617,28 +823,34 @@ function parseBlockDefs(groups: GroupCode[]): Map<string, BlockDef> {
             i++
           }
           if (extZ < -0.5) { lx = -lx; sx = -sx; rot = -rot }
-          if (bname) blockInserts.push({ blockName: bname, layer, localX: lx, localY: ly, scaleX: sx, scaleY: sy, rotation: rot })
+          if (bname) blockInserts.push({ blockName: bname, layer, localX: lx, localY: ly, scaleX: sx, scaleY: sy, rotation: rot, handle: handle || undefined })
 
         // LWPOLYLINE
         } else if (groups[i].code === 0 && eVal === 'LWPOLYLINE') {
-          let layer = ''; let closed = false
-          const verts: Array<{x:number;y:number}> = []; let px: number|null = null
+          let layer = ''; let closed = false; let handle = ''
+          const verts: Array<{x:number;y:number}> = []; const bulges: number[] = []; let px: number|null = null
           i++
           while (i < groups.length && groups[i].code !== 0) {
-            if (groups[i].code === 8)  layer  = groups[i].value
+            if (groups[i].code === 5)  handle = groups[i].value
+            if (groups[i].code === 8)  layer  = decodeUnicodeEscapes(groups[i].value)
             if (groups[i].code === 70) closed = (parseInt(groups[i].value) & 1) === 1
             if (groups[i].code === 10) px     = parseFloat(groups[i].value) || 0
-            if (groups[i].code === 20 && px !== null) { verts.push({ x: px, y: parseFloat(groups[i].value) || 0 }); px = null }
+            if (groups[i].code === 20 && px !== null) { verts.push({ x: px, y: parseFloat(groups[i].value) || 0 }); bulges.push(0); px = null }
+            if (groups[i].code === 42 && bulges.length > 0) bulges[bulges.length - 1] = parseFloat(groups[i].value) || 0
             i++
           }
-          if (verts.length >= 3) blockPolygons.push({ layer, vertices: verts, closed: closed || isApproxClosed(verts), source: 'LWPOLYLINE' })
+          if (verts.length >= 3) {
+            const finalClosed = closed || isApproxClosed(verts)
+            blockPolygons.push({ layer, vertices: expandPolylineBulges(verts, bulges, finalClosed), closed: finalClosed, source: 'LWPOLYLINE', handle: handle || undefined })
+          }
 
         // HATCH
         } else if (groups[i].code === 0 && eVal === 'HATCH') {
-          let layer = ''; let hatchPattern = ''; let hatchColor: number | undefined
+          let layer = ''; let hatchPattern = ''; let hatchColor: number | undefined; let handle = ''
           i++
           while (i < groups.length && groups[i].code !== 0 && groups[i].code !== 91) {
-            if (groups[i].code === 8)  layer = groups[i].value
+            if (groups[i].code === 5)  handle = groups[i].value
+            if (groups[i].code === 8)  layer = decodeUnicodeEscapes(groups[i].value)
             if (groups[i].code === 2)  hatchPattern = groups[i].value
             if (groups[i].code === 62) hatchColor = parseInt(groups[i].value) || undefined
             i++
@@ -646,7 +858,7 @@ function parseBlockDefs(groups: GroupCode[]): Map<string, BlockDef> {
           const { loops: hLoops, end: he, hatchScale, hatchAngle } = parseHatchBoundary(groups, i)
           i = he
           for (const hv of hLoops) {
-            blockPolygons.push({ layer, vertices: hv, closed: true, source: 'HATCH', hatchPattern: hatchPattern || undefined, hatchScale, hatchAngle, hatchColor })
+            blockPolygons.push({ layer, vertices: hv, closed: true, source: 'HATCH', hatchPattern: hatchPattern || undefined, hatchScale, hatchAngle, hatchColor, handle: handle || undefined })
           }
 
         // CIRCLE（樹木圓形圖案最常見的幾何元素）
@@ -728,6 +940,24 @@ function parseLayerColors(groups: GroupCode[]): Record<string, number> {
   return colors
 }
 
+// ── HEADER $INSUNITS 解析：圖面單位代碼（4=mm, 5=cm, 6=m, 其餘/找不到 = 無法辨識）──
+// 供分區植栽面積統計換算 m² 用；找不到或非 mm/cm/m 時交由 UI 提示使用者手動選擇，
+// 不可靜默假設，否則面積可能誤差達百萬倍。
+function parseInsUnits(groups: GroupCode[]): number | undefined {
+  for (let i = 0; i < groups.length; i++) {
+    if (groups[i].code === 9 && groups[i].value === '$INSUNITS') {
+      let j = i + 1
+      while (j < groups.length && groups[j].code !== 70 && groups[j].code !== 9 && groups[j].code !== 0) j++
+      if (j < groups.length && groups[j].code === 70) {
+        const v = parseInt(groups[j].value, 10)
+        return isNaN(v) ? undefined : v
+      }
+      return undefined
+    }
+  }
+  return undefined
+}
+
 export function parseDxf(text: string): DxfParseResult {
   const groups = parseGroupCodes(text)
   const inserts: DxfInsert[] = []
@@ -735,6 +965,7 @@ export function parseDxf(text: string): DxfParseResult {
   const polygons: DxfPolygon[] = []
   const splineSegments: Array<{ layer: string; points: Array<{ x: number; y: number }> }> = []
   const layerColors = parseLayerColors(groups)
+  const insUnits = parseInsUnits(groups)
 
   // 預先解析 BLOCKS section（block 定義內的文字）
   const blockDefs = parseBlockDefs(groups)
@@ -752,16 +983,20 @@ export function parseDxf(text: string): DxfParseResult {
       }
       // 幾何（HATCH / LWPOLYLINE）
       for (const bp of bdef.polygons) {
-        polygons.push({ layer: bp.layer, vertices: bp.vertices, closed: bp.closed, zoneType: classifyZone(bp.layer), source: bp.source, hatchPattern: bp.hatchPattern, hatchScale: bp.hatchScale, hatchAngle: bp.hatchAngle, hatchColor: bp.hatchColor })
+        polygons.push({ layer: bp.layer, vertices: bp.vertices, closed: bp.closed, zoneType: classifyZone(bp.layer), source: bp.source, hatchPattern: bp.hatchPattern, hatchScale: bp.hatchScale, hatchAngle: bp.hatchAngle, hatchColor: bp.hatchColor, handle: bp.handle })
       }
       // ── INSERT 遞迴展開（關鍵：R2004+ 所有實體常包在 Model_Space 甚至再包一層 block）──
       // 沒展開的話：分區標籤（本身是名為「A區」的 block）停在 local 座標 (1,0)，
       // point-in-polygon 全數失敗 → 「未找到包含 X區 的封閉邊界」
+      // handlePath：depth 0 直接用該 INSERT 自身 handle（與傳統 ENTITIES section 重複解析
+      // 同一實體時會拿到相同 handle，供 zoneStatistics.ts 去重）；depth>0 的巢狀展開則串接
+      // 祖先 INSERT handle，讓同一 block 定義被多次插入時，每個世界座標副本仍有唯一鍵。
       const expandInsert = (
         bi: BlockDef['inserts'][0],
         originX: number, originY: number,
         oScaleX: number, oScaleY: number, oRotDeg: number,
         depth: number,
+        parentHandlePath: string,
       ): void => {
         if (depth > 5) return  // 防循環
         const oRad = oRotDeg * Math.PI / 180
@@ -772,7 +1007,8 @@ export function parseDxf(text: string): DxfParseResult {
         const wScaleX = bi.scaleX * oScaleX
         const wScaleY = bi.scaleY * oScaleY
         const wRot = bi.rotation + oRotDeg
-        inserts.push({ type: 'INSERT', layer: bi.layer, blockName: bi.blockName, x: wx, y: wy, scaleX: wScaleX, scaleY: wScaleY, rotation: wRot, attributes: [] })
+        const handlePath = parentHandlePath ? `${parentHandlePath}::${bi.handle ?? ''}` : (bi.handle ?? '')
+        inserts.push({ type: 'INSERT', layer: bi.layer, blockName: bi.blockName, x: wx, y: wy, scaleX: wScaleX, scaleY: wScaleY, rotation: wRot, attributes: [], handle: handlePath || undefined })
 
         const target = blockDefs.get(bi.blockName)
         if (!target) return
@@ -800,6 +1036,8 @@ export function parseDxf(text: string): DxfParseResult {
               zoneType: classifyZone(bp.layer || bi.layer), source: bp.source,
               hatchPattern: bp.hatchPattern, hatchScale: bp.hatchScale,
               hatchAngle: bp.hatchAngle, hatchColor: bp.hatchColor,
+              handle: handlePath ? `${handlePath}::${bp.handle ?? ''}` : (bp.handle || undefined),
+              parentBlockName: bi.blockName,
             })
           }
         }
@@ -808,6 +1046,7 @@ export function parseDxf(text: string): DxfParseResult {
           expandInsert(
             { ...ni, localX: ni.localX - target.baseX, localY: ni.localY - target.baseY },
             wx, wy, wScaleX, wScaleY, wRot, depth + 1,
+            handlePath,
           )
         }
       }
@@ -815,6 +1054,7 @@ export function parseDxf(text: string): DxfParseResult {
         expandInsert(
           { ...bi, localX: bi.localX - bdef.baseX, localY: bi.localY - bdef.baseY },
           0, 0, 1, 1, 0, 0,
+          '',
         )
       }
     }
@@ -840,10 +1080,12 @@ export function parseDxf(text: string): DxfParseResult {
       let x = 0; let y = 0
       let scaleX = 1; let scaleY = 1; let rotDeg = 0
       let extZ = 1  // code 230：extrusion normal Z。-1 = AutoCAD MIRROR 產生的 OCS 鏡射
+      let handle = ''
       i++
       while (i < groups.length && groups[i].code !== 0) {
         const eg = groups[i]
-        if (eg.code === 8)   layer     = eg.value
+        if (eg.code === 5)   handle    = eg.value
+        if (eg.code === 8)   layer     = decodeUnicodeEscapes(eg.value)
         if (eg.code === 2)   blockName = eg.value
         if (eg.code === 10)  x         = parseFloat(eg.value) || 0
         if (eg.code === 20)  y         = parseFloat(eg.value) || 0
@@ -891,7 +1133,7 @@ export function parseDxf(text: string): DxfParseResult {
       }
 
       if (blockName) {
-        inserts.push({ type: 'INSERT', layer, blockName, x, y, scaleX, scaleY, rotation: rotDeg, attributes: attribs })
+        inserts.push({ type: 'INSERT', layer, blockName, x, y, scaleX, scaleY, rotation: rotDeg, attributes: attribs, handle: handle || undefined })
 
         const bdef = blockDefs.get(blockName)
         if (bdef) {
@@ -908,6 +1150,8 @@ export function parseDxf(text: string): DxfParseResult {
 
           // 展開 block 內的 HATCH / LWPOLYLINE（世界座標）
           // 目的：讓索引表 block 內的 HATCH sample 能被 Legend Mapping 讀到
+          // handle 組合鍵：外層 INSERT handle + 內層實體 handle，讓同一 block 定義
+          // 被插入多次時，每個世界座標副本仍有各自唯一的去重鍵（見 zoneStatistics.ts）
           for (const bp of bdef.polygons) {
             const worldVerts = bp.vertices.map(v => {
               const dx = v.x - bdef.baseX; const dy = v.y - bdef.baseY
@@ -927,6 +1171,8 @@ export function parseDxf(text: string): DxfParseResult {
                 hatchScale: bp.hatchScale,
                 hatchAngle: bp.hatchAngle,
                 hatchColor: bp.hatchColor,
+                handle: handle ? `${handle}::${bp.handle ?? ''}` : (bp.handle || undefined),
+                parentBlockName: blockName,
               })
             }
           }
@@ -956,7 +1202,7 @@ export function parseDxf(text: string): DxfParseResult {
         // MTEXT 101 Embedded Object 內另有 10/20（方向向量）會蓋掉插入點
         if (eg.code === 101) inEmbedded = true
         if (!inEmbedded) {
-          if (eg.code === 8)  layer = eg.value
+          if (eg.code === 8)  layer = decodeUnicodeEscapes(eg.value)
           if (eg.code === 2 && (type === 'ATTRIB' || type === 'ATTDEF')) attribTag = eg.value
           if (eg.code === 1) content    = type === 'MTEXT' ? stripMtextCodes(eg.value) : decodeUnicodeEscapes(eg.value)
           if (eg.code === 3) altContent = type === 'MTEXT' ? stripMtextCodes(eg.value) : decodeUnicodeEscapes(eg.value)
@@ -987,27 +1233,33 @@ export function parseDxf(text: string): DxfParseResult {
 
     // ── LWPOLYLINE ───────────────────────────────────────────────────────────
     } else if (g.code === 0 && g.value === 'LWPOLYLINE') {
-      let layer = ''; let closed = false
+      let layer = ''; let closed = false; let handle = ''
       const vertices: Array<{ x: number; y: number }> = []
+      const bulges: number[] = []
       let pendingX: number | null = null
       i++
       while (i < groups.length && groups[i].code !== 0) {
         const eg = groups[i]
-        if (eg.code === 8)  layer  = eg.value
+        if (eg.code === 5)  handle = eg.value
+        if (eg.code === 8)  layer  = decodeUnicodeEscapes(eg.value)
         if (eg.code === 70) closed = (parseInt(eg.value) & 1) === 1
         if (eg.code === 10) pendingX = parseFloat(eg.value) || 0
         if (eg.code === 20 && pendingX !== null) {
           vertices.push({ x: pendingX, y: parseFloat(eg.value) || 0 })
+          bulges.push(0)
           pendingX = null
         }
+        if (eg.code === 42 && bulges.length > 0) bulges[bulges.length - 1] = parseFloat(eg.value) || 0
         i++
       }
       if (vertices.length >= 3) {
+        const finalClosed = closed || isApproxClosed(vertices)
         polygons.push({
-          layer, vertices,
-          closed: closed || isApproxClosed(vertices),
+          layer, vertices: expandPolylineBulges(vertices, bulges, finalClosed),
+          closed: finalClosed,
           zoneType: classifyZone(layer),
           source: 'LWPOLYLINE',
+          handle: handle || undefined,
         })
       }
 
@@ -1022,7 +1274,7 @@ export function parseDxf(text: string): DxfParseResult {
       i++
       while (i < groups.length && groups[i].code !== 0) {
         const eg = groups[i]
-        if (eg.code === 8)  layer = eg.value
+        if (eg.code === 8)  layer = decodeUnicodeEscapes(eg.value)
         if (eg.code === 10) pendingX = parseFloat(eg.value) || 0
         if (eg.code === 20 && pendingX !== null) {
           points.push({ x: pendingX, y: parseFloat(eg.value) || 0 })
@@ -1037,9 +1289,11 @@ export function parseDxf(text: string): DxfParseResult {
       let layer = ''
       let hatchPattern = ''  // code 2：pattern name
       let hatchColor: number | undefined  // code 62：ACI color
+      let handle = ''
       i++
       while (i < groups.length && groups[i].code !== 0 && groups[i].code !== 91) {
-        if (groups[i].code === 8)  layer = groups[i].value
+        if (groups[i].code === 5)  handle = groups[i].value
+        if (groups[i].code === 8)  layer = decodeUnicodeEscapes(groups[i].value)
         if (groups[i].code === 2)  hatchPattern = groups[i].value
         if (groups[i].code === 62) hatchColor = parseInt(groups[i].value) || undefined
         i++
@@ -1054,15 +1308,17 @@ export function parseDxf(text: string): DxfParseResult {
           source: 'HATCH',
           hatchPattern: hatchPattern || undefined,
           hatchScale, hatchAngle, hatchColor,
+          handle: handle || undefined,
         })
       }
 
     // ── POLYLINE (old style) ─────────────────────────────────────────────────
     } else if (g.code === 0 && g.value === 'POLYLINE') {
-      let layer = ''; let closed = false
+      let layer = ''; let closed = false; let handle = ''
       i++
       while (i < groups.length && groups[i].code !== 0) {
-        if (groups[i].code === 8)  layer  = groups[i].value
+        if (groups[i].code === 5)  handle = groups[i].value
+        if (groups[i].code === 8)  layer  = decodeUnicodeEscapes(groups[i].value)
         if (groups[i].code === 70) closed = (parseInt(groups[i].value) & 1) === 1
         i++
       }
@@ -1084,6 +1340,7 @@ export function parseDxf(text: string): DxfParseResult {
           closed: closed || isApproxClosed(vertices),
           zoneType: classifyZone(layer),
           source: 'POLYLINE',
+          handle: handle || undefined,
         })
       }
 
@@ -1143,7 +1400,7 @@ export function parseDxf(text: string): DxfParseResult {
   }
 
   return {
-    inserts, texts, blockGroups, polygons, allLayers, blockExtents, layerColors,
+    inserts, texts, blockGroups, polygons, allLayers, blockExtents, layerColors, insUnits,
     stats: {
       totalInserts: inserts.length,
       totalTexts: texts.length,

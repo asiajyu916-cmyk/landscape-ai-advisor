@@ -5,6 +5,7 @@
 
 import type { CsvPlantRecord } from '@/types/csvPlant'
 import type { PlantMatchCandidate, SimilarPlantCandidate } from '@/types/plantSearch'
+import type { PlantScheduleEntry } from '@/types/dxf'
 
 // ── 全形/半形統一 + 去空白 ────────────────────────────────────────────────────
 // 注意：這段（含 normalizeForCompare）一定要放在 ALIAS_GROUPS/ALIAS_MAP 之前——
@@ -261,4 +262,61 @@ export function findSimilarPlants(
     .filter(c => c.nameSimilarity > 0 && c.nameSimilarity < 100)
     .sort((a, b) => b.nameSimilarity - a.nameSimilarity)
     .slice(0, topN)
+}
+
+// ── 圖層名稱 → 植物 對照（防止同 HATCH 圖樣誤判）───────────────────────────────
+// 目的：當不同植物在圖例中使用相同/高度相似的 HATCH pattern＋scale＋angle 時
+// （例如今葉石菖蒲 vs 蝦蟆草），純靠 HATCH 特徵比對必然混淆。若 DWG 已將兩者
+// 分在不同圖層（如 LAYER-今葉石菖蒲 / LAYER-蝦蟆草），圖層名稱是更可靠的依據，
+// 應優先於 HATCH pattern/scale/angle 相似度比對。
+// 原本定義於 DxfReviewPage.tsx，移至此處供 zoneStatistics.ts（分區植栽面積統計）
+// 共用，避免頁面元件與 utils 模組間循環 import。
+
+/** 正規化圖層名稱以供比對：全形轉半形、去空白、去常見符號、忽略大小寫 */
+export function normalizeLayerToken(s: string): string {
+  return s
+    .replace(/[！-～]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)) // 全形→半形
+    .replace(/[\s　]/g, '')                                    // 去空白（含全形空白）
+    .replace(/[-_./\\()（）【】[\]:：,，、'"]/g, '')                 // 去常見符號
+    .toLowerCase()
+}
+
+/**
+ * 動態建立「正規化關鍵字 → 候選植物名稱清單」對照表：
+ * 中文名稱、既有別名庫（本檔案 getAliasGroup）、學名，皆可作為圖層名稱比對關鍵字。
+ * 例："今葉石菖蒲"、"石菖蒲"（別名）、其學名 → 都指向同一植物。
+ */
+export function buildLayerPlantKeywordMap(
+  schedule: PlantScheduleEntry[],
+  plantDB: CsvPlantRecord[],
+): Map<string, string[]> {
+  const map = new Map<string, string[]>()
+  const add = (keyword: string | undefined, plantName: string) => {
+    if (!keyword) return
+    const k = normalizeLayerToken(keyword)
+    if (k.length < 2) return   // 太短的關鍵字（單一字母/字）容易誤判，不收錄
+    const arr = map.get(k) ?? []
+    if (!arr.includes(plantName)) arr.push(plantName)
+    map.set(k, arr)
+  }
+  for (const e of schedule) {
+    if (!e.plantName) continue
+    for (const alias of getAliasGroup(e.plantName)) add(alias, e.plantName)
+  }
+  for (const p of plantDB) {
+    for (const alias of getAliasGroup(p.name)) add(alias, p.name)
+    add(p.scientificName, p.name)
+  }
+  return map
+}
+
+/** 圖層名稱（正規化後）是否包含任一植物關鍵字，可能同時命中多個候選（回傳全部供後續判斷） */
+export function findPlantsByLayerName(layerName: string, keywordMap: Map<string, string[]>): string[] {
+  const norm = normalizeLayerToken(layerName)
+  if (!norm) return []
+  const hits = new Set<string>()
+  for (const [kw, plants] of keywordMap) {
+    if (norm.includes(kw)) for (const p of plants) hits.add(p)
+  }
+  return [...hits]
 }
