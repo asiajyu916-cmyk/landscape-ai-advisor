@@ -141,7 +141,7 @@ export interface MappedItem {
   detectedType?: string              // '喬木圖塊' / '灌木圖塊' 等（由 block/layer 名稱推斷）
   possiblePlantCode?: string         // 從 block name 提取的數字代號（如 '994'）
   evidence?: string[]                // 對應依據清單
-  sourceType?: 'saved_rule' | 'block' | 'attribute' | 'legend' | 'text' | 'unidentified'
+  sourceType?: 'saved_rule' | 'block' | 'attribute' | 'legend' | 'text' | 'layer' | 'unidentified'
   attributes?: DxfAttrib[]           // 對應 BlockGroup.attributes（供 restoreExcluded 重新比對用）
 }
 

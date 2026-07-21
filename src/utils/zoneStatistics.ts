@@ -29,6 +29,7 @@ import {
   canopyWorldRadius, computeWorldCenter,
 } from '@/utils/spatialAnalysis'
 import { normalizeLayerToken, findPlantsByLayerName } from '@/utils/plantNameMatch'
+import type { CsvPlantRecord } from '@/types/csvPlant'
 
 // ── 單位換算 ────────────────────────────────────────────────────────────────
 
@@ -209,15 +210,19 @@ function hatchCategoryFromZoneType(zt: ZoneType): PlantStatCategory {
 function resolvePlantNameForLayer(
   layer: string,
   keywordMap: Map<string, string[]>,
+  isKnownPlantName: (name: string) => boolean = () => true,
 ): { plantName: string; matchSource: string } {
   const candidates = findPlantsByLayerName(layer, keywordMap)
-  if (candidates.length === 1) return { plantName: candidates[0], matchSource: '圖層-植栽對照表(單一命中)' }
-  if (candidates.length > 1) {
-    return { plantName: candidates[0], matchSource: `圖層-植栽對照表(多重命中:${candidates.join('/')}，取第一筆，需人工確認)` }
+  if (candidates.length === 0) {
+    const norm = normalizeLayerToken(layer)
+    if (norm) return { plantName: norm, matchSource: '標準化圖層名稱(無比對到植栽資料)' }
+    return { plantName: layer || '(無圖層名稱)', matchSource: '原始圖層名稱(標準化後為空)' }
   }
-  const norm = normalizeLayerToken(layer)
-  if (norm) return { plantName: norm, matchSource: '標準化圖層名稱(無比對到植栽資料)' }
-  return { plantName: layer || '(無圖層名稱)', matchSource: '原始圖層名稱(標準化後為空)' }
+  // candidates 可能混入索引表誤植的原始圖層字串（該圖層文字本身被當成植物名稱寫進索引表），
+  // 優先取「真的能在植栽資料庫查到」的候選，取不到才退回第一筆。
+  const best = candidates.find(isKnownPlantName) ?? candidates[0]
+  if (candidates.length === 1) return { plantName: best, matchSource: '圖層-植栽對照表(單一命中)' }
+  return { plantName: best, matchSource: `圖層-植栽對照表(多重命中:${candidates.join('/')}，取「${best}」，需人工確認)` }
 }
 
 // ── 喬木 BLOCK 分類 ────────────────────────────────────────────────────────────
@@ -240,8 +245,20 @@ export function buildZoneStatistics(
   unit: DrawingUnit,
   keywordMap: Map<string, string[]>,
   mappings: MappedItem[],
+  plantDB: CsvPlantRecord[] = [],
 ): ZoneStatisticsResult[] {
   const divisor = UNIT_DIVISOR[unit]
+  // Layer 圖層命名未含灌木/草皮/地被等分類關鍵字時（如 L-BA_01_樹蘭、L-GA_01_台北草
+  // 這類以英文代號分區、真正植物種類只在圖層名稱裡的命名慣例），classifyZone 純關鍵字
+  // 判斷會落到 unknown。此時已經能透過 keywordMap 從圖層名稱找到具體植物，就用該植物在
+  // 植栽資料庫的 normalizedCategory 當分類依據，而不是把明明能辨識的植栽丟進待確認清單。
+  // HATCH 是面狀填色鋪面，即使資料庫將該植物標為喬木（如當綠籬密植使用），HATCH 情境下
+  // 仍歸類為灌木較符合實際圖面用途。
+  const plantCategoryByName = new Map<string, PlantStatCategory>()
+  for (const p of plantDB) {
+    plantCategoryByName.set(p.name, p.normalizedCategory === 'tree' ? 'shrub' : p.normalizedCategory)
+  }
+  const isKnownPlantName = (name: string) => plantCategoryByName.has(name)
 
   console.group(`[分區統計] 開始計算（單位=${unit}，換算倍率=1/${divisor}）`)
 
@@ -481,8 +498,20 @@ export function buildZoneStatistics(
         continue
       }
 
-      if (category === 'unknown') {
-        const { plantName: layerKey } = resolvePlantNameForLayer(layer, keywordMap)
+      // 圖層關鍵字（classifyZone）判斷不出灌木/草皮/地被時，退一步看 keywordMap 能否從
+      // 圖層名稱找到具體植物——找得到就用該植物在資料庫的分類，而不是直接丟去待確認。
+      // findPlantsByLayerName 可能回傳多個候選（例如索引表的植物名稱欄位本身就誤含
+      // 圖層代號時，該原始圖層字串也會被收進 keywordMap，變成候選之一）——不能只取
+      // candidates[0]，要找「第一個真的能在植栽資料庫查到分類的候選」才可靠。
+      const dbFallbackCategory = category === 'unknown'
+        ? findPlantsByLayerName(layer, keywordMap)
+            .map(name => plantCategoryByName.get(name))
+            .find((c): c is PlantStatCategory => c !== undefined)
+        : undefined
+      const effectiveCategory = dbFallbackCategory ?? category
+
+      if (effectiveCategory === 'unknown') {
+        const { plantName: layerKey } = resolvePlantNameForLayer(layer, keywordMap, isKnownPlantName)
         // 名稱含「綠／绿／green」但比對不到任何具體植物：只能是通用色塊/範圍圖層，
         // 不得因此推定為草皮、地被或任何特定植物（見業主明確要求）。
         const isGenericGreen = /綠|绿|green/i.test(layer)
@@ -494,14 +523,14 @@ export function buildZoneStatistics(
         if (hg.handle) g.handles.push(hg.handle)
         console.debug(`[分區統計] HATCH handle=${handleLabel} layer=${layer} 重建面積(entity自身)=${(hg.ownArea / divisor).toFixed(4)}m² 與${zone.name}交集面積=${areaM2.toFixed(4)}m² 分類=${isGenericGreen ? 'generic_green_area(未指定植栽範圍)' : 'unknown(待確認)'}`)
       } else {
-        const { plantName, matchSource } = resolvePlantNameForLayer(layer, keywordMap)
-        const key = `${category}||${plantName}`
+        const { plantName, matchSource } = resolvePlantNameForLayer(layer, keywordMap, isKnownPlantName)
+        const key = `${effectiveCategory}||${plantName}`
         let g = classifiedGroups.get(key)
-        if (!g) { g = { plantName, category, layerName: layer, shapes: [], handles: [], hatchCount: 0 }; classifiedGroups.set(key, g) }
+        if (!g) { g = { plantName, category: effectiveCategory, layerName: layer, shapes: [], handles: [], hatchCount: 0 }; classifiedGroups.set(key, g) }
         g.shapes.push(clipped)
         g.hatchCount += 1
         if (hg.handle) g.handles.push(hg.handle)
-        console.debug(`[分區統計] HATCH handle=${handleLabel} layer=${layer} 重建面積(entity自身)=${(hg.ownArea / divisor).toFixed(4)}m² 與${zone.name}交集面積=${areaM2.toFixed(4)}m² 植栽比對來源=${matchSource} 分類=${category}`)
+        console.debug(`[分區統計] HATCH handle=${handleLabel} layer=${layer} 重建面積(entity自身)=${(hg.ownArea / divisor).toFixed(4)}m² 與${zone.name}交集面積=${areaM2.toFixed(4)}m² 植栽比對來源=${matchSource} 分類=${effectiveCategory}${dbFallbackCategory ? '（圖層關鍵字判斷不出類別，改用植栽資料庫分類）' : ''}`)
       }
     }
 

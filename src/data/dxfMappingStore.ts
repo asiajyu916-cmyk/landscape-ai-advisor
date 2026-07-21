@@ -117,8 +117,11 @@ export async function readDxfWithEncoding(file: File): Promise<{ text: string; e
   }
 
   const utf8 = tryDecode('utf-8')
-  // < 0.5% replacement characters → treat as clean UTF-8
-  if (utf8.errors < bytes.length * 0.005) return { text: utf8.text, encoding: 'UTF-8' }
+  // 完全 0 個替換字元才視為乾淨 UTF-8——用「檔案大小的 0.5%」當門檻在大檔案上不可靠：
+  // 7MB 檔案的 0.5% ≈ 36,400 字元，實測曾出現一份純 Big5 檔案 UTF-8 解碼有 28,860 個
+  // 亂碼字元、卻因低於門檻被誤判為「乾淨 UTF-8」，導致全部中文文字（含分區標籤）解析失敗。
+  // 有效 UTF-8 位元組序列對任何雜訊零容忍，真正的 UTF-8 檔案解碼錯誤數必為 0。
+  if (utf8.errors === 0) return { text: utf8.text, encoding: 'UTF-8' }
 
   const big5 = tryDecode('big5')
   const gbk  = tryDecode('gbk')

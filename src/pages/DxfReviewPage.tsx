@@ -46,7 +46,7 @@ function detectBlockType(blockName: string, layer: string): string {
   return ''
 }
 
-export type PlantSourceType = 'saved_rule' | 'block' | 'attribute' | 'legend' | 'text' | 'unidentified'
+export type PlantSourceType = 'saved_rule' | 'block' | 'attribute' | 'legend' | 'text' | 'layer' | 'unidentified'
 
 interface MatchResult {
   plant: CsvPlantRecord | null
@@ -67,9 +67,9 @@ interface MatchResult {
 // 3. Block Name（中文 / 代號 / 英文含植物名）
 // 4. Legend（植栽索引表）比對代號或名稱
 // 5. 附近文字（鄰近標註）
-// 6. 未辨識植栽（Layer 不作為植栽名稱）
+// 6. Layer 名稱 fallback（僅在 Block 名稱是匿名代碼、1–5 都無法辨識時才使用）
 //
-// Layer 僅用於：detectBlockType（喬木/灌木/草皮 類型輔助），永遠不決定植物名稱。
+// Layer 也用於：detectBlockType（喬木/灌木/草皮 類型輔助）。
 function matchPlant(
   blockName: string,
   layer: string,
@@ -177,6 +177,18 @@ function matchPlant(
     return ok(75, subDbBlock, `圖塊名稱包含植物名稱「${subDbBlock.name}」`, 'block', subDbBlock.name)
   }
 
+  // P2c2. Block name 無法對應 DB → fallback 改用 INSERT 所在圖層名稱比對 DB
+  // 部分圖面的 BLOCK 名稱是匿名代碼（如 tree-5、A$C248E33C8）或用字與 DB 略有出入
+  // （如「光蠟樹」vs DB「光蠟」），植物種類實際記在圖層名稱（如 L-TA_04_光蠟樹）。
+  // 這一步優先於「P2d 直接用 block 名稱當未確認標籤」，因為圖層若能命中 DB 是
+  // 更可靠的確認結果，不該被「block 名稱含中文但 DB 沒有」這種較弱的猜測蓋過。
+  const ln = layer.toLowerCase()
+  const layerPlant = plants.find(p => p.name.length >= 2 && /[一-鿿]/.test(p.name) && ln.includes(p.name.toLowerCase()))
+  if (layerPlant) {
+    ev.push(`圖層「${layer}」含植物名稱「${layerPlant.name}」，圖塊名稱「${blockName}」無法對應資料庫，改用圖層名稱判定`)
+    return ok(65, layerPlant, `圖層名稱判定為「${layerPlant.name}」（圖塊名稱無法對應，請確認）`, 'layer', layerPlant.name)
+  }
+
   // P2d. Block name 本身含中文（DB 未收錄）→ 直接用作植栽名稱，優先於 Layer
   if (/[一-鿿]{2,}/.test(blockName)) {
     ev.push(`圖塊名稱「${blockName}」含中文，以圖塊名稱為植栽名稱（DB 未收錄，請確認）`)
@@ -231,14 +243,14 @@ function matchPlant(
     }
   }
 
-  // ── P6. 未辨識植栽 ───────────────────────────────────────────────────────────
-  // Layer 含植物名稱 → 僅記錄在 evidence，不作為辨識結果
-  const ln = layer.toLowerCase()
-  const layerPlant = plants.find(p => p.name.length >= 2 && /[一-鿿]/.test(p.name) && ln.includes(p.name.toLowerCase()))
-  if (layerPlant) {
-    ev.push(`[Layer參考] 圖層「${layer}」含植物名稱「${layerPlant.name}」，但 Layer 不作為辨識來源`)
-  } else if (layer) {
-    ev.push(`[Layer參考] ${layer}（不作為植栽辨識依據）`)
+  // ── P6. Block / Layer 皆無法對應 DB → 圖層名稱含中文時仍以其為未確認標籤 ────
+  const layerChinese = layer.match(/[一-鿿]{2,}/)
+  if (layerChinese) {
+    ev.push(`圖層「${layer}」含中文「${layerChinese[0]}」，圖塊名稱「${blockName}」無法辨識，以圖層名稱為植栽名稱（DB 未收錄，請確認）`)
+    return ok(55, null, `圖層名稱「${layerChinese[0]}」（DB 未收錄，請確認）`, 'layer', layerChinese[0])
+  }
+  if (layer) {
+    ev.push(`[Layer參考] ${layer}（無法從圖層名稱辨識植物）`)
   }
 
   // 有偵測到圖塊類型但無植栽名稱 → partial
@@ -303,8 +315,7 @@ function buildMappings(
       grp.attributes,   // Block ATTRIB 直接連結，不依賴 nearby text
     )
 
-    // 植物名稱解析：DB名稱 > detectedPlantName（block/attribute/text）> 索引表名稱
-    // Layer 名稱永遠不作為 plantName
+    // 植物名稱解析：DB名稱 > detectedPlantName（block/attribute/text/layer fallback）> 索引表名稱
     const resolvedName =
       result.plant?.name ||
       (result.detectedPlantName || undefined) ||
@@ -359,7 +370,7 @@ function computeZoneStatistics(
   activeMappings: MappedItem[],
 ): ZoneStatisticsResult[] {
   const keywordMap = buildLayerPlantKeywordMap(sched, plantDB)
-  return buildZoneStatistics(dxf, zones, scope, unit, keywordMap, activeMappings)
+  return buildZoneStatistics(dxf, zones, scope, unit, keywordMap, activeMappings, plantDB)
 }
 
 // 面積結果明顯不合理（極大或極小）通常代表單位選錯——僅在此時才主動提示使用者確認，

@@ -750,7 +750,7 @@ function parseBlockDefs(groups: GroupCode[]): Map<string, BlockDef> {
 
       // 讀 block header（非 entity 行）
       while (i < groups.length && groups[i].code !== 0) {
-        if (groups[i].code === 2)  blockName = groups[i].value
+        if (groups[i].code === 2)  blockName = decodeUnicodeEscapes(groups[i].value)
         if (groups[i].code === 10) baseX     = parseFloat(groups[i].value) || 0
         if (groups[i].code === 20) baseY     = parseFloat(groups[i].value) || 0
         i++
@@ -813,7 +813,7 @@ function parseBlockDefs(groups: GroupCode[]): Map<string, BlockDef> {
           while (i < groups.length && groups[i].code !== 0) {
             if (groups[i].code === 5)   handle = groups[i].value
             if (groups[i].code === 8)   layer = decodeUnicodeEscapes(groups[i].value)
-            if (groups[i].code === 2)   bname = groups[i].value
+            if (groups[i].code === 2)   bname = decodeUnicodeEscapes(groups[i].value)
             if (groups[i].code === 10)  lx    = parseFloat(groups[i].value) || 0
             if (groups[i].code === 20)  ly    = parseFloat(groups[i].value) || 0
             if (groups[i].code === 41)  sx    = parseFloat(groups[i].value) || 1
@@ -929,7 +929,7 @@ function parseLayerColors(groups: GroupCode[]): Record<string, number> {
       let name = ''; let color: number | undefined
       let j = i + 1
       while (j < groups.length && groups[j].code !== 0) {
-        if (groups[j].code === 2)  name  = groups[j].value.trim()
+        if (groups[j].code === 2)  name  = decodeUnicodeEscapes(groups[j].value).trim()
         if (groups[j].code === 62) color = Math.abs(parseInt(groups[j].value)) || undefined  // 負值=圖層關閉，取絕對值
         j++
       }
@@ -1086,7 +1086,7 @@ export function parseDxf(text: string): DxfParseResult {
         const eg = groups[i]
         if (eg.code === 5)   handle    = eg.value
         if (eg.code === 8)   layer     = decodeUnicodeEscapes(eg.value)
-        if (eg.code === 2)   blockName = eg.value
+        if (eg.code === 2)   blockName = decodeUnicodeEscapes(eg.value)
         if (eg.code === 10)  x         = parseFloat(eg.value) || 0
         if (eg.code === 20)  y         = parseFloat(eg.value) || 0
         if (eg.code === 41)  scaleX    = parseFloat(eg.value) || 1
