@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useMemo, useEffect } from 'react'
+import { useState, useRef, useCallback, useMemo, useEffect, Fragment } from 'react'
 import {
   Upload, FileText, AlertTriangle, CheckCircle, HelpCircle,
   ChevronDown, X, ArrowRight, Layers, Trash2, BookOpen, Table2, FileOutput, FileDown,
@@ -2597,7 +2597,7 @@ export default function DxfReviewPage({
 
         {/* ── Schedule tab ── */}
         {tab === 'schedule' && (
-          <ScheduleTab schedule={plantSchedule} mappings={mappings} plants={plants} onPlantAdded={handlePlantAdded} />
+          <ScheduleTab schedule={plantSchedule} mappings={mappings} plants={plants} zoneStatistics={zoneStatistics} onPlantAdded={handlePlantAdded} />
         )}
 
         {/* ── Zone review tab ── */}
@@ -4745,9 +4745,51 @@ function summarizeTelemetry(telemetry?: { tier: string; failureReason?: string }
   return `（已查：${parts.join('、')}）`
 }
 
-function ScheduleTab({ schedule, mappings, plants, onPlantAdded }: {
+// 索引表一筆植物在 DXF 圖面上的實際來源（圖層／BLOCK／HATCH／分區／數量或面積）。
+// 直接複用本次會話已驗證過的 zoneStatistics（正確的植物名稱解析、別名比對、分區歸屬），
+// 不重新拼湊 mappings/zonePlantLists，避免衍生出跟 zoneStatistics 不一致的第二套數字。
+interface ScheduleEntrySource {
+  zone: string
+  layer: string
+  sourceType: 'BLOCK' | 'HATCH'
+  detail: string
+}
+
+// 索引表的植物名稱有時比 zoneStatistics 解析出的名稱更細（如索引表「櫸木(大)」／
+// 「櫸木(小)」在 DXF 裡的 BLOCK 名稱都只是「櫸木」，或索引表「光蠟樹」對應資料庫
+// 正式名稱「光蠟」）——用單純字串相等會漏掉這些真實存在的來源，改用雙向包含比對，
+// 但限制較短的一邊至少 2 字，避免單字誤配。
+function scheduleNameMatches(a: string, b: string): boolean {
+  if (a === b) return true
+  const shorter = a.length <= b.length ? a : b
+  const longer = a.length <= b.length ? b : a
+  return shorter.length >= 2 && longer.includes(shorter)
+}
+
+function buildScheduleEntrySources(
+  entry: PlantScheduleEntry,
+  zoneStatistics: ZoneStatisticsResult[],
+): ScheduleEntrySource[] {
+  const sources: ScheduleEntrySource[] = []
+  for (const s of zoneStatistics) {
+    for (const p of s.treePlants) {
+      if (scheduleNameMatches(p.plantName, entry.plantName)) {
+        sources.push({ zone: s.zoneId, layer: p.layerName, sourceType: 'BLOCK', detail: `${p.count} 株` })
+      }
+    }
+    for (const p of s.hatchPlants) {
+      if (scheduleNameMatches(p.plantName, entry.plantName)) {
+        sources.push({ zone: s.zoneId, layer: p.layerName, sourceType: 'HATCH', detail: `${p.areaM2.toFixed(2)}m²（${p.hatchCount} 塊）` })
+      }
+    }
+  }
+  return sources
+}
+
+function ScheduleTab({ schedule, mappings, plants, zoneStatistics, onPlantAdded }: {
   schedule: PlantSchedule; mappings: MappedItem[]
-  plants: CsvPlantRecord[]; onPlantAdded: (record: CsvPlantRecord, dataSource?: DraftPlantRecord['dataSource'], sourceUrl?: string) => void
+  plants: CsvPlantRecord[]; zoneStatistics: ZoneStatisticsResult[]
+  onPlantAdded: (record: CsvPlantRecord, dataSource?: DraftPlantRecord['dataSource'], sourceUrl?: string) => void
 }) {
   // ── 缺漏植栽自動補資料：每個索引表植物名稱各自的搜尋狀態 ────────────────────
   const [searchStates, setSearchStates] = useState<Record<string, 'idle' | 'searching' | 'failed'>>({})
@@ -4755,6 +4797,13 @@ function ScheduleTab({ schedule, mappings, plants, onPlantAdded }: {
   const [activeSearch, setActiveSearch] = useState<{
     queryName: string; result: PlantSearchResult; draft: DraftPlantRecord
   } | null>(null)
+  // 植栽索引總表：哪些列已展開「DXF 來源明細」
+  const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set())
+  const toggleExpanded = (idx: number) => setExpandedRows(prev => {
+    const next = new Set(prev)
+    if (next.has(idx)) next.delete(idx); else next.add(idx)
+    return next
+  })
 
   const runAutoSearch = useCallback(async (e: PlantScheduleEntry) => {
     const key = e.plantName
@@ -4851,7 +4900,7 @@ function ScheduleTab({ schedule, mappings, plants, onPlantAdded }: {
         <table className="w-full text-sm">
           <thead>
             <tr className="bg-stone-50 border-b border-stone-200">
-              {['代號/項次', '植物名稱', '類型', '規格', '數量', '單位', '空間對應狀態', '資料庫'].map(h => (
+              {['代號/項次', '植物名稱', '植物分類', '類型', '規格', '數量', '單位', 'DXF 來源', '資料庫'].map(h => (
                 <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-stone-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
               ))}
             </tr>
@@ -4859,8 +4908,14 @@ function ScheduleTab({ schedule, mappings, plants, onPlantAdded }: {
           <tbody>
             {schedule.entries.map((e, idx) => {
               const hasBlock = isBlockMatched(e)
+              const sources = buildScheduleEntrySources(e, zoneStatistics)
+              const sourceZoneCount = new Set(sources.map(s => s.zone)).size
+              const expanded = expandedRows.has(idx)
+              const dbPlant = plants.find(p => p.name === e.plantName)
+              const category = dbPlant?.category || e.plantType || '—'
               return (
-              <tr key={idx} className={`border-b border-stone-100 last:border-0 hover:bg-stone-50 ${
+              <Fragment key={idx}>
+              <tr className={`border-b border-stone-100 last:border-0 hover:bg-stone-50 ${
                 !hasBlock ? 'bg-amber-50/30' : ''
               }`}>
                 {/* 代號/項次 */}
@@ -4874,6 +4929,8 @@ function ScheduleTab({ schedule, mappings, plants, onPlantAdded }: {
                   <p className="font-semibold text-stone-800">{e.plantName}</p>
                   {e.scientificName && <p className="text-xs text-stone-400 italic">{e.scientificName}</p>}
                 </td>
+                {/* 植物分類 */}
+                <td className="px-4 py-2.5 text-stone-500 text-xs">{category}</td>
                 {/* 類型 */}
                 <td className="px-4 py-2.5 text-stone-500 text-xs">{e.plantType || '—'}</td>
                 {/* 規格 */}
@@ -4893,15 +4950,17 @@ function ScheduleTab({ schedule, mappings, plants, onPlantAdded }: {
                   }
                   {e.unitNote && <p className="text-amber-500 text-[10px] mt-0.5">{e.unitNote}</p>}
                 </td>
-                {/* 空間對應狀態（新欄位：區分已圖塊對應 vs 待 HATCH 對應）*/}
+                {/* DXF 來源：點擊展開圖層／BLOCK／HATCH／分區明細，取代舊的二元「空間對應狀態」徽章 */}
                 <td className="px-4 py-2.5">
-                  {hasBlock
-                    ? <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs">
-                        <CheckCircle size={10} />已對應圖塊
-                      </span>
-                    : <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 text-xs">
-                        <AlertTriangle size={10} />待 HATCH 對應
-                      </span>}
+                  <button onClick={() => toggleExpanded(idx)}
+                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-xs transition-colors ${
+                      sources.length > 0
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-700 hover:bg-emerald-100'
+                        : 'bg-amber-50 border-amber-200 text-amber-700 hover:bg-amber-100'
+                    }`}>
+                    <ChevronDown size={10} className={`transition-transform ${expanded ? 'rotate-180' : ''}`} />
+                    {sources.length > 0 ? `${sources.length} 筆來源・${sourceZoneCount} 分區` : '尚無 DXF 來源'}
+                  </button>
                 </td>
                 {/* 資料庫對應 */}
                 <td className="px-4 py-2.5">
@@ -4951,6 +5010,39 @@ function ScheduleTab({ schedule, mappings, plants, onPlantAdded }: {
                   }
                 </td>
               </tr>
+              {/* DXF 來源明細：展開後顯示這個植物在圖面上實際的圖層／BLOCK／HATCH／分區／數量或面積，
+                  一律標示已有資料，不因沒有 zoneStatistics 命中就整列隱藏 */}
+              {expanded && (
+                <tr className="bg-stone-50/70">
+                  <td colSpan={10} className="px-4 py-3">
+                    {sources.length === 0 ? (
+                      <p className="text-xs text-stone-400">尚無 DXF 圖層/HATCH/BLOCK 對應資料</p>
+                    ) : (
+                      <table className="w-full text-xs border-collapse">
+                        <thead>
+                          <tr className="text-left text-stone-500 border-b border-stone-200">
+                            <th className="py-1 pr-3 font-semibold">分區</th>
+                            <th className="py-1 pr-3 font-semibold">圖層</th>
+                            <th className="py-1 pr-3 font-semibold">類型</th>
+                            <th className="py-1 font-semibold">數量或面積</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {sources.map((s, si) => (
+                            <tr key={si} className="border-b border-stone-100 last:border-0">
+                              <td className="py-1 pr-3 text-stone-700">{s.zone}</td>
+                              <td className="py-1 pr-3 text-stone-500 font-mono">{s.layer}</td>
+                              <td className="py-1 pr-3 text-stone-500">{s.sourceType === 'BLOCK' ? 'BLOCK' : 'HATCH'}</td>
+                              <td className="py-1 text-stone-600">{s.detail}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </td>
+                </tr>
+              )}
+              </Fragment>
             )
             })}
           </tbody>

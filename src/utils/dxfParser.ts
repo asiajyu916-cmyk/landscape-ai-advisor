@@ -18,8 +18,15 @@ const COL_ROLE_PATTERNS: Array<{ kws: string[]; role: ColRole }> = [
   { kws: ['類型', '型態', '喬木類', '灌木類'], role: 'plantType' },
 ]
 
+// 「圖塊名稱／圖層名稱」這類表頭雖然含通用字「名稱」，但指的是 DXF BLOCK/LAYER
+// 代號，不是植物名稱——常見於製圖者自己核對用的「圖塊→數量」對照表，若被誤判成
+// plantName 欄，會被 detectPlantSchedule 的多表格切分機制當成第二張獨立植栽表，
+// 產生跟正式植栽表重複、但植物名稱其實是原始圖層字串的假資料列。
+const BLOCK_OR_LAYER_HEADER_RE = /圖塊名稱|圖層名稱|BLOCK\s*NAME|LAYER\s*NAME/i
+
 function headerCellRole(content: string): ColRole {
   const t = content.trim()
+  if (BLOCK_OR_LAYER_HEADER_RE.test(t)) return 'unknown'
   for (const { kws, role } of COL_ROLE_PATTERNS) {
     if (kws.some(kw => t.includes(kw))) return role
   }
@@ -49,7 +56,7 @@ function inferUnit(plantName: string, spec?: string): { unit: string; note?: str
 
 // 非植物名稱過濾（圖名/表頭/花色/樹型描述等常混入索引表區域的文字）
 const NON_PLANT_NAME_RE =
-  /(配置圖|平面圖|剖面圖|立面圖|示意圖|大樣圖|詳圖|索引圖|植栽表|圖例|項次|備註|規格|名稱|數量|單位|小計|合計|月份|樹型|密植|株距|比例|圖號|圖名|日期)|[色型]$|^(伸展|整形|飄型|圓形|橢圓形|自然形|傘形|無花|密植)$/
+  /(配置圖|平面圖|剖面圖|立面圖|示意圖|大樣圖|詳圖|索引圖|植栽表|圖例|項次|備註|規格|名稱|數量|單位|小計|合計|月份|樹型|密植|株距|比例|圖號|圖名|日期|編號)|[色型]$|^(伸展|整形|飄型|圓形|橢圓形|自然形|傘形|無花|密植)$/
 
 export function detectPlantSchedule(texts: DxfText[]): PlantSchedule {
   if (texts.length === 0) return { entries: [], detected: false, textCount: 0 }
@@ -303,7 +310,9 @@ function parseRows(
       spec = specCell?.content.trim()
     }
 
-    if (!plantName || NON_PLANT_NAME_RE.test(plantName)) continue
+    // code 欄本身若命中「圖號」等圖框/標題欄字樣，代表這列其實是圖框註記誤入表格
+    // 區域範圍，不是真正的植栽資料列（即使 plantName 欄湊巧抓到別的文字也一樣要排除）。
+    if (!plantName || NON_PLANT_NAME_RE.test(plantName) || (code && NON_PLANT_NAME_RE.test(code))) continue
 
     // ── 4. 單位補全推測 ──────────────────────────────────────────────────────
     if (!unit) {
