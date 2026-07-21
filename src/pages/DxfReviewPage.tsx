@@ -13,7 +13,7 @@ import { evaluate } from '@/utils/plantEvaluator'
 import type { EvalResult } from '@/utils/plantEvaluator'
 import { loadPlantsFromStorage, savePlantsToStorage, loadPlantsWithCsvMerge } from '@/data/plantStore'
 import { searchPlantAllTiers, searchResultToDraft } from '@/utils/plantSearchClient'
-import { existsExactInLocalDatabase, normalizeLayerToken, buildLayerPlantKeywordMap, findPlantsByLayerName } from '@/utils/plantNameMatch'
+import { existsExactInLocalDatabase, normalizeLayerToken, buildLayerPlantKeywordMap, findPlantsByLayerName, normalizeScientificName } from '@/utils/plantNameMatch'
 import { persistConfirmedPlant } from '@/services/plantCloudService'
 import type { PlantSearchResult, DraftPlantRecord } from '@/types/plantSearch'
 import { PLANT_DATA_SOURCE_LABELS } from '@/types/plantSearch'
@@ -2124,6 +2124,10 @@ export default function DxfReviewPage({
   const [savedRules, setSavedRules]       = useState<DxfBlockRule[]>(() => loadDxfRules())
   const [dropdown, setDropdown]           = useState<DropdownState | null>(null)
   const [plantSchedule, setPlantSchedule] = useState<PlantSchedule>({ entries: [], detected: false, textCount: 0 })
+  // 索引表植物人工指定的資料庫比對：key 為 entry.code || entry.plantName，value 為使用者
+  // 手動選定的資料庫植物名稱。用於自動比對抓不到（例如索引表用字跟資料庫略有出入、
+  // 或資料庫確實沒有該植物但有相近品種）時，讓使用者直接指定，不必觸發網路搜尋。
+  const [scheduleManualOverrides, setScheduleManualOverrides] = useState<Record<string, string>>({})
   const [drawingRadius, setDrawingRadius] = useState(1000)
   const [showImportPreview, setShowImportPreview] = useState(false)
   const [zonePlantLists, setZonePlantLists] = useState<ZonePlantList[]>([])
@@ -2264,6 +2268,7 @@ export default function DxfReviewPage({
       const sched = detectPlantSchedule(result.texts)
       sched.entries.forEach(e => { e.dbMatched = loaded.some(p => p.name === e.plantName) })
       setPlantSchedule(sched)
+      setScheduleManualOverrides({})
 
       // 計算附近文字搜尋半徑
       const radius = calcDrawingRadius(result.blockGroups)
@@ -2597,7 +2602,10 @@ export default function DxfReviewPage({
 
         {/* ── Schedule tab ── */}
         {tab === 'schedule' && (
-          <ScheduleTab schedule={plantSchedule} mappings={mappings} plants={plants} zoneStatistics={zoneStatistics} onPlantAdded={handlePlantAdded} />
+          <ScheduleTab schedule={plantSchedule} mappings={mappings} plants={plants} zoneStatistics={zoneStatistics}
+            manualOverrides={scheduleManualOverrides} onManualOverride={(key, plantName) => setScheduleManualOverrides(prev => ({ ...prev, [key]: plantName }))}
+            onClearManualOverride={(key) => setScheduleManualOverrides(prev => { const n = { ...prev }; delete n[key]; return n })}
+            onPlantAdded={handlePlantAdded} />
         )}
 
         {/* ── Zone review tab ── */}
@@ -4786,11 +4794,34 @@ function buildScheduleEntrySources(
   return sources
 }
 
-function ScheduleTab({ schedule, mappings, plants, zoneStatistics, onPlantAdded }: {
+// 索引表植物在本地資料庫的比對鍵：優先人工指定，其次用 scheduleNameMatches 雙向包含
+// 比對（處理索引表用字比資料庫更細的情形，如「櫸木(大)」對應資料庫「櫸木」、
+// 「光蠟樹」對應資料庫「光蠟」），比對不到才視為資料庫查無。
+function scheduleEntryKey(e: PlantScheduleEntry): string {
+  return e.code || e.plantName
+}
+
+function findMatchedDbPlant(
+  entry: PlantScheduleEntry,
+  plants: CsvPlantRecord[],
+  manualOverrides: Record<string, string>,
+): CsvPlantRecord | undefined {
+  const overrideName = manualOverrides[scheduleEntryKey(entry)]
+  if (overrideName) return plants.find(p => p.name === overrideName)
+  return plants.find(p => scheduleNameMatches(p.name, entry.plantName))
+    ?? (entry.scientificName ? plants.find(p => p.scientificName && normalizeScientificName(p.scientificName) === normalizeScientificName(entry.scientificName!)) : undefined)
+}
+
+function ScheduleTab({ schedule, mappings, plants, zoneStatistics, manualOverrides, onManualOverride, onClearManualOverride, onPlantAdded }: {
   schedule: PlantSchedule; mappings: MappedItem[]
   plants: CsvPlantRecord[]; zoneStatistics: ZoneStatisticsResult[]
+  manualOverrides: Record<string, string>
+  onManualOverride: (key: string, plantName: string) => void
+  onClearManualOverride: (key: string) => void
   onPlantAdded: (record: CsvPlantRecord, dataSource?: DraftPlantRecord['dataSource'], sourceUrl?: string) => void
 }) {
+  const [pickerOpenKey, setPickerOpenKey] = useState<string | null>(null)
+  const [pickerQuery, setPickerQuery] = useState('')
   // ── 缺漏植栽自動補資料：每個索引表植物名稱各自的搜尋狀態 ────────────────────
   const [searchStates, setSearchStates] = useState<Record<string, 'idle' | 'searching' | 'failed'>>({})
   const [failureNotes, setFailureNotes] = useState<Record<string, string>>({})
@@ -4847,7 +4878,7 @@ function ScheduleTab({ schedule, mappings, plants, zoneStatistics, onPlantAdded 
   const isBlockMatched = (e: PlantScheduleEntry) =>
     (e.code && matchedCodes.has(e.code.trim())) || matchedNames.has(e.plantName)
 
-  const isDbMatched      = (e: PlantScheduleEntry) => existsExactInLocalDatabase(e.plantName, plants, e.scientificName)
+  const isDbMatched      = (e: PlantScheduleEntry) => !!findMatchedDbPlant(e, plants, manualOverrides)
   const blockMatchedCount = schedule.entries.filter(isBlockMatched).length
   const noBlockCount      = schedule.entries.length - blockMatchedCount
   const dbCount           = schedule.entries.filter(isDbMatched).length
@@ -4911,8 +4942,10 @@ function ScheduleTab({ schedule, mappings, plants, zoneStatistics, onPlantAdded 
               const sources = buildScheduleEntrySources(e, zoneStatistics)
               const sourceZoneCount = new Set(sources.map(s => s.zone)).size
               const expanded = expandedRows.has(idx)
-              const dbPlant = plants.find(p => p.name === e.plantName)
+              const entryKey = scheduleEntryKey(e)
+              const dbPlant = findMatchedDbPlant(e, plants, manualOverrides)
               const category = dbPlant?.category || e.plantType || '—'
+              const isManual = !!manualOverrides[entryKey]
               return (
               <Fragment key={idx}>
               <tr className={`border-b border-stone-100 last:border-0 hover:bg-stone-50 ${
@@ -4964,19 +4997,26 @@ function ScheduleTab({ schedule, mappings, plants, zoneStatistics, onPlantAdded 
                 </td>
                 {/* 資料庫對應 */}
                 <td className="px-4 py-2.5">
-                  {isDbMatched(e)
+                  {dbPlant
                     ? (() => {
-                        const matched = plants.find(p => p.name === e.plantName)
-                        const matchedDataSource = (matched as unknown as { dataSource?: keyof typeof PLANT_DATA_SOURCE_LABELS })?.dataSource
+                        const matchedDataSource = (dbPlant as unknown as { dataSource?: keyof typeof PLANT_DATA_SOURCE_LABELS })?.dataSource
                         const source = matchedDataSource
                           ? PLANT_DATA_SOURCE_LABELS[matchedDataSource]
-                          : matched?.isAutoSourced ? 'AI 網路補充' : 'CSV 內建植栽資料庫'
+                          : dbPlant.isAutoSourced ? 'AI 網路補充' : 'CSV 內建植栽資料庫'
                         return (
                           <span className="inline-flex flex-col items-start gap-0.5">
                             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs">
-                              <CheckCircle size={10} />已比對
+                              <CheckCircle size={10} />已比對{isManual ? '（人工指定）' : ''}
                             </span>
-                            <span className="text-[10px] text-stone-400">資料來源：{source}</span>
+                            <span className="text-[10px] text-stone-400">
+                              {isManual ? `對應：${dbPlant.name}` : `資料來源：${source}`}
+                            </span>
+                            {isManual && (
+                              <button onClick={() => onClearManualOverride(entryKey)}
+                                className="text-[10px] text-stone-400 hover:text-stone-600 underline">
+                                清除人工指定
+                              </button>
+                            )}
                           </span>
                         )
                       })()
@@ -4985,13 +5025,44 @@ function ScheduleTab({ schedule, mappings, plants, zoneStatistics, onPlantAdded 
                         本地資料庫未找到，正在進行 AI 網路補充查詢
                       </span>
                     : (
-                      <div className="flex flex-col gap-1 items-start">
-                        <button onClick={() => runAutoSearch(e)}
-                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-stone-100 border border-stone-300 text-stone-600 text-xs hover:bg-stone-200 hover:border-stone-400">
-                          <HelpCircle size={10} />未比對・自動搜尋
-                        </button>
+                      <div className="flex flex-col gap-1 items-start relative">
+                        <div className="flex gap-1">
+                          <button onClick={() => runAutoSearch(e)}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-stone-100 border border-stone-300 text-stone-600 text-xs hover:bg-stone-200 hover:border-stone-400">
+                            <HelpCircle size={10} />未比對・自動搜尋
+                          </button>
+                          <button onClick={() => { setPickerOpenKey(pickerOpenKey === entryKey ? null : entryKey); setPickerQuery('') }}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-stone-100 border border-stone-300 text-stone-600 text-xs hover:bg-stone-200 hover:border-stone-400">
+                            手動選擇
+                          </button>
+                        </div>
                         {searchStates[e.plantName] === 'failed' && (
                           <p className="text-[10px] text-amber-600 max-w-[160px]">{failureNotes[e.plantName]}</p>
+                        )}
+                        {pickerOpenKey === entryKey && (
+                          <div className="absolute left-0 top-8 z-50 w-72 bg-white border border-stone-200 rounded-xl shadow-xl overflow-hidden">
+                            <div className="p-2 border-b border-stone-100">
+                              <input autoFocus value={pickerQuery} onChange={ev => setPickerQuery(ev.target.value)}
+                                placeholder="搜尋植栽資料庫（128 筆）..."
+                                className="w-full px-2 py-1.5 text-xs border border-stone-200 rounded-lg outline-none focus:border-stone-400" />
+                            </div>
+                            <div className="max-h-56 overflow-y-auto">
+                              {plants
+                                .filter(p => !pickerQuery.trim() || p.name.includes(pickerQuery.trim()))
+                                .slice(0, 50)
+                                .map(p => (
+                                  <button key={p.id}
+                                    onClick={() => { onManualOverride(entryKey, p.name); setPickerOpenKey(null) }}
+                                    className="w-full text-left px-3 py-1.5 text-xs hover:bg-stone-50 flex items-center justify-between gap-2 border-b border-stone-50 last:border-0">
+                                    <span className="font-medium text-stone-700">{p.name}</span>
+                                    <span className="text-stone-400">{p.subCategory || p.category}</span>
+                                  </button>
+                                ))}
+                              {plants.filter(p => !pickerQuery.trim() || p.name.includes(pickerQuery.trim())).length === 0 && (
+                                <p className="px-3 py-3 text-xs text-stone-400">查無符合「{pickerQuery}」的植物</p>
+                              )}
+                            </div>
+                          </div>
                         )}
                       </div>
                     )}
