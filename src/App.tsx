@@ -5,10 +5,25 @@ import type { ZoneReviewResult } from '@/utils/evaluateZone'
 import LandscapeAdvisorPage from '@/pages/LandscapeAdvisorPage'
 import DxfReviewPage from '@/pages/DxfReviewPage'
 import PlantAdvisorChatPage from '@/pages/PlantAdvisorChatPage'
+import { AuthProvider, useAuth } from '@/contexts/AuthContext'
+import RequireAuth from '@/components/auth/RequireAuth'
+import NoPermissionNotice from '@/components/auth/NoPermissionNotice'
+import { hasPermission } from '@/lib/permissions'
 
 type AppTab = 'pdf' | 'landscape' | 'dxf' | 'advisor'
 
 export default function App() {
+  return (
+    <AuthProvider>
+      <RequireAuth>
+        <AuthenticatedApp />
+      </RequireAuth>
+    </AuthProvider>
+  )
+}
+
+function AuthenticatedApp() {
+  const { profile } = useAuth()
   const [activeTab, setActiveTab] = useState<AppTab>('landscape')
 
   // PDF / DXF 導入的植栽名稱清單，橋接到 LandscapeAdvisorPage
@@ -48,24 +63,33 @@ export default function App() {
         pdfParsed={zonePlantingTable !== undefined}
         zoneReviewResults={zoneReviewResults}
       />
-      {/* PDF / DXF 頁面的內容渲染在共用 Header 下方 */}
+      {/* PDF / DXF 頁面的內容渲染在共用 Header 下方 —— 沒有權限的分頁不 mount 對應
+          元件（不是用 CSS 藏起來），改顯示無權限提示 */}
       {activeTab === 'pdf' && (
-        <PdfReviewPage
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
-          onImport={handlePdfImport}
-          onZoneParsed={rows => setZonePlantingTable(rows)}
-          onZoneReviewed={results => setZoneReviewResults(results)}
-        />
+        hasPermission(profile?.role, 'canReviewPdf') ? (
+          <PdfReviewPage
+            activeTab={activeTab}
+            onTabChange={setActiveTab}
+            onImport={handlePdfImport}
+            onZoneParsed={rows => setZonePlantingTable(rows)}
+            onZoneReviewed={results => setZoneReviewResults(results)}
+          />
+        ) : <NoPermissionNotice featureName="PDF 審圖" />
       )}
       {activeTab === 'dxf' && (
-        <DxfReviewPage
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
-          onImport={handleDxfImport}
-        />
+        hasPermission(profile?.role, 'canReviewDxf') ? (
+          <DxfReviewPage
+            activeTab={activeTab}
+            onTabChange={setActiveTab}
+            onImport={handleDxfImport}
+          />
+        ) : <NoPermissionNotice featureName="DXF 審查" />
       )}
-      {activeTab === 'advisor' && <PlantAdvisorChatPage />}
+      {activeTab === 'advisor' && (
+        hasPermission(profile?.role, 'canUseAiPlanting')
+          ? <PlantAdvisorChatPage />
+          : <NoPermissionNotice featureName="AI 配植助理" />
+      )}
     </>
   )
 }

@@ -3,7 +3,11 @@ import {
   Upload, Database, FileDown, Plus, X, Search, Leaf, Trash2,
   AlertTriangle, CheckCircle, XCircle, Info, ChevronDown, ChevronUp,
   ArrowRight, FileText, ExternalLink, RefreshCw, FileOutput, Layers,
+  LogOut, Lock,
 } from 'lucide-react'
+import { useAuth } from '@/contexts/AuthContext'
+import { hasPermission } from '@/lib/permissions'
+import NoPermissionNotice from '@/components/auth/NoPermissionNotice'
 import { exportReviewReportPdf } from '@/utils/exportReviewPdf'
 import {
   savePlantsToStorage, loadPlantsFromStorage,
@@ -2357,12 +2361,20 @@ function PhotoManagerModal({ plants, imageStore, onSaveImage, onClose }: {
   )
 }
 
-function PlantDatabaseModal({ plants, onClose, onSelect, selectedIds, imageStore, onSaveImage, onDeletePlant }: {
+function PlantDatabaseModal({ plants, onClose, onSelect, selectedIds, imageStore, onSaveImage, onDeletePlant, canManage = true, canExport = true, forceOpen = false, restrictedNotice }: {
   plants: CsvPlantRecord[]; onClose: () => void
   onSelect: (p: CsvPlantRecord) => void; selectedIds: Set<string>
   imageStore: ImageStore
   onSaveImage: (plantName: string, data: Partial<PlantImageData>) => void
   onDeletePlant?: (plantId: string) => void
+  /** 是否可編輯/新增/刪除植物、匯入 CSV、管理照片——false 時只能查看/搜尋/篩選 */
+  canManage?: boolean
+  /** 是否可匯出 CSV */
+  canExport?: boolean
+  /** true 時不顯示「關閉」按鈕——這是帳號唯一能看到的畫面，不是可選擇開關的彈窗 */
+  forceOpen?: boolean
+  /** 顯示在頂部的限制說明文字（例如「此帳號僅有植栽資料查看權限」） */
+  restrictedNotice?: string
 }) {
   const [search, setSearch] = useState('')
   const [filterCat, setFilterCat] = useState('')
@@ -2432,8 +2444,14 @@ function PlantDatabaseModal({ plants, onClose, onSelect, selectedIds, imageStore
             <p className="text-sm text-stone-400 mt-0.5">
               景觀 AI 設計審查顧問 2.0｜共 {plants.length} 筆植栽資料　顯示 {filtered.length} 筆
             </p>
+            {restrictedNotice && (
+              <p className="mt-1.5 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-50 border border-amber-200 text-amber-700 text-xs font-medium">
+                <AlertTriangle size={12} />{restrictedNotice}
+              </p>
+            )}
           </div>
           <div className="flex flex-wrap items-center gap-1.5">
+            {canExport && (
             <button
               onClick={() => {
                 // 判斷哪些欄位算「缺漏」：空字串 或 '待查'
@@ -2474,7 +2492,9 @@ function PlantDatabaseModal({ plants, onClose, onSelect, selectedIds, imageStore
               className="flex items-center gap-1.5 px-3 py-1.5 md:px-4 md:py-2 rounded-xl border border-stone-200 text-xs md:text-sm text-stone-600 hover:bg-stone-50 font-medium whitespace-nowrap">
               <FileDown size={14} />匯出待補充 CSV
             </button>
+            )}
             {/* 匯出植栽庫 CSV（含圖片網址） */}
+            {canExport && (
             <button
               onClick={() => {
                 // Tab 分隔，與原始 CSV 格式相容，欄位 32 加圖片網址
@@ -2514,6 +2534,8 @@ function PlantDatabaseModal({ plants, onClose, onSelect, selectedIds, imageStore
               className="flex items-center gap-1.5 px-3 py-1.5 md:px-4 md:py-2 rounded-xl border border-green-300 bg-green-50 text-xs md:text-sm text-green-700 hover:bg-green-100 font-medium whitespace-nowrap">
               <FileDown size={14} />匯出含圖片網址 CSV
             </button>
+            )}
+            {canManage && (
             <button
               onClick={() => { setShowPhotoManager(v => !v); setDetail(null) }}
               className={`flex items-center gap-1.5 px-3 py-1.5 md:px-4 md:py-2 rounded-xl border text-xs md:text-sm font-medium transition-colors relative whitespace-nowrap ${
@@ -2528,10 +2550,13 @@ function PlantDatabaseModal({ plants, onClose, onSelect, selectedIds, imageStore
                 </span>
               )}
             </button>
+            )}
+            {!forceOpen && (
             <button onClick={onClose}
               className="flex items-center gap-1.5 px-3 py-1.5 md:px-4 md:py-2 rounded-xl border border-stone-200 text-xs md:text-sm text-stone-600 hover:bg-stone-50 whitespace-nowrap">
               <X size={16} />關閉
             </button>
+            )}
           </div>
         </div>
 
@@ -2621,7 +2646,7 @@ function PlantDatabaseModal({ plants, onClose, onSelect, selectedIds, imageStore
               added={selectedIds.has(detail.id)}
               imageData={imageStore[detail.name]}
               onSaveImage={data => onSaveImage(detail.name, data)}
-              onDelete={onDeletePlant ? () => { onDeletePlant(detail.id); setDetail(null) } : undefined}
+              onDelete={canManage && onDeletePlant ? () => { onDeletePlant(detail.id); setDetail(null) } : undefined}
             />
           </div>
         )}
@@ -3008,6 +3033,20 @@ export default function LandscapeAdvisorPage({
     summary: string
   }>
 } = {}) {
+  const { profile, signOut } = useAuth()
+  const canReviewPdf = hasPermission(profile?.role, 'canReviewPdf')
+  const canReviewDxf = hasPermission(profile?.role, 'canReviewDxf')
+  const canUseAiPlanting = hasPermission(profile?.role, 'canUseAiPlanting')
+  const canManagePlants = hasPermission(profile?.role, 'canManagePlants')
+  const canExportPlantData = hasPermission(profile?.role, 'canExportReport')
+  const canViewPlantDatabase = hasPermission(profile?.role, 'canViewPlantDatabase')
+  const tabPermission: Record<'pdf' | 'landscape' | 'dxf' | 'advisor', boolean> = {
+    pdf: canReviewPdf, landscape: canUseAiPlanting, dxf: canReviewDxf, advisor: canUseAiPlanting,
+  }
+  // viewer 角色的樣貌：能看植栽資料庫，但完全沒有任何審查/配植功能——
+  // 用權限組合判斷（不寫死角色名稱），符合「集中式權限設定」原則，未來若有
+  // 其他角色是同樣的形狀，也會自動套用一樣的限制畫面。
+  const plantDbOnlyMode = canViewPlantDatabase && !canReviewPdf && !canReviewDxf && !canUseAiPlanting
   const [allPlants, setAllPlants] = useState<CsvPlantRecord[]>([])
   const [dbStatus, setDbStatus] = useState<'loading' | 'loaded' | 'empty'>('loading')
   const [selectedPlants, setSelectedPlants] = useState<SelectedCsvPlant[]>([])
@@ -3034,6 +3073,12 @@ export default function LandscapeAdvisorPage({
       if (importedZoneTable.length > 0) setActiveZoneName(importedZoneTable[0].zoneName)
     }
   }, [importedZoneTable])
+
+  // viewer（僅有 canViewPlantDatabase）登入後直接導向植栽資料庫，且不可關閉——
+  // 這是他們唯一能看到的畫面，不是「可選擇開啟」的一般彈窗。
+  useEffect(() => {
+    if (plantDbOnlyMode) setShowDb(true)
+  }, [plantDbOnlyMode])
 
   // ── DXF 分區審查資料（從 localStorage 讀取）──────────────────────────────────
   type StoredZone = {
@@ -3111,12 +3156,15 @@ export default function LandscapeAdvisorPage({
   const [imageStore, setImageStore] = useState<ImageStore>(() => loadImageStore())
 
   const handleSaveImage = useCallback((plantName: string, data: Partial<PlantImageData>) => {
+    // 防禦性檢查：UI 已經只在 canManagePlants 時顯示補圖管理入口，這裡再擋一次，
+    // 避免有其他呼叫路徑漏掉權限檢查（本機植栽資料庫沒有後端，這是能做到的最強保護）。
+    if (!canManagePlants) return
     setImageStore(prev => {
       const next = upsertPlantImage(prev, plantName, data)
       saveImageStore(next)
       return next
     })
-  }, [])
+  }, [canManagePlants])
 
   useEffect(() => {
     loadPlantsWithCsvMerge().then(res => {
@@ -3203,6 +3251,7 @@ export default function LandscapeAdvisorPage({
   }, [addPlant])
 
   const handleDeletePlant = useCallback((plantId: string) => {
+    if (!canManagePlants) return
     setAllPlants(prev => {
       const next = prev.filter(p => p.id !== plantId)
       const saved = savePlantsToStorage(next)
@@ -3212,9 +3261,10 @@ export default function LandscapeAdvisorPage({
       }
       return next
     })
-  }, [])
+  }, [canManagePlants])
 
   const handleCsvImported = (finalPlants: CsvPlantRecord[], mergeResult: MergeApplyResult, imageUrls: Record<string, string>): boolean => {
+    if (!canManagePlants) return false
     setAllPlants(finalPlants)
     const saved = savePlantsToStorage(finalPlants)
     if (!saved) {
@@ -3603,27 +3653,36 @@ tfoot{display:table-footer-group}
               </div>
             </div>
 
-            {/* Tab navigation — 桌機顯示，緊鄰 Logo */}
-            {onTabChange && (
+            {/* Tab navigation — 桌機顯示，緊鄰 Logo（僅有植栽資料庫檢視權限的帳號不顯示，
+                不是鎖住，而是整個拿掉——他們唯一能用的就是植栽資料庫） */}
+            {onTabChange && !plantDbOnlyMode && (
               <div className="hidden md:flex items-center bg-white rounded-xl p-1 gap-0.5 flex-shrink-0">
                 {([
                   { id: 'pdf'       as const, label: 'PDF 審圖' },
                   { id: 'landscape' as const, label: 'AI 配植評估' },
                   { id: 'dxf'       as const, label: 'DXF 審查' },
                   { id: 'advisor'   as const, label: 'AI 配植助理' },
-                ]).map(t => (
-                  <button key={t.id} onClick={() => onTabChange(t.id)}
-                    className={`relative px-5 py-2.5 rounded-lg text-[15px] font-semibold transition-colors whitespace-nowrap ${
-                      activeTab === t.id
+                ]).map(t => {
+                  const allowed = tabPermission[t.id]
+                  return (
+                  <button key={t.id} onClick={() => allowed && onTabChange(t.id)}
+                    disabled={!allowed}
+                    title={allowed ? undefined : '此帳號角色無法使用此功能'}
+                    className={`relative flex items-center gap-1.5 px-5 py-2.5 rounded-lg text-[15px] font-semibold transition-colors whitespace-nowrap ${
+                      !allowed
+                        ? 'text-stone-300 cursor-not-allowed'
+                        : activeTab === t.id
                         ? 'bg-[#1a4731] text-white shadow-sm'
                         : 'text-[#1a4731] hover:bg-green-50'
                     }`}>
+                    {!allowed && <Lock size={12} />}
                     {t.label}
-                    {activeTab === t.id && (
+                    {allowed && activeTab === t.id && (
                       <span className="absolute bottom-1.5 left-4 right-4 h-[2.5px] rounded-full bg-[#4ade80]" />
                     )}
                   </button>
-                ))}
+                  )
+                })}
               </div>
             )}
           </div>
@@ -3640,33 +3699,50 @@ tfoot{display:table-footer-group}
                <><AlertTriangle size={11} />未載入資料庫</>}
             </div>
             <div className="flex items-center gap-1.5 border-l border-white/20 pl-2">
-              <button onClick={() => setShowCsvImport(true)}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-white/10 border border-white/20 rounded-lg text-xs text-white hover:bg-white/20 transition-colors font-medium">
-                <Upload size={12} />匯入 CSV
-              </button>
-              <button onClick={() => setShowDb(true)} disabled={allPlants.length === 0}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
-                  allPlants.length > 0 ? 'bg-white/10 border-white/20 text-white hover:bg-white/20' : 'border-white/10 text-white/30 cursor-not-allowed'
-                }`}>
-                <Database size={12} />植栽資料庫
-              </button>
-            </div>
-            <div className="flex items-center gap-1.5 border-l border-white/20 pl-2">
-              <div className="flex flex-col items-end gap-0.5">
-                <button onClick={handleExportPdf} disabled={!result || pdfGenerating}
-                  className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
-                    result && !pdfGenerating ? 'bg-[#d8f3dc] text-[#1a4731] hover:bg-white' : 'bg-white/10 text-white/30 cursor-not-allowed'
-                  }`}>
-                  {pdfGenerating ? <RefreshCw size={12} className="animate-spin" /> : <FileOutput size={12} />}
-                  {pdfGenerating ? '產生中…' : '匯出 PDF'}
+              {canManagePlants && (
+                <button onClick={() => setShowCsvImport(true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-white/10 border border-white/20 rounded-lg text-xs text-white hover:bg-white/20 transition-colors font-medium">
+                  <Upload size={12} />匯入 CSV
                 </button>
-                {pdfGenError && <p className="text-[10px] text-red-300">{pdfGenError}</p>}
+              )}
+              {canViewPlantDatabase && (
+                <button onClick={() => setShowDb(true)} disabled={allPlants.length === 0}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+                    allPlants.length > 0 ? 'bg-white/10 border-white/20 text-white hover:bg-white/20' : 'border-white/10 text-white/30 cursor-not-allowed'
+                  }`}>
+                  <Database size={12} />植栽資料庫
+                </button>
+              )}
+            </div>
+            {canExportPlantData && (
+              <div className="flex items-center gap-1.5 border-l border-white/20 pl-2">
+                <div className="flex flex-col items-end gap-0.5">
+                  <button onClick={handleExportPdf} disabled={!result || pdfGenerating}
+                    className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                      result && !pdfGenerating ? 'bg-[#d8f3dc] text-[#1a4731] hover:bg-white' : 'bg-white/10 text-white/30 cursor-not-allowed'
+                    }`}>
+                    {pdfGenerating ? <RefreshCw size={12} className="animate-spin" /> : <FileOutput size={12} />}
+                    {pdfGenerating ? '產生中…' : '匯出 PDF'}
+                  </button>
+                  {pdfGenError && <p className="text-[10px] text-red-300">{pdfGenError}</p>}
+                </div>
+                <button onClick={handleExport} disabled={!result}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+                    result ? 'bg-white/10 border-white/20 text-white hover:bg-white/20' : 'border-white/10 text-white/30 cursor-not-allowed'
+                  }`}>
+                  <FileDown size={12} />txt
+                </button>
               </div>
-              <button onClick={handleExport} disabled={!result}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
-                  result ? 'bg-white/10 border-white/20 text-white hover:bg-white/20' : 'border-white/10 text-white/30 cursor-not-allowed'
-                }`}>
-                <FileDown size={12} />txt
+            )}
+            {/* 使用者資訊 + 登出 */}
+            <div className="flex items-center gap-2 border-l border-white/20 pl-2">
+              <div className="text-right leading-tight">
+                <p className="text-xs font-semibold text-white truncate max-w-[140px]">{profile?.displayName || profile?.email}</p>
+                {profile?.displayName && <p className="text-[10px] text-green-200/60 truncate max-w-[140px]">{profile.email}</p>}
+              </div>
+              <button onClick={() => signOut()} title="登出"
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white/10 border border-white/20 text-white hover:bg-white/20 transition-colors">
+                <LogOut size={13} />
               </button>
             </div>
           </div>
@@ -3674,21 +3750,25 @@ tfoot{display:table-footer-group}
           {/* 手機版右側：模式切換 + 工具下拉 */}
           <div className="flex md:hidden items-center gap-2">
             {/* 手機版 tab 切換 */}
-            {onTabChange && (
+            {onTabChange && !plantDbOnlyMode && (
               <div className="flex items-center bg-[#0f2d1d] rounded-lg p-0.5 gap-0.5">
                 {([
                   { id: 'pdf' as const, label: 'PDF' },
                   { id: 'landscape' as const, label: 'AI' },
                   { id: 'dxf' as const, label: 'DXF' },
                   { id: 'advisor' as const, label: '助理' },
-                ]).map(t => (
-                  <button key={t.id} onClick={() => onTabChange(t.id)}
+                ]).map(t => {
+                  const allowed = tabPermission[t.id]
+                  return (
+                  <button key={t.id} onClick={() => allowed && onTabChange(t.id)} disabled={!allowed}
                     className={`px-2.5 py-2 rounded-md text-xs font-medium transition-colors min-w-[44px] ${
-                      activeTab === t.id ? 'bg-[#2d6a4f] text-white' : 'text-green-300/80 hover:text-white'
+                      !allowed ? 'text-green-300/30 cursor-not-allowed'
+                        : activeTab === t.id ? 'bg-[#2d6a4f] text-white' : 'text-green-300/80 hover:text-white'
                     }`}>
                     {t.label}
                   </button>
-                ))}
+                  )
+                })}
               </div>
             )}
             {/* 工具下拉按鈕 */}
@@ -3707,22 +3787,39 @@ tfoot{display:table-footer-group}
                       {dbStatus === 'loaded' ? <CheckCircle size={14} /> : <AlertTriangle size={14} />}
                       {dbStatus === 'loaded' ? `${allPlants.length} 筆植栽資料庫` : '未載入資料庫'}
                     </div>
-                    <button onClick={() => { setShowDb(true); setShowMobileTools(false) }} disabled={allPlants.length === 0}
-                      className="w-full flex items-center gap-2 px-3 py-3 rounded-lg text-sm text-white hover:bg-white/10 transition-colors text-left min-h-[44px]">
-                      <Database size={14} />植栽資料庫
-                    </button>
-                    <button onClick={() => { setShowCsvImport(true); setShowMobileTools(false) }}
-                      className="w-full flex items-center gap-2 px-3 py-3 rounded-lg text-sm text-white hover:bg-white/10 transition-colors text-left min-h-[44px]">
-                      <Upload size={14} />匯入 CSV
-                    </button>
+                    {canViewPlantDatabase && (
+                      <button onClick={() => { setShowDb(true); setShowMobileTools(false) }} disabled={allPlants.length === 0}
+                        className="w-full flex items-center gap-2 px-3 py-3 rounded-lg text-sm text-white hover:bg-white/10 transition-colors text-left min-h-[44px]">
+                        <Database size={14} />植栽資料庫
+                      </button>
+                    )}
+                    {canManagePlants && (
+                      <button onClick={() => { setShowCsvImport(true); setShowMobileTools(false) }}
+                        className="w-full flex items-center gap-2 px-3 py-3 rounded-lg text-sm text-white hover:bg-white/10 transition-colors text-left min-h-[44px]">
+                        <Upload size={14} />匯入 CSV
+                      </button>
+                    )}
+                    {canExportPlantData && (
+                      <>
+                        <div className="h-px bg-white/10 mx-2" />
+                        <button onClick={() => { handleExportPdf(); setShowMobileTools(false) }} disabled={!result}
+                          className={`w-full flex items-center gap-2 px-3 py-3 rounded-lg text-sm transition-colors text-left min-h-[44px] ${result ? 'text-[#d8f3dc] hover:bg-white/10' : 'text-white/30 cursor-not-allowed'}`}>
+                          <FileOutput size={14} />匯出 PDF 報告
+                        </button>
+                        <button onClick={() => { handleExport(); setShowMobileTools(false) }} disabled={!result}
+                          className={`w-full flex items-center gap-2 px-3 py-3 rounded-lg text-sm transition-colors text-left min-h-[44px] ${result ? 'text-white hover:bg-white/10' : 'text-white/30 cursor-not-allowed'}`}>
+                          <FileDown size={14} />匯出 TXT
+                        </button>
+                      </>
+                    )}
                     <div className="h-px bg-white/10 mx-2" />
-                    <button onClick={() => { handleExportPdf(); setShowMobileTools(false) }} disabled={!result}
-                      className={`w-full flex items-center gap-2 px-3 py-3 rounded-lg text-sm transition-colors text-left min-h-[44px] ${result ? 'text-[#d8f3dc] hover:bg-white/10' : 'text-white/30 cursor-not-allowed'}`}>
-                      <FileOutput size={14} />匯出 PDF 報告
-                    </button>
-                    <button onClick={() => { handleExport(); setShowMobileTools(false) }} disabled={!result}
-                      className={`w-full flex items-center gap-2 px-3 py-3 rounded-lg text-sm transition-colors text-left min-h-[44px] ${result ? 'text-white hover:bg-white/10' : 'text-white/30 cursor-not-allowed'}`}>
-                      <FileDown size={14} />匯出 TXT
+                    <div className="px-3 py-2">
+                      <p className="text-xs font-semibold text-white truncate">{profile?.displayName || profile?.email}</p>
+                      {profile?.displayName && <p className="text-[10px] text-green-200/60 truncate">{profile.email}</p>}
+                    </div>
+                    <button onClick={() => { signOut(); setShowMobileTools(false) }}
+                      className="w-full flex items-center gap-2 px-3 py-3 rounded-lg text-sm text-white hover:bg-white/10 transition-colors text-left min-h-[44px]">
+                      <LogOut size={14} />登出
                     </button>
                   </div>
                 </div>
@@ -3737,8 +3834,9 @@ tfoot{display:table-footer-group}
         )}
       </header>
 
-      {/* 主體內容 — 只在 AI 配植評估分頁顯示 */}
-      {activeTab === 'landscape' && <div className="min-h-screen" style={{ background: 'radial-gradient(circle at 85% 15%, rgba(121,190,140,0.16) 0%, transparent 30%), radial-gradient(circle at 20% 85%, rgba(183,220,190,0.18) 0%, transparent 35%), linear-gradient(135deg, #f7faf5 0%, #eef6ef 48%, #e5f1e8 100%)' }}>
+      {/* 主體內容 — 只在 AI 配植評估分頁顯示，且帳號角色需有 canUseAiPlanting 權限 */}
+      {activeTab === 'landscape' && !canUseAiPlanting && <NoPermissionNotice featureName="AI 配植評估" />}
+      {activeTab === 'landscape' && canUseAiPlanting && <div className="min-h-screen" style={{ background: 'radial-gradient(circle at 85% 15%, rgba(121,190,140,0.16) 0%, transparent 30%), radial-gradient(circle at 20% 85%, rgba(183,220,190,0.18) 0%, transparent 35%), linear-gradient(135deg, #f7faf5 0%, #eef6ef 48%, #e5f1e8 100%)' }}>
 
       {/* No DB banner (outside main grid so it stays at top) */}
       {dbStatus === 'empty' && (
@@ -3747,12 +3845,16 @@ tfoot{display:table-footer-group}
             <AlertTriangle size={20} className="text-amber-500 flex-shrink-0" />
             <div className="flex-1">
               <p className="text-sm font-semibold text-stone-800">尚未載入植栽資料庫</p>
-              <p className="text-xs text-stone-500 mt-0.5">請點擊「匯入 CSV」上傳植栽資料庫，或將 plantdb.csv 放置於 public 目錄。</p>
+              <p className="text-xs text-stone-500 mt-0.5">
+                {canManagePlants ? '請點擊「匯入 CSV」上傳植栽資料庫，或將 plantdb.csv 放置於 public 目錄。' : '請聯繫系統管理者匯入植栽資料庫。'}
+              </p>
             </div>
-            <button onClick={() => setShowCsvImport(true)}
-              className="px-4 py-2 rounded-xl bg-amber-600 text-white text-sm font-medium hover:bg-amber-700 flex-shrink-0">
-              立即匯入
-            </button>
+            {canManagePlants && (
+              <button onClick={() => setShowCsvImport(true)}
+                className="px-4 py-2 rounded-xl bg-amber-600 text-white text-sm font-medium hover:bg-amber-700 flex-shrink-0">
+                立即匯入
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -4416,9 +4518,13 @@ tfoot{display:table-footer-group}
           imageStore={imageStore}
           onSaveImage={handleSaveImage}
           onDeletePlant={handleDeletePlant}
+          canManage={canManagePlants}
+          canExport={canExportPlantData}
+          forceOpen={plantDbOnlyMode}
+          restrictedNotice={plantDbOnlyMode ? '此帳號僅有植栽資料查看權限' : undefined}
         />
       )}
-      {showCsvImport && (
+      {showCsvImport && canManagePlants && (
         <CsvImportModal onClose={() => setShowCsvImport(false)} existingPlants={allPlants} onApply={handleCsvImported} />
       )}
       {showSimilarModal && (
