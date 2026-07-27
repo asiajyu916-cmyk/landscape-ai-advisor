@@ -541,6 +541,71 @@ export function distToPolygonEdge(
   return Math.sqrt(minSq)
 }
 
+// ── 線段最短距離 / 多邊形邊對邊最短距離（供空間鄰近判斷，見 plantProximity.ts）─────
+
+function orientation(px: number, py: number, qx: number, qy: number, rx: number, ry: number): number {
+  const val = (qy - py) * (rx - qx) - (qx - px) * (ry - qy)
+  if (Math.abs(val) < 1e-9) return 0
+  return val > 0 ? 1 : 2
+}
+
+function onSegment(px: number, py: number, qx: number, qy: number, rx: number, ry: number): boolean {
+  return qx <= Math.max(px, rx) + 1e-9 && qx >= Math.min(px, rx) - 1e-9 &&
+         qy <= Math.max(py, ry) + 1e-9 && qy >= Math.min(py, ry) - 1e-9
+}
+
+function segmentsIntersect(
+  ax: number, ay: number, bx: number, by: number,
+  cx: number, cy: number, dx: number, dy: number,
+): boolean {
+  const o1 = orientation(ax, ay, bx, by, cx, cy)
+  const o2 = orientation(ax, ay, bx, by, dx, dy)
+  const o3 = orientation(cx, cy, dx, dy, ax, ay)
+  const o4 = orientation(cx, cy, dx, dy, bx, by)
+  if (o1 !== o2 && o3 !== o4) return true
+  if (o1 === 0 && onSegment(ax, ay, cx, cy, bx, by)) return true
+  if (o2 === 0 && onSegment(ax, ay, dx, dy, bx, by)) return true
+  if (o3 === 0 && onSegment(cx, cy, ax, ay, dx, dy)) return true
+  if (o4 === 0 && onSegment(cx, cy, bx, by, dx, dy)) return true
+  return false
+}
+
+/** 兩線段最短距離：相交（含端點相接）回傳 0，否則為四個端點分別到對方線段的最短距離 */
+export function segmentDistance(
+  ax: number, ay: number, bx: number, by: number,
+  cx: number, cy: number, dx: number, dy: number,
+): number {
+  if (segmentsIntersect(ax, ay, bx, by, cx, cy, dx, dy)) return 0
+  return Math.min(
+    Math.sqrt(distSqToSegment(ax, ay, cx, cy, dx, dy)),
+    Math.sqrt(distSqToSegment(bx, by, cx, cy, dx, dy)),
+    Math.sqrt(distSqToSegment(cx, cy, ax, ay, bx, by)),
+    Math.sqrt(distSqToSegment(dx, dy, ax, ay, bx, by)),
+  )
+}
+
+/**
+ * 兩多邊形邊界最短距離（邊對邊，非中心點距離）。兩者有任一邊相交（含重疊、包含）時
+ * 回傳 0——精確的「是否重疊」判斷仍應優先用 polygon-clipping 的真交集（見
+ * plantProximity.ts 的 ringsOverlap），此函式只保證「距離 0」在相交情形下成立，
+ * 不用於區分「邊相交」與「A 完全包含在 B 內部（無邊相交）」。
+ */
+export function polygonMinDistance(
+  a: Array<{ x: number; y: number }>,
+  b: Array<{ x: number; y: number }>,
+): number {
+  let minDist = Infinity
+  const na = a.length; const nb = b.length
+  for (let i = 0, j = na - 1; i < na; j = i++) {
+    for (let k = 0, l = nb - 1; k < nb; l = k++) {
+      const d = segmentDistance(a[j].x, a[j].y, a[i].x, a[i].y, b[l].x, b[l].y, b[k].x, b[k].y)
+      if (d < minDist) minDist = d
+      if (minDist === 0) return 0
+    }
+  }
+  return minDist
+}
+
 // 分區定義圖層（此層的封閉線是分區邊界，不是植栽面）
 const ZONE_DEF_LAYER_RE = /AREA|區域定義|區域|分區|ZONE/i
 
@@ -615,78 +680,26 @@ export function checkPositionInZone(
   return { inZone: false, method: 'none' }
 }
 
-export function buildZonePlantList(
+export interface AreaAssign { zoneIdx: number; ratio: number; cross: boolean }
+
+export interface AreaDebugRow {
+  id: number; source: string; layer: string; pattern: string
+  hatchSamples: number; bestZone: string; bestRatio: number
+  status: string; reason: string
+}
+
+/**
+ * 面狀植栽（HATCH/LWPOLYLINE/POLYLINE）逐一指派歸屬分區（pre-dedup，未合併同特徵
+ * loop——不同 DXF 實體即使 layer/pattern/scale/angle/color 全部相同，仍各自保留一筆）。
+ * buildZonePlantList 在此基礎上再做「同分區同特徵去重」供其既有 UI 消費；需要逐一
+ * 物理實體幾何的呼叫端（如 plantProximity.ts 的空間鄰近判斷）必須直接使用這裡回傳的
+ * pre-dedup 結果，不可使用已去重的版本，否則會把不相連的獨立種植區誤合併成一個範圍。
+ */
+export function assignAreasToZones(
   zones: DetectedZone[],
-  mappings: MappedItem[],
   polygons: DxfPolygon[],
-  inserts?: DxfInsert[],
-  blockExtents?: Record<string, BlockExtent>,
   scope?: AnalysisScope,
-): ZonePlantList[] {
-  // 建立 INSERT 快速查詢表：blockName → INSERT 清單（按座標匹配）
-  const insertsByBlock = new Map<string, DxfInsert[]>()
-  for (const ins of (inserts ?? [])) {
-    const arr = insertsByBlock.get(ins.blockName) ?? []
-    arr.push(ins)
-    insertsByBlock.set(ins.blockName, arr)
-  }
-
-  // ── Pass 0：歸屬追蹤 + 每棵樹 debug 資料 + 圖面 extents ──────────────────────
-  // 圖面 extents：迴圈計算（block 展開後多邊形可達數萬個、頂點數十萬，
-  // spread 版 Math.min(...) 會拋 RangeError 導致整個 zonePlantList 為空）。
-  let dwgMinX = Infinity; let dwgMinY = Infinity
-  let dwgMaxX = -Infinity; let dwgMaxY = -Infinity
-  for (const p of polygons) {
-    for (const v of p.vertices) {
-      if (v.x < dwgMinX) dwgMinX = v.x
-      if (v.y < dwgMinY) dwgMinY = v.y
-      if (v.x > dwgMaxX) dwgMaxX = v.x
-      if (v.y > dwgMaxY) dwgMaxY = v.y
-    }
-  }
-  for (const ins of (inserts ?? [])) {
-    if (ins.x < dwgMinX) dwgMinX = ins.x
-    if (ins.y < dwgMinY) dwgMinY = ins.y
-    if (ins.x > dwgMaxX) dwgMaxX = ins.x
-    if (ins.y > dwgMaxY) dwgMaxY = ins.y
-  }
-  if (!isFinite(dwgMinX)) { dwgMinX = 0; dwgMinY = 0; dwgMaxX = 0; dwgMaxY = 0 }
-  const dwgWidth = dwgMaxX - dwgMinX
-  void dwgMaxY  // extents 完整保留供未來使用
-  // 最近分區距離上限：圖面寬度 5%（樹冠邊緣到分區邊界的最大允許間距）
-  const NEAREST_ZONE_MAX_GAP = dwgWidth * 0.05
-
-  const posKey = (blockName: string, pos: { x: number; y: number }) =>
-    `${blockName}|${pos.x.toFixed(3)}|${pos.y.toFixed(3)}`
-  const assignedPosKeys = new Set<string>()
-
-  interface TreeDebugRow {
-    blockName: string; plantName?: string
-    rawX: number; rawY: number          // INSERT 世界座標（OCS 鏡射已在 parser 正規化）
-    normX: number; normY: number        // normalized（扣 drawing extents min）
-    bboxCX?: number; bboxCY?: number    // 樹冠 bbox 中心（世界座標）
-    canopyR?: number                    // 樹冠世界半徑
-    zoneName: string; method: string; gapDist: number
-  }
-  const debugRows: TreeDebugRow[] = []
-  const makeDebugRow = (
-    m: MappedItem, pos: { x: number; y: number },
-    ins: DxfInsert | undefined, extent: BlockExtent | undefined,
-    zoneName: string, method: string, gapDist: number,
-  ): TreeDebugRow => {
-    const center = (ins && extent)
-      ? computeWorldCenter(ins.x, ins.y, ins.scaleX, ins.scaleY, ins.rotation, extent)
-      : undefined
-    return {
-      blockName: m.blockName, plantName: m.plantName,
-      rawX: pos.x, rawY: pos.y,
-      normX: pos.x - dwgMinX, normY: pos.y - dwgMinY,
-      bboxCX: center?.x, bboxCY: center?.y,
-      canopyR: (ins && extent) ? canopyWorldRadius(ins, extent) : undefined,
-      zoneName, method, gapDist,
-    }
-  }
-
+): { areaAssign: Map<DxfPolygon, AreaAssign[]>; areaDebug: AreaDebugRow[] } {
   // ── 面狀植栽歸區 Pre-pass（全分區共用）──────────────────────────────────────
   // 雙指標：
   //   hatchRatio   = 交集面積 / HATCH 自身面積 → 決定唯一「主要歸屬區」
@@ -702,13 +715,8 @@ export function buildZonePlantList(
   const zoneBBs = zoneBVs.map(bv => bv.length >= 3 ? polygonBBox(bv) : null)
   const zoneSamples = zoneBVs.map(bv => bv.length >= 3 ? samplePolygonPoints(bv) : [])
 
-  interface AreaAssign { zoneIdx: number; ratio: number; cross: boolean }
   const areaAssign = new Map<DxfPolygon, AreaAssign[]>()
-  const areaDebug: Array<{
-    id: number; source: string; layer: string; pattern: string
-    hatchSamples: number; bestZone: string; bestRatio: number
-    status: string; reason: string
-  }> = []
+  const areaDebug: AreaDebugRow[] = []
 
   // 植栽圖層 HATCH 分組（同 layer+pattern = 同一種植栽的多個 loop）：
   // 供「分組聯合覆蓋率」使用 — 分區被同種植栽的多個小 loop 拼滿時，
@@ -828,6 +836,84 @@ export function buildZonePlantList(
       }
     }
   }
+
+  return { areaAssign, areaDebug }
+}
+
+export function buildZonePlantList(
+  zones: DetectedZone[],
+  mappings: MappedItem[],
+  polygons: DxfPolygon[],
+  inserts?: DxfInsert[],
+  blockExtents?: Record<string, BlockExtent>,
+  scope?: AnalysisScope,
+): ZonePlantList[] {
+  // 建立 INSERT 快速查詢表：blockName → INSERT 清單（按座標匹配）
+  const insertsByBlock = new Map<string, DxfInsert[]>()
+  for (const ins of (inserts ?? [])) {
+    const arr = insertsByBlock.get(ins.blockName) ?? []
+    arr.push(ins)
+    insertsByBlock.set(ins.blockName, arr)
+  }
+
+  // ── Pass 0：歸屬追蹤 + 每棵樹 debug 資料 + 圖面 extents ──────────────────────
+  // 圖面 extents：迴圈計算（block 展開後多邊形可達數萬個、頂點數十萬，
+  // spread 版 Math.min(...) 會拋 RangeError 導致整個 zonePlantList 為空）。
+  let dwgMinX = Infinity; let dwgMinY = Infinity
+  let dwgMaxX = -Infinity; let dwgMaxY = -Infinity
+  for (const p of polygons) {
+    for (const v of p.vertices) {
+      if (v.x < dwgMinX) dwgMinX = v.x
+      if (v.y < dwgMinY) dwgMinY = v.y
+      if (v.x > dwgMaxX) dwgMaxX = v.x
+      if (v.y > dwgMaxY) dwgMaxY = v.y
+    }
+  }
+  for (const ins of (inserts ?? [])) {
+    if (ins.x < dwgMinX) dwgMinX = ins.x
+    if (ins.y < dwgMinY) dwgMinY = ins.y
+    if (ins.x > dwgMaxX) dwgMaxX = ins.x
+    if (ins.y > dwgMaxY) dwgMaxY = ins.y
+  }
+  if (!isFinite(dwgMinX)) { dwgMinX = 0; dwgMinY = 0; dwgMaxX = 0; dwgMaxY = 0 }
+  const dwgWidth = dwgMaxX - dwgMinX
+  void dwgMaxY  // extents 完整保留供未來使用
+  // 最近分區距離上限：圖面寬度 5%（樹冠邊緣到分區邊界的最大允許間距）
+  const NEAREST_ZONE_MAX_GAP = dwgWidth * 0.05
+
+  const posKey = (blockName: string, pos: { x: number; y: number }) =>
+    `${blockName}|${pos.x.toFixed(3)}|${pos.y.toFixed(3)}`
+  const assignedPosKeys = new Set<string>()
+
+  interface TreeDebugRow {
+    blockName: string; plantName?: string
+    rawX: number; rawY: number          // INSERT 世界座標（OCS 鏡射已在 parser 正規化）
+    normX: number; normY: number        // normalized（扣 drawing extents min）
+    bboxCX?: number; bboxCY?: number    // 樹冠 bbox 中心（世界座標）
+    canopyR?: number                    // 樹冠世界半徑
+    zoneName: string; method: string; gapDist: number
+  }
+  const debugRows: TreeDebugRow[] = []
+  const makeDebugRow = (
+    m: MappedItem, pos: { x: number; y: number },
+    ins: DxfInsert | undefined, extent: BlockExtent | undefined,
+    zoneName: string, method: string, gapDist: number,
+  ): TreeDebugRow => {
+    const center = (ins && extent)
+      ? computeWorldCenter(ins.x, ins.y, ins.scaleX, ins.scaleY, ins.rotation, extent)
+      : undefined
+    return {
+      blockName: m.blockName, plantName: m.plantName,
+      rawX: pos.x, rawY: pos.y,
+      normX: pos.x - dwgMinX, normY: pos.y - dwgMinY,
+      bboxCX: center?.x, bboxCY: center?.y,
+      canopyR: (ins && extent) ? canopyWorldRadius(ins, extent) : undefined,
+      zoneName, method, gapDist,
+    }
+  }
+
+  // 逐一實體歸屬分區（pre-dedup；見 assignAreasToZones 說明）
+  const { areaAssign, areaDebug } = assignAreasToZones(zones, polygons, scope)
 
   // ── 同分區同特徵去重：多 loop HATCH（如鋪面格 321 loop）在同區只留代表一筆 ──
   // key = zone|layer|pattern|scale|angle|color；保留 ratio 最高者

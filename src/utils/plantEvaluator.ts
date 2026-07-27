@@ -3,6 +3,7 @@
 
 import { waterScore, sunConflictLevel, drainageConflictLevel } from '@/utils/csvParser'
 import type { CsvPlantRecord, SelectedCsvPlant } from '@/types/csvPlant'
+import type { RiskLevel } from '@/types/dxf'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -34,12 +35,42 @@ export interface EvalResult {
   aiSuggestion: string
   adjustmentPlan: string[]
   reviewText: string
+  /** 空間鄰近衝突彙整專用（見 aggregatePairConflictsToEvalResult）：跟 score 分開顯示的
+   * 整體風險等級，答的是「需不需要優先處理」，score 答的是「整體配置健康度」——
+   * 只要有嚴重配對，風險等級就是「高」，即使 score 因為多數配對通過而不算太低。
+   * evaluate() 產生的 EvalResult 不填這個欄位。 */
+  overallRiskLevel?: '高' | '中' | '低'
 }
 
 // ── Core evaluate ─────────────────────────────────────────────────────────────
 
 function makeIssue(category: string, level: IssueLevel, cause: string, impact: string, suggestion: string): IssueDetail {
   return { category, level, cause, impact, suggestion }
+}
+
+const CATEGORY_DEFS = [
+  { key: '澆水衝突',    okSummary: '植栽水分需求一致，澆灌管理無衝突。' },
+  { key: '排水衝突',    okSummary: '排水需求相容，無設計調整需求。' },
+  { key: '日照問題',    okSummary: '日照條件相容，不需分區配置。' },
+  { key: '維護風險',    okSummary: '維護頻率相近，養護管理負擔低。' },
+  { key: '根系風險',    okSummary: '根系尺度相近，生長競爭風險低。' },
+  { key: '養護管理風險', okSummary: '整體養護管理負擔低。' },
+  { key: '土壤酸鹼衝突', okSummary: '土壤 pH 需求相容，無酸鹼衝突。' },
+  { key: '土壤改良需求', okSummary: '無需特殊客土改良。' },
+  { key: '土壤質地衝突', okSummary: '土壤質地需求相容。' },
+  { key: '審查疑義風險', okSummary: '配置說明完整，審查疑義低。' },
+]
+
+function categoriesFromIssues(issues: IssueDetail[]): CatSummary[] {
+  return CATEGORY_DEFS.map(c => {
+    const matched = issues.filter(i => i.category === c.key)
+    const maxLevel: IssueLevel = matched.some(i => i.level === 'danger') ? 'danger' : matched.some(i => i.level === 'caution') ? 'caution' : 'ok'
+    return {
+      key: c.key, label: c.key, count: matched.length, level: maxLevel,
+      statusLabel: maxLevel === 'danger' ? '高風險' : maxLevel === 'caution' ? '需注意' : '未發現',
+      summary: matched.length > 0 ? matched[0].cause.slice(0, 40) + '…' : c.okSummary,
+    }
+  })
 }
 
 export function evaluate(plants: SelectedCsvPlant[], allPlants: CsvPlantRecord[]): EvalResult {
@@ -216,27 +247,7 @@ export function evaluate(plants: SelectedCsvPlant[], allPlants: CsvPlantRecord[]
   else if (score >= 40) compatLevel = '需調整配置'
   else                  compatLevel = '高風險不建議'
 
-  const catDefs = [
-    { key: '澆水衝突',    okSummary: '植栽水分需求一致，澆灌管理無衝突。' },
-    { key: '排水衝突',    okSummary: '排水需求相容，無設計調整需求。' },
-    { key: '日照問題',    okSummary: '日照條件相容，不需分區配置。' },
-    { key: '維護風險',    okSummary: '維護頻率相近，養護管理負擔低。' },
-    { key: '根系風險',    okSummary: '根系尺度相近，生長競爭風險低。' },
-    { key: '養護管理風險', okSummary: '整體養護管理負擔低。' },
-    { key: '土壤酸鹼衝突', okSummary: '土壤 pH 需求相容，無酸鹼衝突。' },
-    { key: '土壤改良需求', okSummary: '無需特殊客土改良。' },
-    { key: '土壤質地衝突', okSummary: '土壤質地需求相容。' },
-    { key: '審查疑義風險', okSummary: '配置說明完整，審查疑義低。' },
-  ]
-  const categories: CatSummary[] = catDefs.map(c => {
-    const matched = issues.filter(i => i.category === c.key)
-    const maxLevel: IssueLevel = matched.some(i => i.level === 'danger') ? 'danger' : matched.some(i => i.level === 'caution') ? 'caution' : 'ok'
-    return {
-      key: c.key, label: c.key, count: matched.length, level: maxLevel,
-      statusLabel: maxLevel === 'danger' ? '高風險' : maxLevel === 'caution' ? '需注意' : '未發現',
-      summary: matched.length > 0 ? matched[0].cause.slice(0, 40) + '…' : c.okSummary,
-    }
-  })
+  const categories: CatSummary[] = categoriesFromIssues(issues)
 
   const allDanger  = issues.filter(i => i.level === 'danger')
   const allCaution = issues.filter(i => i.level === 'caution')
@@ -287,4 +298,87 @@ export function evaluate(plants: SelectedCsvPlant[], allPlants: CsvPlantRecord[]
 
   void allPlants // 保留參數以維持與 LandscapeAdvisorPage 相同介面
   return { score, compatLevel, categories, issues, aiSuggestion, adjustmentPlan, reviewText }
+}
+
+// ── 逐對（空間鄰近）評估 ─────────────────────────────────────────────────────
+// 供 plantProximity.ts 的空間鄰近管線使用：只評估「這一對」植物是否相容，而不是
+// 整區所有已比對植物的 min/max 落差——直接重用 evaluate()（傳入恰好 2 株植物的
+// 陣列，此時 min/max 落差就等於這兩株植物本身的落差），沿用同一套水分/日照/排水/
+// 土壤/維護/根系等既有門檻邏輯，不重寫比對規則，只改變「誰跟誰比」。
+
+function toSelectedPlant(p: CsvPlantRecord, instanceId: string): SelectedCsvPlant {
+  return { ...p, instanceId, status: '可用' }
+}
+
+export function evaluatePlantPair(a: CsvPlantRecord, b: CsvPlantRecord, allPlants: CsvPlantRecord[]): EvalResult {
+  return evaluate([toSelectedPlant(a, 'pair-a'), toSelectedPlant(b, 'pair-b')], allPlants)
+}
+
+/**
+ * 把逐對空間鄰近衝突結果彙整回既有 EvalResult 形狀，讓既有分數／類別 UI
+ * （DxfReviewPage.tsx 的分區審查摘要）不需大改。彙整方式：合併所有鄰近對
+ * 的 issues（依 category+cause 去重，避免同一種衝突原因因出現在多對植物
+ * 而重複列出），再依 danger/caution 數量重新計分。
+ */
+export function aggregatePairConflictsToEvalResult(
+  pairs: Array<{ issues: IssueDetail[]; riskLevel: RiskLevel }>,
+): EvalResult {
+  const issues: IssueDetail[] = []
+  const seen = new Set<string>()
+  for (const pair of pairs) {
+    for (const issue of pair.issues) {
+      const key = `${issue.category}|${issue.cause}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      issues.push(issue)
+    }
+  }
+
+  // ── 加權扣分制（取代舊的逐項扣分：dangerCnt*15 + cautionCnt*7 沒有上限，
+  // 配對一多、去重後的 danger/caution 類別數稍微超過 6~7 項就會把分數打到 0，
+  // 跟「只有 2 項高風險」的實際情況觀感不成比例）。改以配對數為分母算加權
+  // 比例：嚴重配對計 0 分、警示配對計半分、已通過配對計滿分，score 天生就落在
+  // 0~100 之間，不需要 clamp，也不會因配對數變多而輕易歸零。
+  const severeCnt = pairs.filter(p => p.riskLevel === 'high').length
+  const warningCnt = pairs.filter(p => p.riskLevel === 'medium').length
+  const passedCnt = pairs.filter(p => p.riskLevel === 'low' || p.riskLevel === 'unmatched').length
+  const totalCnt = severeCnt + warningCnt + passedCnt
+
+  const score = totalCnt === 0
+    ? 100
+    : Math.round(((severeCnt * 0 + warningCnt * 0.5 + passedCnt * 1) / totalCnt) * 100)
+
+  let compatLevel: CompatLevel
+  if (score >= 80) compatLevel = '配置良好'
+  else if (score >= 60) compatLevel = '可行但需補充說明'
+  else if (score >= 40) compatLevel = '需調整配置'
+  else compatLevel = '高風險不建議'
+
+  // 風險等級跟 score 是兩條獨立資訊（雙軌顯示）：score 答「整體配置健康度」，
+  // 風險等級答「需不需要優先處理」——只要有嚴重配對就是「高」，不會因為多數
+  // 配對已通過、score 被拉高而被稀釋掉「這裡有緊急問題」的訊號。
+  const overallRiskLevel: '高' | '中' | '低' = severeCnt > 0 ? '高' : warningCnt > 0 ? '中' : '低'
+
+  const categories = categoriesFromIssues(issues)
+
+  let aiSuggestion: string
+  if (totalCnt === 0) {
+    aiSuggestion = '本分區內空間鄰近植物配置相容性良好，鄰近範圍內未發現明顯衝突。'
+  } else if (severeCnt > 0) {
+    const cats = [...new Set(issues.filter(i => i.level === 'danger').map(i => i.category))].join('、')
+    aiSuggestion = `風險等級：高；整體評分：${score}；原因：高風險 ${severeCnt} 項、警示 ${warningCnt} 項、通過 ${passedCnt} 項${cats ? `（高風險類別：${cats}）` : ''}。建議於提送審查前優先調整高風險配對。`
+  } else if (warningCnt > 0) {
+    aiSuggestion = `風險等級：中；整體評分：${score}；警示 ${warningCnt} 項、通過 ${passedCnt} 項。整體可行，建議補充養護說明降低審查疑義。`
+  } else {
+    aiSuggestion = `風險等級：低；整體評分：${score}；${passedCnt} 項配對皆已通過檢討。`
+  }
+
+  const adjustmentPlan = [...new Set(issues.map(i => i.suggestion))]
+  if (adjustmentPlan.length === 0) adjustmentPlan.push('維持現有配置，施工前確認種植間距與覆土深度符合各植栽需求')
+
+  const reviewText = totalCnt === 0
+    ? `本分區空間鄰近衝突檢討結果為「配置良好」（風險等級：低；整體評分：${score}），鄰近植物之間未發現明顯衝突。`
+    : `本分區空間鄰近衝突檢討結果──風險等級：${overallRiskLevel}；整體評分：${score}；原因：高風險 ${severeCnt} 項、警示 ${warningCnt} 項、通過 ${passedCnt} 項。\n\n${issues.map(i => `${i.category}：${i.cause}`).join('\n')}\n\n修正方向：\n${adjustmentPlan.map(p => `• ${p}`).join('\n')}`
+
+  return { score, compatLevel, categories, issues, aiSuggestion, adjustmentPlan, reviewText, overallRiskLevel }
 }

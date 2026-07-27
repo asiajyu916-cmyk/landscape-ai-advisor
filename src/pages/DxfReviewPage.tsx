@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useMemo, useEffect, Fragment } from 'react'
+import { createPortal } from 'react-dom'
 import {
   Upload, FileText, AlertTriangle, CheckCircle, HelpCircle,
   ChevronDown, X, ArrowRight, Layers, Trash2, BookOpen, Table2, FileOutput, FileDown,
@@ -9,8 +10,9 @@ import type { ZoneAssignDebug, AnalysisScope } from '@/utils/spatialAnalysis'
 import { buildZoneStatistics, unitFromInsUnits } from '@/utils/zoneStatistics'
 import { exportZoneReviewPdf } from '@/utils/exportReviewPdf'
 import type { ZoneReviewPdfData } from '@/utils/exportReviewPdf'
-import { evaluate } from '@/utils/plantEvaluator'
+import { aggregatePairConflictsToEvalResult } from '@/utils/plantEvaluator'
 import type { EvalResult } from '@/utils/plantEvaluator'
+import { computeZonePlantConflicts } from '@/utils/plantProximity'
 import { loadPlantsFromStorage, savePlantsToStorage, loadPlantsWithCsvMerge } from '@/data/plantStore'
 import { searchPlantAllTiers, searchResultToDraft } from '@/utils/plantSearchClient'
 import { existsExactInLocalDatabase, normalizeLayerToken, buildLayerPlantKeywordMap, findPlantsByLayerName, normalizeScientificName } from '@/utils/plantNameMatch'
@@ -18,12 +20,16 @@ import { persistConfirmedPlant } from '@/services/plantCloudService'
 import type { PlantSearchResult, DraftPlantRecord } from '@/types/plantSearch'
 import { PLANT_DATA_SOURCE_LABELS } from '@/types/plantSearch'
 import PlantAutoAddModal from '@/components/modals/PlantAutoAddModal'
+import ProximityConflictCard from '@/components/dxf/ProximityConflictCard'
+import { classifyCategory, CATEGORY_GROUP_META, CATEGORY_GROUP_ORDER, buildCategoryResults, type IssueCategoryGroup } from '@/utils/issueCategoryMeta'
+import DrawingLocatorModal from '@/components/dxf/DrawingLocatorModal'
+import AiAdvisorDrawer from '@/components/dxf/AiAdvisorDrawer'
 import {
   loadDxfRules, upsertDxfRule, deleteDxfRule, clearAllDxfRules,
   loadSessionRules, upsertSessionRule,
   isNonPlant, readDxfWithEncoding,
 } from '@/data/dxfMappingStore'
-import type { DxfParseResult, DxfText, MappedItem, MatchStatus, MultiLayerResult, MultiLayerJudgment, PlantSchedule, PlantScheduleEntry, ZoneType, DetectedZone, ZonePlantList, DrawingUnit, ZoneStatisticsResult } from '@/types/dxf'
+import type { DxfParseResult, DxfInsert, DxfText, MappedItem, MatchStatus, MultiLayerResult, MultiLayerJudgment, PlantSchedule, PlantScheduleEntry, ZoneType, DetectedZone, ZonePlantList, DrawingUnit, ZoneStatisticsResult, BlockExtent, PlantConflictResult, SpatialPlantInstance, TreeInventoryItem, RiskLevel } from '@/types/dxf'
 import type { CsvPlantRecord, SelectedCsvPlant } from '@/types/csvPlant'
 import type { DxfBlockRule } from '@/data/dxfMappingStore'
 
@@ -422,6 +428,236 @@ function MultiLayerBadge({ judgment }: { judgment: MultiLayerJudgment }) {
   )
 }
 
+// ── 空間鄰近式衝突檢討：UI ─────────────────────────────────────────────────────
+
+/** 分類篩選（澆水/排水/日照/養護）與風險篩選各自獨立、可同時套用 */
+function CategoryFilterBar({ filter, onChange, counts, total }: {
+  filter: 'all' | IssueCategoryGroup
+  onChange: (f: 'all' | IssueCategoryGroup) => void
+  counts: Record<IssueCategoryGroup, number>
+  total: number
+}) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      <button
+        type="button" onClick={() => onChange('all')}
+        className={`px-3.5 py-1.5 rounded-full text-base font-semibold border transition-colors ${
+          filter === 'all'
+            ? 'bg-green-600 border-green-600 text-white'
+            : 'bg-white border-stone-300 text-stone-600 hover:bg-stone-50'
+        }`}
+      >
+        全部 {total}
+      </button>
+      {CATEGORY_GROUP_ORDER.map(group => {
+        const meta = CATEGORY_GROUP_META[group]
+        const active = filter === group
+        return (
+          <button
+            key={group} type="button" onClick={() => onChange(group)}
+            className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-base font-semibold border transition-colors ${
+              active ? `${meta.bgCls} border-transparent text-stone-800` : 'bg-white border-stone-300 text-stone-600 hover:bg-stone-50'
+            }`}
+          >
+            <meta.icon size={16} className={meta.iconCls} />
+            {meta.label} {counts[group]}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+type RiskFilterKey = 'all' | 'severe' | 'warning' | 'passed'
+
+function RiskFilterBar({ filter, onChange, stats }: {
+  filter: RiskFilterKey
+  onChange: (f: RiskFilterKey) => void
+  stats: { total: number; severe: number; warning: number; passed: number }
+}) {
+  const options: Array<{ key: RiskFilterKey; label: string }> = [
+    { key: 'all', label: '全部' },
+    { key: 'severe', label: '嚴重' },
+    { key: 'warning', label: '警示' },
+    { key: 'passed', label: '通過' },
+  ]
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap gap-2">
+        {options.map(opt => (
+          <button
+            key={opt.key} type="button" onClick={() => onChange(opt.key)}
+            className={`px-3.5 py-1.5 rounded-full text-base font-semibold border transition-colors ${
+              filter === opt.key
+                ? 'bg-green-600 border-green-600 text-white'
+                : 'bg-white border-stone-300 text-stone-600 hover:bg-stone-50'
+            }`}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+      <p className="text-sm text-stone-500">
+        有效相鄰配對 {stats.total} 組　嚴重 {stats.severe}｜警示 {stats.warning}｜通過 {stats.passed}
+      </p>
+    </div>
+  )
+}
+
+function TreeInventoryTable({ items, limit = 4 }: { items: TreeInventoryItem[]; limit?: number }) {
+  const [expanded, setExpanded] = useState(false)
+  if (items.length === 0) return (
+    <p className="text-sm text-stone-400 py-4 text-center">本區未偵測到喬木。</p>
+  )
+  const visible = expanded ? items : items.slice(0, limit)
+  const hiddenCount = items.length - visible.length
+  return (
+    <div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm border-collapse">
+          <thead>
+            <tr className="bg-stone-50">
+              <th className="px-3 py-2 text-left text-stone-500 border border-stone-100">樹種</th>
+              <th className="px-3 py-2 text-center text-stone-500 border border-stone-100">株數</th>
+              <th className="px-3 py-2 text-center text-stone-500 border border-stone-100">最小株距</th>
+              <th className="px-3 py-2 text-center text-stone-500 border border-stone-100">樹冠重疊</th>
+              <th className="px-3 py-2 text-left text-stone-500 border border-stone-100">遮蔭影響（下層植栽）</th>
+              <th className="px-3 py-2 text-center text-stone-500 border border-stone-100">距建築</th>
+              <th className="px-3 py-2 text-center text-stone-500 border border-stone-100">距車道</th>
+            </tr>
+          </thead>
+          <tbody>
+            {visible.map((t, i) => (
+              <tr key={i} className="border border-stone-100">
+                <td className="px-3 py-2 border border-stone-100 font-semibold text-stone-800">{t.plantName}</td>
+                <td className="px-3 py-2 border border-stone-100 text-center">{t.count}</td>
+                <td className="px-3 py-2 border border-stone-100 text-center">{t.minSpacingCm !== undefined ? `${t.minSpacingCm} cm` : '—'}</td>
+                <td className="px-3 py-2 border border-stone-100 text-center">
+                  {t.canopyOverlapCount > 0 ? <span className="text-amber-600 font-semibold">{t.canopyOverlapCount} 株</span> : '無'}
+                </td>
+                <td className="px-3 py-2 border border-stone-100">
+                  {t.shadedUnderstory.length > 0 ? [...new Set(t.shadedUnderstory.map(s => s.plantName))].join('、') : '無'}
+                </td>
+                <td className="px-3 py-2 border border-stone-100 text-center text-stone-400">尚未支援</td>
+                <td className="px-3 py-2 border border-stone-100 text-center text-stone-400">尚未支援</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {(hiddenCount > 0 || expanded) && items.length > limit && (
+        <button
+          type="button" onClick={() => setExpanded(v => !v)}
+          className="mt-2 text-sm font-semibold text-green-700 hover:text-green-800"
+        >
+          {expanded ? '收合清單' : `＋其他 ${hiddenCount} 項，點擊展開完整清單`}
+        </button>
+      )}
+    </div>
+  )
+}
+
+function HatchStatsTable({ stats, limit = 4 }: { stats: ZoneStatisticsResult | undefined; limit?: number }) {
+  const [expanded, setExpanded] = useState(false)
+  const items = stats?.hatchPlants ?? []
+  if (items.length === 0) return (
+    <p className="text-sm text-stone-400 py-4 text-center">本區尚未偵測到灌木/地被 HATCH。</p>
+  )
+  const visible = expanded ? items : items.slice(0, limit)
+  const hiddenCount = items.length - visible.length
+  return (
+    <div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm border-collapse">
+          <thead>
+            <tr className="text-left text-stone-500 border-b border-stone-200">
+              <th className="py-2 pr-3 font-semibold">類型</th>
+              <th className="py-2 pr-3 font-semibold">植栽名稱</th>
+              <th className="py-2 pr-3 font-semibold text-right">HATCH 區塊數</th>
+              <th className="py-2 pr-3 font-semibold text-right">種植面積 m²</th>
+              <th className="py-2 font-semibold text-right">占分區比例</th>
+            </tr>
+          </thead>
+          <tbody>
+            {visible.map((p, i) => (
+              <tr key={i} className="border-b border-stone-100 last:border-0">
+                <td className="py-2 pr-3 text-stone-600">{PLANT_CATEGORY_LABELS[p.category]}</td>
+                <td className="py-2 pr-3 font-semibold text-stone-800">{p.plantName}</td>
+                <td className="py-2 pr-3 text-right text-stone-600">{p.hatchCount}</td>
+                <td className="py-2 pr-3 text-right text-stone-600">{p.areaM2.toFixed(2)}</td>
+                <td className="py-2 text-right text-stone-600">
+                  {stats && stats.zoneAreaM2 > 0 ? ((p.areaM2 / stats.zoneAreaM2) * 100).toFixed(1) : '0.0'}%
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {(hiddenCount > 0 || expanded) && items.length > limit && (
+        <button
+          type="button" onClick={() => setExpanded(v => !v)}
+          className="mt-2 text-sm font-semibold text-green-700 hover:text-green-800"
+        >
+          {expanded ? '收合清單' : `＋其他 ${hiddenCount} 項，點擊展開完整清單`}
+        </button>
+      )}
+    </div>
+  )
+}
+
+/** 分區頂部精簡摘要列：分區名稱／面積／喬木株數／灌木面積／地被面積／高風險／警示／通過數量 */
+function ZoneSummaryBar({ zoneName, stats, riskLevel, compatLevel, severeCnt, warningCnt, passedCnt }: {
+  zoneName: string
+  stats: ZoneStatisticsResult | undefined
+  riskLevel: '高' | '中' | '低' | undefined
+  compatLevel: string | undefined
+  severeCnt: number
+  warningCnt: number
+  passedCnt: number
+}) {
+  const metrics = [
+    { label: '分區面積', value: stats ? `${stats.zoneAreaM2.toFixed(1)} m²` : '—' },
+    { label: '喬木株數', value: stats ? `${stats.treeTotalCount} 株` : '—' },
+    { label: '灌木面積', value: stats ? `${stats.shrubAreaM2.toFixed(1)} m²` : '—' },
+    { label: '地被面積', value: stats ? `${stats.groundLawnAreaM2.toFixed(1)} m²` : '—' },
+  ]
+  return (
+    <div className="rounded-xl border border-stone-200 bg-white p-4 sm:p-5">
+      <div className="flex items-center gap-3 flex-wrap mb-4">
+        <span className="text-2xl font-bold text-stone-800">{zoneName}</span>
+        {riskLevel && (
+          <span className={`text-base px-3 py-1 rounded-full border font-bold ${compatLevel ? (COMPAT_CLS[compatLevel] ?? '') : ''}`}>
+            風險等級：{riskLevel}
+          </span>
+        )}
+      </div>
+
+      {/* 植栽覆蓋率總計：後端已算好的總計（喬木冠幅／灌木／地被換算後、扣除重疊），
+          不是灌木面積+地被面積直接相加，不能靠使用者自己心算湊出來 */}
+      {stats && (
+        <div className="mb-4 p-3.5 rounded-lg bg-emerald-50 border border-emerald-200 flex items-center justify-between flex-wrap gap-2">
+          <span className="text-base font-semibold text-emerald-800">植栽覆蓋率總計（覆蓋總面積 {stats.plantingAreaM2.toFixed(1)} m²）</span>
+          <span className="text-2xl font-bold text-emerald-700">{stats.plantingCoveragePercent.toFixed(1)}%</span>
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+        {metrics.map(m => (
+          <div key={m.label} className="rounded-lg bg-stone-50 px-3 py-2.5">
+            <p className="text-sm text-stone-500 mb-0.5">{m.label}</p>
+            <p className="text-lg font-bold text-stone-800">{m.value}</p>
+          </div>
+        ))}
+      </div>
+      <div className="flex gap-2.5 flex-wrap">
+        <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-50 text-red-700 font-bold text-base">🔴 高風險 {severeCnt}</span>
+        <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-50 text-amber-700 font-bold text-base">🟡 警示 {warningCnt}</span>
+        <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 font-bold text-base">🟢 通過 {passedCnt}</span>
+      </div>
+    </div>
+  )
+}
+
 // ── 分區植栽面積與喬木數量統計：UI ─────────────────────────────────────────────
 
 const PLANT_CATEGORY_LABELS: Record<string, string> = {
@@ -477,100 +713,6 @@ function UnitAnomalyBanner({ unit, onPick }: { unit: DrawingUnit; onPick: (u: Dr
             {u}
           </button>
         ))}
-      </div>
-    </div>
-  )
-}
-
-function ZoneStatsCard({ stats }: { stats: ZoneStatisticsResult | undefined }) {
-  if (!stats) return null
-  return (
-    <div className="rounded-xl border border-stone-200 overflow-hidden bg-white w-full">
-      <div className="px-4 py-2.5 bg-stone-50 border-b border-stone-100">
-        <p className="text-xs font-bold text-stone-700">植栽數量與面積</p>
-      </div>
-      <div className="p-4 space-y-4">
-        <div className="flex gap-2 flex-wrap text-xs">
-          <span className="px-2.5 py-1 rounded-lg bg-stone-100 text-stone-600 font-medium">分區總面積：{stats.zoneAreaM2.toFixed(2)} m²</span>
-          <span className="px-2.5 py-1 rounded-lg bg-lime-50 text-lime-700 font-medium">灌木總面積：{stats.shrubAreaM2.toFixed(2)} m²</span>
-          <span className="px-2.5 py-1 rounded-lg bg-teal-50 text-teal-700 font-medium">草皮/地被總面積：{stats.groundLawnAreaM2.toFixed(2)} m²</span>
-          <span className="px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 font-medium">植栽覆蓋總面積：{stats.plantingAreaM2.toFixed(2)} m²</span>
-          <span className="px-2.5 py-1 rounded-lg bg-emerald-100 text-emerald-800 font-medium">植栽覆蓋率：{stats.plantingCoveragePercent.toFixed(2)}%</span>
-          <span className="px-2.5 py-1 rounded-lg bg-amber-50 text-amber-700 font-medium">喬木總數：{stats.treeTotalCount} 株</span>
-        </div>
-
-        {stats.hatchPlants.length > 0 && (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs border-collapse">
-              <thead>
-                <tr className="text-left text-stone-500 border-b border-stone-200">
-                  <th className="py-1.5 pr-3 font-semibold">植栽類型</th>
-                  <th className="py-1.5 pr-3 font-semibold">植栽名稱</th>
-                  <th className="py-1.5 pr-3 font-semibold">圖層名稱</th>
-                  <th className="py-1.5 pr-3 font-semibold text-right">HATCH 區塊數</th>
-                  <th className="py-1.5 pr-3 font-semibold text-right">種植面積 m²</th>
-                  <th className="py-1.5 font-semibold text-right">占分區比例</th>
-                </tr>
-              </thead>
-              <tbody>
-                {stats.hatchPlants.map((p, i) => (
-                  <tr key={i} className="border-b border-stone-100 last:border-0">
-                    <td className="py-1.5 pr-3 text-stone-600">{PLANT_CATEGORY_LABELS[p.category]}</td>
-                    <td className="py-1.5 pr-3 font-medium text-stone-800">{p.plantName}</td>
-                    <td className="py-1.5 pr-3 text-stone-500 font-mono">{p.layerName}</td>
-                    <td className="py-1.5 pr-3 text-right text-stone-600">{p.hatchCount}</td>
-                    <td className="py-1.5 pr-3 text-right text-stone-600">{p.areaM2.toFixed(2)}</td>
-                    <td className="py-1.5 text-right text-stone-600">
-                      {stats.zoneAreaM2 > 0 ? ((p.areaM2 / stats.zoneAreaM2) * 100).toFixed(1) : '0.0'}%
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        {stats.treePlants.length > 0 && (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs border-collapse">
-              <thead>
-                <tr className="text-left text-stone-500 border-b border-stone-200">
-                  <th className="py-1.5 pr-3 font-semibold">樹種名稱</th>
-                  <th className="py-1.5 pr-3 font-semibold">BLOCK 名稱</th>
-                  <th className="py-1.5 font-semibold text-right">株數</th>
-                </tr>
-              </thead>
-              <tbody>
-                {stats.treePlants.map((p, i) => (
-                  <tr key={i} className="border-b border-stone-100 last:border-0">
-                    <td className="py-1.5 pr-3 font-medium text-stone-800">{p.plantName}</td>
-                    <td className="py-1.5 pr-3 text-stone-500 font-mono">{p.blockName}</td>
-                    <td className="py-1.5 text-right text-stone-600">{p.count}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        {stats.hatchPlants.length === 0 && stats.treePlants.length === 0 && (
-          <p className="text-xs text-stone-400">本區尚未偵測到已分類的灌木/草皮/喬木植栽。</p>
-        )}
-
-        {stats.unknownPlants.length > 0 && (
-          <div className="rounded-lg border border-amber-200 bg-amber-50/60 p-3">
-            <p className="text-xs font-bold text-amber-800 mb-1.5">待確認植栽（圖層或圖塊尚未對應植物名稱）</p>
-            <ul className="text-xs text-amber-700 space-y-1">
-              {stats.unknownPlants.map((u, i) => (
-                <li key={i} className="font-mono">
-                  · {u.source === 'hatch' ? 'HATCH' : 'BLOCK'} layer=&quot;{u.layerName}&quot;{u.blockName ? ` block="${u.blockName}"` : ''}
-                  {u.hatchCount !== undefined ? ` 區塊數=${u.hatchCount} 面積=${(u.areaM2 ?? 0).toFixed(2)}m²` : ''}
-                  {u.count !== undefined ? ` 數量=${u.count}` : ''}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
       </div>
     </div>
   )
@@ -706,6 +848,9 @@ interface ZoneReviewResult {
   status: ZoneReviewStatus
   boundaryArea?: number   // 分區邊界面積（圖面座標單位，圖面為公尺時即 m²；無邊界則 undefined）
   evalResult?: EvalResult
+  proximityConflicts: PlantConflictResult[]  // 空間鄰近式衝突檢討逐對結果（見 plantProximity.ts）
+  spatialInstances: SpatialPlantInstance[]   // 本分區逐一實體幾何（供「在圖面定位」查詢）
+  treeInventory: TreeInventoryItem[]         // 喬木盤點（樹種/數量/株距/樹冠重疊/遮蔭影響）
   finalReviewResults: FinalReviewResult[]  // 最終審查結果（UI/PDF 唯一來源）
   hatchPlants: {
     confirmed: HatchPlantItem[]      // score >= 70
@@ -772,6 +917,11 @@ function buildZoneReviews(
   drawingRadius = 1000,
   polygons: import('@/types/dxf').DxfPolygon[] = [],
   layerColors: Record<string, number> = {},
+  mappings: MappedItem[] = [],
+  inserts: DxfInsert[] = [],
+  blockExtents: Record<string, BlockExtent> = {},
+  unit: DrawingUnit = 'cm',
+  scope?: AnalysisScope,
 ): ZoneReviewResult[] {
   // ── 圖層名稱 → 植物 對照表（優先於 HATCH pattern，防止同 HATCH 圖樣誤判）───
   const layerPlantKeywordMap = buildLayerPlantKeywordMap(schedule, plantDB)
@@ -1203,6 +1353,19 @@ function buildZoneReviews(
     console.warn('⚠️  Map 為空！Legend Mapping 未成功或已被清除。')
   }
   console.groupEnd()
+
+  // ── 空間鄰近式衝突檢討（取代舊有整區 min/max 落差比較）─────────────────────
+  // 分區篩選（zonePlantLists 本身已是分區篩選結果）→ 空間鄰近篩選 → 植物特性
+  // 衝突判斷，全部分區一次算完，下方逐區迴圈只需查表。見 plantProximity.ts。
+  const { resultsByZone: conflictsByZone, instancesByZone, treeInventoryByZone } = computeZonePlantConflicts(
+    zonePlantLists.map(z => z.zone),
+    { inserts, polygons, blockExtents },
+    mappings,
+    plantDB,
+    layerPlantKeywordMap,
+    scope,
+    unit,
+  )
 
   return zonePlantLists.map(zpl => {
     const confirmed: SelectedCsvPlant[] = []
@@ -1794,11 +1957,15 @@ function buildZoneReviews(
     const unmatchedBlocks = blockEntries.filter(b => b.matchStatus === 'unmatched').map(b => b.blockName)
     const hasAnyBlock = blockEntries.length > 0
 
+    const proximityConflicts = conflictsByZone.get(zpl.zone.name) ?? []
+    const spatialInstances = instancesByZone.get(zpl.zone.name) ?? []
+    const treeInventory = treeInventoryByZone.get(zpl.zone.name) ?? []
+
     let status: ZoneReviewStatus = '無法審查'
     let evalResult: EvalResult | undefined
     if (confirmed.length >= 1) {
       status = '可審查'
-      evalResult = evaluate(confirmed, plantDB)
+      evalResult = aggregatePairConflictsToEvalResult(proximityConflicts)
     } else if (hasAnyBlock) {
       status = '植物待確認'
     }
@@ -1989,6 +2156,9 @@ function buildZoneReviews(
       status,
       boundaryArea: zpl.zone.boundary ? polygonArea(zpl.zone.boundary.vertices) : undefined,
       evalResult,
+      proximityConflicts,
+      spatialInstances,
+      treeInventory,
       hatchPlants: { confirmed: hatchConfirmed, candidates: hatchCandidates, unmatchedCount: hatchUnmatchedCount },
       finalReviewResults: zoneResults,
     }
@@ -2116,6 +2286,9 @@ export default function DxfReviewPage({
   const [mappings, setMappings]           = useState<MappedItem[]>([])
   const [excluded, setExcluded]           = useState<MappedItem[]>([])
   const [allPlants, setAllPlants]         = useState<CsvPlantRecord[]>([])
+  // 詢問 AI：改成本頁內嵌抽屜，不再切換 App.tsx 的 activeTab（那會卸載本頁、
+  // 清空所有已解析結果與篩選狀態，使用者得重跑一次 DXF 上傳）
+  const [aiDrawerQuestion, setAiDrawerQuestion] = useState<string | null>(null)
   const [tab, setTab]                     = useState<ViewTab>('blocks')
   const [dragOver, setDragOver]           = useState(false)
   const [fileName, setFileName]           = useState('')
@@ -2227,8 +2400,12 @@ export default function DxfReviewPage({
   // 解決「DXF 上傳時 DB 尚未載入 → 分數為空」的問題
   useEffect(() => {
     if (zonePlantLists.length === 0 || plants.length === 0) return
+    const scope = parseResult ? detectAnalysisScope(parseResult.texts, parseResult.polygons) : undefined
     saveZoneReviews(
-      buildZoneReviews(zonePlantLists, plants, plantSchedule.entries, parseResult?.texts ?? [], drawingRadius, parseResult?.polygons ?? [], parseResult?.layerColors ?? {}),
+      buildZoneReviews(
+        zonePlantLists, plants, plantSchedule.entries, parseResult?.texts ?? [], drawingRadius, parseResult?.polygons ?? [], parseResult?.layerColors ?? {},
+        mappings, parseResult?.inserts ?? [], parseResult?.blockExtents ?? {}, drawingUnit, scope,
+      ),
       `useEffect [polygons=${parseResult?.polygons?.length ?? 0} texts=${parseResult?.texts?.length ?? 0}]`
     )
   }, [plants, zonePlantLists, plantSchedule.entries])
@@ -2286,14 +2463,20 @@ export default function DxfReviewPage({
       setDetectedZones(zones)
       const zpl = buildZonePlantList(zones, active, result.polygons, result.inserts, result.blockExtents, scope)
       setZonePlantLists(zpl)
-      saveZoneReviews(buildZoneReviews(zpl, loaded, sched.entries, result.texts, radius, result.polygons, result.layerColors ?? {}), 'handleFile [polygons=' + result.polygons.length + ']')
+
+      // 圖面單位需先算好才能傳入 buildZoneReviews（空間鄰近衝突檢討的公分換算依賴此值）
+      const detectedUnit = unitFromInsUnits(result.insUnits)
+      const effectiveUnit = detectedUnit ?? 'cm'
+      const autoDefaulted = !detectedUnit
+
+      saveZoneReviews(
+        buildZoneReviews(zpl, loaded, sched.entries, result.texts, radius, result.polygons, result.layerColors ?? {}, active, result.inserts, result.blockExtents, effectiveUnit, scope),
+        'handleFile [polygons=' + result.polygons.length + ']'
+      )
       setZoneDebug(buildZoneAssignDebug(zones, zpl, active, result.inserts, result.blockExtents))
 
       // ── 分區植栽面積與喬木數量統計：優先採用 DXF 內建 $INSUNITS；辨識不到時直接
       // 預設 cm（景觀 CAD 圖面繪製慣例）並照常計算，不阻擋、不強制使用者選擇 ──────
-      const detectedUnit = unitFromInsUnits(result.insUnits)
-      const effectiveUnit = detectedUnit ?? 'cm'
-      const autoDefaulted = !detectedUnit
       if (autoDefaulted) {
         console.debug(`[分區統計] 無法辨識圖面單位（$INSUNITS=${result.insUnits ?? '(無)'}），依景觀 CAD 慣例自動採用 cm 計算`)
       }
@@ -2362,7 +2545,10 @@ export default function DxfReviewPage({
     const scope = detectAnalysisScope(parseResult.texts, parseResult.polygons)
     const zpl2 = buildZonePlantList(detectedZones, active, parseResult.polygons, parseResult.inserts, parseResult.blockExtents, scope)
     setZonePlantLists(zpl2)
-    saveZoneReviews(buildZoneReviews(zpl2, plantList, plantSchedule.entries, parseResult.texts, drawingRadius, parseResult.polygons, parseResult.layerColors ?? {}), 'rebuildMappings [polygons=' + parseResult.polygons.length + ']')
+    saveZoneReviews(
+      buildZoneReviews(zpl2, plantList, plantSchedule.entries, parseResult.texts, drawingRadius, parseResult.polygons, parseResult.layerColors ?? {}, active, parseResult.inserts, parseResult.blockExtents, drawingUnit, scope),
+      'rebuildMappings [polygons=' + parseResult.polygons.length + ']'
+    )
     setZoneDebug(buildZoneAssignDebug(detectedZones, zpl2, active, parseResult.inserts, parseResult.blockExtents))
     // 植栽比對規則／資料庫變更會影響植物名稱解析，一併重算面積統計（單位一律已有值，不再是 null）
     const newStats = computeZoneStatistics(parseResult, detectedZones, scope, drawingUnit, plantSchedule.entries, plantList, active)
@@ -2370,7 +2556,8 @@ export default function DxfReviewPage({
     setUnitAnomaly(detectUnitAnomaly(newStats))
   }
 
-  // 使用者手動變更圖面單位：套用整份圖面，所有分區與 HATCH 面積立即依新單位重新計算
+  // 使用者手動變更圖面單位：套用整份圖面，所有分區與 HATCH 面積、空間鄰近衝突檢討
+  // 的公分換算立即依新單位重新計算（鄰近門檻以 cm 為準，換算結果會隨圖面單位改變）
   const pickDrawingUnit = (unit: DrawingUnit) => {
     setDrawingUnit(unit)
     setUnitAutoDefaulted(false)
@@ -2379,6 +2566,12 @@ export default function DxfReviewPage({
     const newStats = computeZoneStatistics(parseResult, detectedZones, scope, unit, plantSchedule.entries, plants, mappings)
     setZoneStatistics(newStats)
     setUnitAnomaly(detectUnitAnomaly(newStats))
+    if (zonePlantLists.length > 0) {
+      saveZoneReviews(
+        buildZoneReviews(zonePlantLists, plants, plantSchedule.entries, parseResult.texts, drawingRadius, parseResult.polygons, parseResult.layerColors ?? {}, mappings, parseResult.inserts, parseResult.blockExtents, unit, scope),
+        'pickDrawingUnit [unit=' + unit + ']'
+      )
+    }
   }
 
   const applyOnce = (blockName: string, plantName: string) => {
@@ -2613,10 +2806,7 @@ export default function DxfReviewPage({
           <ZoneReviewTab
             reviews={zoneReviews}
             zoneStatistics={zoneStatistics}
-            onAskAI={q => {
-              try { sessionStorage.setItem('advisor-prefill', q) } catch { /* ignore */ }
-              onTabChange?.('landscape')
-            }} />
+            onAskAI={q => setAiDrawerQuestion(q)} />
         )}
 
         {/* ── Zone plan tab ── */}
@@ -2863,6 +3053,14 @@ export default function DxfReviewPage({
           </div>
         </div>
       )}
+      {/* 詢問 AI：本頁內嵌抽屜，不離開審查頁、不卸載本頁狀態 */}
+      {aiDrawerQuestion && (
+        <AiAdvisorDrawer
+          db={plants}
+          initialQuestion={aiDrawerQuestion}
+          onClose={() => setAiDrawerQuestion(null)}
+        />
+      )}
     </div>
   )
 }
@@ -2890,15 +3088,53 @@ function PlantDropdown({
 }: PlantDropdownProps) {
   const isOpen = dropdown?.blockName === blockName && dropdown.key === dropKey
   const rule = savedRules.find(r => r.blockName === blockName)
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
+
+  // 表格外層容器有 overflow-hidden（用來裁角），絕對定位的下拉選單若仍放在容器內會被
+  // 裁切而看起來「按了沒反應」──改用 portal 掛到 document.body，並用 fixed + 實測座標
+  // 定位，就不受任何祖先層的 overflow/z-index 影響。
+  useEffect(() => {
+    if (!isOpen) { setPos(null); return }
+    const updatePos = () => {
+      const r = btnRef.current?.getBoundingClientRect()
+      if (!r) return
+      const panelWidth = 320
+      const left = Math.min(Math.max(r.right - panelWidth, 8), window.innerWidth - panelWidth - 8)
+      const top = Math.min(r.bottom + 4, window.innerHeight - 40)
+      setPos({ top, left })
+    }
+    updatePos()
+    window.addEventListener('resize', updatePos)
+    window.addEventListener('scroll', updatePos, true)
+    return () => {
+      window.removeEventListener('resize', updatePos)
+      window.removeEventListener('scroll', updatePos, true)
+    }
+  }, [isOpen])
+
+  useEffect(() => {
+    if (!isOpen) return
+    const onPointerDown = (e: MouseEvent) => {
+      const target = e.target as Node
+      if (btnRef.current?.contains(target)) return
+      if (panelRef.current?.contains(target)) return
+      setDropdown(null)
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    return () => document.removeEventListener('mousedown', onPointerDown)
+  }, [isOpen, setDropdown])
 
   return (
     <div className="relative">
-      <button onClick={() => setDropdown(isOpen ? null : { blockName, key: dropKey })}
+      <button ref={btnRef} onClick={() => setDropdown(isOpen ? null : { blockName, key: dropKey })}
         className="flex items-center gap-1 px-3 py-1.5 rounded-lg border border-stone-200 text-xs text-stone-600 hover:bg-stone-50 whitespace-nowrap">
         指定植物 <ChevronDown size={11} />
       </button>
-      {isOpen && (
-        <div className="absolute right-0 top-9 z-50 w-80 bg-white border border-stone-200 rounded-xl shadow-xl overflow-hidden">
+      {isOpen && pos && createPortal(
+        <div ref={panelRef} style={{ position: 'fixed', top: pos.top, left: pos.left, width: 320 }}
+          className="z-50 bg-white border border-stone-200 rounded-xl shadow-xl overflow-hidden">
           <div className="px-3 py-2 bg-stone-50 border-b border-stone-100 text-xs text-stone-500">
             選擇植物後，選擇套用方式
           </div>
@@ -2946,7 +3182,8 @@ function PlantDropdown({
               )
             })}
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   )
@@ -3368,11 +3605,6 @@ const COMPAT_CLS: Record<string, string> = {
   '需調整配置':     'bg-orange-50 border-orange-300 text-orange-800',
   '高風險不建議':   'bg-red-50 border-red-300 text-red-800',
 }
-const ISSUE_CLS: Record<string, string> = {
-  danger:  'border-l-4 border-red-400 bg-red-50',
-  caution: 'border-l-4 border-amber-400 bg-amber-50',
-  ok:      'border-l-4 border-emerald-300 bg-emerald-50',
-}
 
 function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
   reviews: ZoneReviewResult[]
@@ -3380,6 +3612,11 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
   zoneStatistics: ZoneStatisticsResult[]
 }) {
   const [activeTab, setActiveTab] = useState<string>('overview')
+  const [zoneSubTab, setZoneSubTab] = useState<'overview' | 'issues' | 'pending'>('overview')
+  const [showAllIssues, setShowAllIssues] = useState(false)
+  const [riskFilter, setRiskFilter] = useState<'all' | 'severe' | 'warning' | 'passed'>('all')
+  const [categoryFilter, setCategoryFilter] = useState<'all' | IssueCategoryGroup>('all')
+  const [locatorTarget, setLocatorTarget] = useState<PlantConflictResult | null>(null)
 
   if (reviews.length === 0) return (
     <div className="flex flex-col items-center justify-center py-20 text-stone-400 gap-3">
@@ -3396,20 +3633,20 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
   const activeReview = reviews.find(r => r.zoneName === activeTab) ?? null
 
   // 風險等級 badge 顏色
+  // 風險等級改直接取 overallRiskLevel（見 aggregatePairConflictsToEvalResult），
+  // 跟卡片上的「配置健康度」分數共用同一套風險判斷，不再各自重新從 issues 推算。
   const riskBadgeCls = (r: ZoneReviewResult) => {
-    const dangerCnt = r.evalResult?.issues.filter(i => i.level === 'danger').length ?? 0
-    if (dangerCnt > 0) return 'bg-red-100 text-red-700 border-red-300'
-    const cautionCnt = r.evalResult?.issues.filter(i => i.level === 'caution').length ?? 0
-    if (cautionCnt > 0) return 'bg-amber-100 text-amber-700 border-amber-300'
-    if (r.evalResult) return 'bg-emerald-100 text-emerald-700 border-emerald-300'
+    const level = r.evalResult?.overallRiskLevel
+    if (level === '高') return 'bg-red-100 text-red-700 border-red-300'
+    if (level === '中') return 'bg-amber-100 text-amber-700 border-amber-300'
+    if (level === '低') return 'bg-emerald-100 text-emerald-700 border-emerald-300'
     return 'bg-stone-100 text-stone-500 border-stone-200'
   }
   const riskLabel = (r: ZoneReviewResult) => {
-    const dangerCnt = r.evalResult?.issues.filter(i => i.level === 'danger').length ?? 0
-    if (dangerCnt > 0) return '高風險'
-    const cautionCnt = r.evalResult?.issues.filter(i => i.level === 'caution').length ?? 0
-    if (cautionCnt > 0) return '中風險'
-    if (r.evalResult) return '低風險'
+    const level = r.evalResult?.overallRiskLevel
+    if (level === '高') return '高風險'
+    if (level === '中') return '中風險'
+    if (level === '低') return '低風險'
     return r.status === '植物待確認' ? '待確認' : '無資料'
   }
   const plantCount = (r: ZoneReviewResult) => r.blockEntries.reduce((s, b) => s + b.count, 0)
@@ -3431,28 +3668,27 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
           </button>
           {/* 各分區 tab */}
           {reviews.map(r => {
-            const cnt = plantCount(r)
-            const dangerCnt = r.evalResult?.issues.filter(i => i.level === 'danger').length ?? 0
-            const cautionCnt = r.evalResult?.issues.filter(i => i.level === 'caution').length ?? 0
+            const itemCnt = r.proximityConflicts.length
+            const riskLevel = r.evalResult?.overallRiskLevel
             const isActive = activeTab === r.zoneName
             return (
               <button key={r.zoneName}
                 onClick={() => setActiveTab(r.zoneName)}
-                className={`flex-shrink-0 flex items-center gap-2 px-5 py-3 text-sm font-semibold border-b-2 transition-colors whitespace-nowrap ${
+                className={`flex-shrink-0 flex items-center gap-2 px-5 py-3 text-base font-semibold border-b-2 transition-colors whitespace-nowrap ${
                   isActive
                     ? 'border-green-600 text-green-700 bg-green-50'
                     : 'border-transparent text-stone-500 hover:text-stone-700 hover:bg-stone-50'
                 }`}>
                 {r.zoneName}
-                {cnt > 0 && <span className="text-xs font-normal text-stone-400">{cnt}株</span>}
-                {dangerCnt > 0 && (
-                  <span className="inline-block w-2 h-2 rounded-full bg-red-500" title="高風險" />
+                {itemCnt > 0 && <span className="text-sm font-normal text-stone-400">{itemCnt} 項</span>}
+                {riskLevel === '高' && (
+                  <span className="inline-block w-2.5 h-2.5 rounded-full bg-red-500" title="高風險" />
                 )}
-                {dangerCnt === 0 && cautionCnt > 0 && (
-                  <span className="inline-block w-2 h-2 rounded-full bg-amber-400" title="中風險" />
+                {riskLevel === '中' && (
+                  <span className="inline-block w-2.5 h-2.5 rounded-full bg-amber-400" title="中風險" />
                 )}
-                {dangerCnt === 0 && cautionCnt === 0 && r.evalResult && (
-                  <span className="inline-block w-2 h-2 rounded-full bg-emerald-500" title="低風險" />
+                {riskLevel === '低' && (
+                  <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-500" title="低風險" />
                 )}
               </button>
             )
@@ -3500,7 +3736,7 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
                       </div>
                       {r.evalResult && (
                         <div className="flex justify-between">
-                          <span>審查評分</span>
+                          <span>配置健康度{r.evalResult.overallRiskLevel ? `（風險等級：${r.evalResult.overallRiskLevel}）` : ''}</span>
                           <span className="font-semibold text-stone-700">{r.evalResult.score}/100</span>
                         </div>
                       )}
@@ -3544,7 +3780,7 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
                     <thead>
                       <tr className="bg-[#f7faf5]">
                         <th className="px-4 py-2.5 text-left text-stone-600 font-semibold border-b border-stone-200 w-24">分區</th>
-                        <th className="px-4 py-2.5 text-center text-stone-600 font-semibold border-b border-stone-200">分數</th>
+                        <th className="px-4 py-2.5 text-center text-stone-600 font-semibold border-b border-stone-200">健康度</th>
                         <th className="px-4 py-2.5 text-center text-stone-600 font-semibold border-b border-stone-200">風險等級</th>
                         <th className="px-4 py-2.5 text-center text-stone-600 font-semibold border-b border-stone-200">問題數</th>
                         <th className="px-4 py-2.5 text-center text-stone-600 font-semibold border-b border-stone-200">高風險</th>
@@ -3646,20 +3882,28 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
           const nameOnlyBlocks = r.blockEntries.filter(b => b.matchStatus === 'name-only')
           const unmatchedBlks  = r.blockEntries.filter(b => b.matchStatus === 'unmatched')
           const totalCount     = plantCount(r)
-          const dangerCnt      = r.evalResult?.issues.filter(i => i.level === 'danger').length ?? 0
-          const cautionCnt     = r.evalResult?.issues.filter(i => i.level === 'caution').length ?? 0
           const stats          = zoneStatistics.find(s => s.zoneId === r.zoneName)
 
+          const severeCnt = r.proximityConflicts.filter(c => c.riskLevel === 'high').length
+          const warningCnt = r.proximityConflicts.filter(c => c.riskLevel === 'medium').length
+          const passedCnt = r.proximityConflicts.filter(c => c.riskLevel === 'low' || c.riskLevel === 'unmatched').length
+          const confirmedCnt = r.hatchPlants?.confirmed.length ?? 0
+          const pendingCnt = (r.hatchPlants?.candidates.length ?? 0) + unmatchedBlks.length
+
           return (
-            <div className="p-5 space-y-4">
+            <div className="p-5 space-y-5">
               {/* 分區標題列 */}
               <div className="flex items-center gap-3 flex-wrap">
-                <span className="text-2xl font-bold text-stone-800">{r.zoneName}</span>
                 {r.boundaryArea !== undefined && (
-                  <span className="text-xs px-2 py-1 rounded-lg bg-stone-100 text-stone-600 font-medium">
+                  <span className="text-sm px-2.5 py-1 rounded-lg bg-stone-100 text-stone-600 font-medium">
                     區域面積：{r.boundaryArea.toFixed(1)} ㎡
                   </span>
                 )}
+                <span className={`text-sm px-2.5 py-1 rounded-full border font-medium ${
+                  r.status === '可審查'     ? 'bg-emerald-50 border-emerald-200 text-emerald-700' :
+                  r.status === '植物待確認' ? 'bg-amber-50 border-amber-200 text-amber-700' :
+                                              'bg-stone-50 border-stone-200 text-stone-500'
+                }`}>{r.status}</span>
                 {onAskAI && (
                   <button
                     onClick={() => {
@@ -3667,218 +3911,33 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
                       const hatchP = (r.hatchPlants ? [...r.hatchPlants.confirmed, ...r.hatchPlants.candidates] : []).map(h => h.plantName)
                       onAskAI(`請分析 ${r.zoneName} 目前配置：喬木：${[...new Set(trees)].join('、') || '無'}；灌木/地被：${[...new Set(hatchP)].join('、') || '無'}。請判斷是否合理並提出修正建議。`)
                     }}
-                    className="text-xs px-2.5 py-1 rounded-lg bg-[#1a4731] text-white font-medium hover:bg-[#2d6a4f] transition-colors">
+                    className="text-sm px-3 py-1.5 rounded-lg bg-[#1a4731] text-white font-semibold hover:bg-[#2d6a4f] transition-colors">
                     詢問 AI
                   </button>
                 )}
-
-              <ZoneStatsCard stats={stats} />
-
-              {/* ── 索引表 HATCH 圖例對照結果（最優先顯示）── */}
-              {r.finalReviewResults.length > 0 && (
-                <div className="rounded-xl border border-blue-200 overflow-hidden bg-white">
-                  <div className="px-4 py-2.5 bg-blue-50 border-b border-blue-100">
-                    <p className="text-xs font-bold text-blue-900">植栽索引表判讀結果</p>
-                  </div>
-                  <div className="divide-y divide-stone-100">
-                    {r.finalReviewResults.map((fr, i) => (
-                      <div key={i} className={`px-4 py-3 ${fr.matchedPlantName ? '' : 'bg-amber-50/40'}`}>
-                        {fr.matchedPlantName ? (
-                          <>
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className="text-sm font-bold text-stone-800">
-                                偵測到{fr.detectedPatternType === 'INSERT' ? '植栽圖塊' : '鋪面/地被'}：{fr.matchedPlantName}
-                              </span>
-                              <span className={`text-xs px-1.5 py-0.5 rounded-full border font-medium ${
-                                fr.confidence === 'high'   ? 'bg-emerald-50 border-emerald-200 text-emerald-700' :
-                                fr.confidence === 'medium' ? 'bg-amber-50 border-amber-200 text-amber-700' :
-                                                              'bg-red-50 border-red-200 text-red-600'
-                              }`}>
-                                {fr.confidence === 'high' ? '高信心' : fr.confidence === 'medium' ? '中信心' : '低信心'}
-                              </span>
-                            </div>
-                            {fr.matchedLegendRow && (
-                              <p className="text-xs text-stone-500">對應索引表：{fr.matchedLegendRow}</p>
-                            )}
-                            <p className="text-xs text-stone-500">
-                              判讀依據：{fr.matchReason || '索引表 HATCH 圖例比對'}
-                              {fr.matchScore > 0 && `（相似度 ${fr.matchScore}%）`}
-                            </p>
-                          </>
-                        ) : (
-                          <>
-                            <p className="text-xs font-semibold text-amber-700">未能與索引表圖例穩定對應</p>
-                            {fr.noMatchReasons && fr.noMatchReasons.length > 0 && (
-                              <ul className="mt-1 space-y-0.5">
-                                {fr.noMatchReasons.map((reason, j) => (
-                                  <li key={j} className="text-xs text-amber-600">• {reason}</li>
-                                ))}
-                              </ul>
-                            )}
-                          </>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-                <span className={`text-xs px-2.5 py-1 rounded-full border font-medium ${
-                  r.status === '可審查'     ? 'bg-emerald-50 border-emerald-200 text-emerald-700' :
-                  r.status === '植物待確認' ? 'bg-amber-50 border-amber-200 text-amber-700' :
-                                              'bg-stone-50 border-stone-200 text-stone-500'
-                }`}>{r.status}</span>
-                {r.evalResult && (
-                  <span className={`text-sm px-3 py-1 rounded-full border font-semibold ${COMPAT_CLS[r.evalResult.compatLevel] ?? ''}`}>
-                    {r.evalResult.score}/100 · {r.evalResult.compatLevel}
-                  </span>
-                )}
-                {dangerCnt > 0  && <span className="text-xs px-2 py-0.5 rounded-full bg-red-50 border border-red-200 text-red-700 font-semibold">⚠ 高風險 {dangerCnt} 項</span>}
-                {cautionCnt > 0 && <span className="text-xs px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 font-semibold">注意 {cautionCnt} 項</span>}
               </div>
 
-              {/* ── 地被 / 鋪面 HATCH（正式資料來源：hatchPlants）── */}
-              {(() => {
-                const hp = r.hatchPlants
-                if (!hp) return null
-                const allItems = [...hp.confirmed, ...hp.candidates]
-                const totalHatch = allItems.length + hp.unmatchedCount
-                if (allItems.length > 0) {
-                  return (
-                    <div className="rounded-xl border border-emerald-300 overflow-hidden">
-                      <div className="px-4 py-2.5 bg-emerald-600">
-                        <p className="text-xs font-bold text-white">{r.zoneName}｜地被 / 鋪面 HATCH（{allItems.length} 種）</p>
-                      </div>
-                      <div className="divide-y divide-stone-100">
-                        {hp.confirmed.map((h, i) => (
-                          <div key={`c${i}`} className="px-4 py-2.5 flex items-center gap-2 flex-wrap">
-                            <span className="font-semibold text-stone-800 text-sm">{h.plantName}</span>
-                            {h.legendCode && <span className="text-xs text-stone-500">索引表 {h.legendCode}</span>}
-                            <span className="text-xs text-emerald-700">信心度 {h.confidence}%</span>
-                            <span className="text-xs text-stone-400">來源：{h.source}</span>
-                          </div>
-                        ))}
-                        {hp.candidates.map((h, i) => (
-                          <div key={`k${i}`} className="px-4 py-2.5 flex items-center gap-2 flex-wrap bg-amber-50/40">
-                            <span className="font-semibold text-stone-800 text-sm">{h.plantName}</span>
-                            {h.legendCode && <span className="text-xs text-stone-500">索引表 {h.legendCode}</span>}
-                            <span className="text-xs text-amber-700">信心度 {h.confidence}%（候選，需人工確認）</span>
-                            <span className="text-xs text-stone-400">來源：{h.source}</span>
-                          </div>
-                        ))}
-                      </div>
-                      {hp.unmatchedCount > 0 && (
-                        <div className="px-4 py-1.5 bg-stone-50 border-t border-stone-100 text-xs text-stone-400">
-                          另有 {hp.unmatchedCount} 個 HATCH 未能穩定對應索引表圖例
-                        </div>
-                      )}
-                    </div>
-                  )
-                }
-                if (totalHatch > 0) {
-                  return (
-                    <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
-                      <p className="text-sm font-semibold text-amber-800">
-                        本區有 HATCH {totalHatch} 個，但尚未能穩定對應索引表圖例
-                      </p>
-                    </div>
-                  )
-                }
-                return null
-              })()}
+              <ZoneSummaryBar
+                zoneName={r.zoneName}
+                stats={stats}
+                riskLevel={r.evalResult?.overallRiskLevel}
+                compatLevel={r.evalResult?.compatLevel}
+                severeCnt={severeCnt}
+                warningCnt={warningCnt}
+                passedCnt={passedCnt}
+              />
 
-              {/* 本區已辨識植物（只顯示有植物名稱的條目）*/}
-              {(() => {
-                const plantMap = new Map(r.plants.map(p => [p.name, p]))
-                return visibleEntries.length > 0 ? (
-                  <div className="rounded-xl border border-stone-200 overflow-hidden">
-                    <div className="px-4 py-2.5 bg-stone-50 border-b border-stone-100">
-                      <p className="text-xs font-semibold text-stone-700">
-                        {r.zoneName}｜已判讀植物（{visibleEntries.length} 種）
-                      </p>
-                    </div>
-                    <div className="divide-y divide-stone-100">
-                      {visibleEntries.map((b, i) => {
-                        const dbPlant = b.plantName ? plantMap.get(b.plantName) : undefined
-                        const legendRow = r.finalReviewResults.find(fr => fr.matchedPlantName === b.plantName)
-                        return (
-                          <div key={i} className="px-4 py-2.5">
-                            <div className="flex items-start gap-3">
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-2 flex-wrap">
-                                  <span className="font-semibold text-stone-800 text-sm">{b.plantName}</span>
-                                  {legendRow?.matchedLegendRow && (
-                                    <span className="text-xs text-stone-500">索引表 {legendRow.matchedLegendRow}</span>
-                                  )}
-                                  {legendRow?.matchScore != null && legendRow.matchScore > 0 && (
-                                    <span className="text-xs text-stone-400">信心度 {legendRow.matchScore}%</span>
-                                  )}
-                                  <span className={`text-xs px-1.5 py-0.5 rounded-full border font-medium ${
-                                    b.matchStatus === 'db-matched' ? 'bg-emerald-50 border-emerald-200 text-emerald-700' :
-                                    'bg-amber-50 border-amber-200 text-amber-600'
-                                  }`}>
-                                    {dbPlant?.subCategory || dbPlant?.category || b.detectedType || '面狀植栽'}
-                                  </span>
-                                </div>
-                                {dbPlant && (
-                                  <div className="flex flex-wrap gap-x-4 gap-y-0.5 mt-1 text-xs text-stone-500">
-                                    {dbPlant.height && <span>樹高 {dbPlant.height}</span>}
-                                    {dbPlant.sunRequirement && <span>日照 {dbPlant.sunRequirement}</span>}
-                                    {dbPlant.waterRequirement && <span>需水 {dbPlant.waterRequirement}</span>}
-                                    {dbPlant.maintenanceLevel && <span>維護 {dbPlant.maintenanceLevel}</span>}
-                                  </div>
-                                )}
-                                <p className="text-xs text-stone-400 mt-0.5">{sourceLabel(b)}</p>
-                              </div>
-                              <div className="flex-shrink-0 text-right">
-                                <span className="text-base font-bold text-stone-700">{b.count}</span>
-                                <span className="text-xs text-stone-400 ml-0.5">株</span>
-                              </div>
-                            </div>
-                          </div>
-                        )
-                      })}
-                    </div>
-                    {/* 未辨識統計（預設收合，供除錯）*/}
-                    {(unmatchedHatch > 0 || unmatchedPoly > 0) && (
-                      <details className="border-t border-stone-100">
-                        <summary className="px-4 py-2 text-xs text-stone-400 cursor-pointer hover:text-stone-600">
-                          顯示技術資料（未辨識：HATCH × {unmatchedHatch}，邊界 × {unmatchedPoly}）
-                        </summary>
-                        <div className="px-4 py-2 text-xs text-stone-400">
-                          <p>• 未能與索引表圖例穩定對應的 HATCH：{unmatchedHatch} 個</p>
-                          <p>• 空間邊界線（非植栽）：{unmatchedPoly} 個</p>
-                          <p className="mt-1 text-stone-300">以上物件已排除於審查結果外，若需確認請查閱 DXF 原圖索引表。</p>
-                        </div>
-                      </details>
-                    )}
-                  </div>
-                ) : (
-                  <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
-                    <p className="text-sm font-semibold text-amber-800">本區尚未偵測到可穩定對應索引表的 HATCH 圖例。</p>
-                    {(unmatchedHatch > 0 || unmatchedPoly > 0) && (
-                      <details className="mt-2">
-                        <summary className="text-xs text-amber-600 cursor-pointer">顯示技術資料</summary>
-                        <div className="mt-1 text-xs text-amber-600 space-y-0.5">
-                          <p>• 未辨識 HATCH：{unmatchedHatch} 個</p>
-                          <p>• 空間邊界線：{unmatchedPoly} 個</p>
-                        </div>
-                      </details>
-                    )}
-                  </div>
-                )
-              })()}
-
-              {/* AI 審查建議（置頂）*/}
+              {/* AI 審查建議（置頂，三個子頁籤都看得到）*/}
               {r.evalResult && (
                 <div className="p-4 bg-stone-50 border border-stone-200 rounded-xl">
-                  <p className="text-xs font-semibold text-stone-600 mb-1">AI 審查建議</p>
-                  <p className="text-sm text-stone-700">{r.evalResult.aiSuggestion}</p>
+                  <p className="text-base font-bold text-stone-600 mb-1.5">AI 審查建議</p>
+                  <p className="text-base text-stone-700 leading-relaxed">{r.evalResult.aiSuggestion}</p>
                 </div>
               )}
 
               {/* 植物待確認提示 */}
               {r.status === '植物待確認' && (
-                <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800">
+                <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl text-base text-amber-800 leading-relaxed">
                   {r.plants.length === 1
                     ? `僅找到 1 種已確認植物（${r.plants[0].name}），需 ≥ 2 種才能執行完整評分。`
                     : `本區有 ${unmatchedBlks.length} 個圖塊尚未對應植物名稱，請至「圖塊對應」tab 完成指定後可產生完整審查報告。`}
@@ -3890,122 +3949,475 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
                 </div>
               )}
               {r.status === '無法審查' && (
-                <div className="p-3 bg-stone-50 border border-stone-200 rounded-xl text-xs text-stone-500">
+                <div className="p-4 bg-stone-50 border border-stone-200 rounded-xl text-base text-stone-500">
                   此區尚無任何圖塊或分區邊界未偵測到，無法執行審查。
                 </div>
               )}
 
-              {/* 問題明細 */}
-              {r.evalResult && r.evalResult.issues.filter(i => i.level !== 'ok').length > 0 && (
-                <details open>
-                  <summary className="text-xs font-semibold text-stone-600 cursor-pointer select-none mb-2">
-                    問題明細（{r.evalResult.issues.filter(i => i.level !== 'ok').length} 項）
-                  </summary>
-                  <div className="space-y-2 mt-2">
-                    {r.evalResult.issues.filter(i => i.level !== 'ok').map((iss, i) => (
-                      <div key={i} className={`rounded-xl p-3 ${ISSUE_CLS[iss.level]}`}>
-                        <div className="flex items-center gap-2 mb-1">
-                          <AlertTriangle size={13} className={iss.level === 'danger' ? 'text-red-500' : 'text-amber-500'} />
-                          <span className="text-xs font-bold text-stone-700">{iss.category}</span>
-                        </div>
-                        <p className="text-xs text-stone-700 mb-1"><strong>原因：</strong>{iss.cause}</p>
-                        <p className="text-xs text-stone-600 mb-1"><strong>影響：</strong>{iss.impact}</p>
-                        <p className="text-xs text-stone-600"><strong>建議：</strong>{iss.suggestion}</p>
+              {/* 分區內容子頁籤：植栽總覽／審查問題／待確認 */}
+              <div className="flex gap-1 border-b border-stone-200">
+                {([
+                  { key: 'overview' as const, label: '植栽總覽' },
+                  { key: 'issues' as const, label: `審查問題${r.proximityConflicts.length > 0 ? `（${r.proximityConflicts.length}）` : ''}` },
+                  { key: 'pending' as const, label: `待確認${pendingCnt > 0 ? `（${pendingCnt}）` : ''}` },
+                ]).map(opt => (
+                  <button
+                    key={opt.key} type="button" onClick={() => setZoneSubTab(opt.key)}
+                    className={`px-4 py-2.5 text-base font-semibold border-b-2 transition-colors whitespace-nowrap ${
+                      zoneSubTab === opt.key
+                        ? 'border-green-600 text-green-700'
+                        : 'border-transparent text-stone-500 hover:text-stone-700'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* ── 植栽總覽 ── */}
+              {zoneSubTab === 'overview' && (
+                <div className="space-y-5">
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                    <div className="rounded-xl border border-stone-200 overflow-hidden">
+                      <div className="px-4 py-2.5 bg-stone-50 border-b border-stone-100">
+                        <p className="text-lg font-bold text-stone-700">喬木盤點</p>
                       </div>
-                    ))}
+                      <div className="p-4">
+                        <TreeInventoryTable items={r.treeInventory} />
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-stone-200 overflow-hidden">
+                      <div className="px-4 py-2.5 bg-stone-50 border-b border-stone-100">
+                        <p className="text-lg font-bold text-stone-700">灌木／地被統計</p>
+                      </div>
+                      <div className="p-4">
+                        <HatchStatsTable stats={stats} />
+                      </div>
+                    </div>
                   </div>
-                </details>
-              )}
 
-              {/* 配置調整方案 */}
-              {r.evalResult && r.evalResult.adjustmentPlan.length > 0 && (
-                <div className="p-4 bg-blue-50 border border-blue-200 rounded-xl">
-                  <p className="text-xs font-semibold text-blue-800 mb-2">配置調整方案</p>
-                  <ul className="space-y-1">
-                    {r.evalResult.adjustmentPlan.map((p, i) => (
-                      <li key={i} className="text-xs text-blue-700 flex items-start gap-2">
-                        <ArrowRight size={11} className="flex-shrink-0 mt-0.5" />{p}
-                      </li>
-                    ))}
-                  </ul>
+                  {/* 配置調整方案 */}
+                  {r.evalResult && r.evalResult.adjustmentPlan.length > 0 && (
+                    <div className="p-4 bg-blue-50 border border-blue-200 rounded-xl">
+                      <p className="text-base font-bold text-blue-800 mb-2">配置調整方案</p>
+                      <ul className="space-y-1.5">
+                        {r.evalResult.adjustmentPlan.map((p, i) => (
+                          <li key={i} className="text-base text-blue-700 flex items-start gap-2 leading-relaxed">
+                            <ArrowRight size={14} className="flex-shrink-0 mt-1" />{p}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* 植栽清單（可收合）*/}
+                  <details>
+                    <summary className="text-base font-semibold text-stone-600 cursor-pointer select-none">
+                      本區植栽清單（共 {totalCount} 株 / {r.blockEntries.length} 種）
+                    </summary>
+                    <div className="mt-2 overflow-x-auto">
+                      <table className="w-full text-sm border-collapse">
+                        <thead>
+                          <tr className="bg-stone-50">
+                            <th className="px-3 py-2 text-left text-stone-500 border border-stone-100">圖塊名稱</th>
+                            <th className="px-3 py-2 text-left text-stone-500 border border-stone-100">植物名稱</th>
+                            <th className="px-3 py-2 text-left text-stone-500 border border-stone-100">識別類型</th>
+                            <th className="px-3 py-2 text-center text-stone-500 border border-stone-100">數量</th>
+                            <th className="px-3 py-2 text-left text-stone-500 border border-stone-100">狀態</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {visibleEntries.map((b, i) => (
+                            <tr key={i} className={`border border-stone-100 ${
+                              b.matchStatus === 'db-matched' ? 'bg-emerald-50/40' :
+                              b.matchStatus === 'name-only'  ? 'bg-amber-50/40'   :
+                              b.matchStatus === 'same-hatch-disambiguated-by-layer' ? 'bg-sky-50/40' : 'bg-red-50/20'
+                            }`}>
+                              <td className="px-3 py-2 text-sm text-stone-500">{sourceLabel(b)}</td>
+                              <td className="px-3 py-2 font-medium text-stone-800">
+                                {b.plantName
+                                  ?? (isHatchEntry(b)
+                                    ? <span className="text-stone-400 italic text-sm">未能與索引表圖例穩定對應</span>
+                                    : <span className="text-stone-400 italic text-sm">未對應</span>)}
+                              </td>
+                              <td className="px-3 py-2 text-stone-500">{b.detectedType ?? '—'}</td>
+                              <td className="px-3 py-2 text-center font-semibold text-stone-700">{b.count}</td>
+                              <td className="px-3 py-2">
+                                {b.matchStatus === 'db-matched' && <span className="text-emerald-600 text-sm">✅ DB</span>}
+                                {b.matchStatus === 'name-only'  && <span className="text-amber-600 text-sm">⚠ 索引表名稱</span>}
+                                {b.matchStatus === 'same-hatch-disambiguated-by-layer' && <span className="text-sky-600 text-sm">🔀 同HATCH·已依圖層消歧</span>}
+                                {b.matchStatus === 'unmatched'  && <span className="text-red-500 text-sm">❌ 未識別</span>}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    {r.areaTypes.length > 0 && (
+                      <p className="mt-1.5 text-sm text-stone-400">面狀範圍：{r.areaTypes.join('、')}</p>
+                    )}
+                  </details>
                 </div>
               )}
 
-              {/* 植栽清單（可收合）*/}
-              <details>
-                <summary className="text-xs font-semibold text-stone-600 cursor-pointer select-none">
-                  本區植栽清單（共 {totalCount} 株 / {r.blockEntries.length} 種）
-                </summary>
-                <div className="mt-2 overflow-x-auto">
-                  <table className="w-full text-xs border-collapse">
-                    <thead>
-                      <tr className="bg-stone-50">
-                        <th className="px-3 py-1.5 text-left text-stone-500 border border-stone-100">圖塊名稱</th>
-                        <th className="px-3 py-1.5 text-left text-stone-500 border border-stone-100">植物名稱</th>
-                        <th className="px-3 py-1.5 text-left text-stone-500 border border-stone-100">識別類型</th>
-                        <th className="px-3 py-1.5 text-center text-stone-500 border border-stone-100">數量</th>
-                        <th className="px-3 py-1.5 text-left text-stone-500 border border-stone-100">狀態</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {visibleEntries.map((b, i) => (
-                        <tr key={i} className={`border border-stone-100 ${
-                          b.matchStatus === 'db-matched' ? 'bg-emerald-50/40' :
-                          b.matchStatus === 'name-only'  ? 'bg-amber-50/40'   :
-                          b.matchStatus === 'same-hatch-disambiguated-by-layer' ? 'bg-sky-50/40' : 'bg-red-50/20'
-                        }`}>
-                          {/* 來源（替代原始 blockName，避免 DXF 技術字串污染 UI）*/}
-                          <td className="px-3 py-1.5 text-xs text-stone-500">{sourceLabel(b)}</td>
-                          <td className="px-3 py-1.5 font-medium text-stone-800">
-                            {b.plantName
-                              ?? (isHatchEntry(b)
-                                ? <span className="text-stone-400 italic text-xs">未能與索引表圖例穩定對應</span>
-                                : <span className="text-stone-400 italic text-xs">未對應</span>)}
-                          </td>
-                          <td className="px-3 py-1.5 text-stone-500">{b.detectedType ?? '—'}</td>
-                          <td className="px-3 py-1.5 text-center font-semibold text-stone-700">{b.count}</td>
-                          <td className="px-3 py-1.5">
-                            {b.matchStatus === 'db-matched' && <span className="text-emerald-600 text-xs">✅ DB</span>}
-                            {b.matchStatus === 'name-only'  && <span className="text-amber-600 text-xs">⚠ 索引表名稱</span>}
-                            {b.matchStatus === 'same-hatch-disambiguated-by-layer' && <span className="text-sky-600 text-xs">🔀 同HATCH·已依圖層消歧</span>}
-                            {b.matchStatus === 'unmatched'  && <span className="text-red-500 text-xs">❌ 未識別</span>}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                {r.areaTypes.length > 0 && (
-                  <p className="mt-1.5 text-xs text-stone-400">面狀範圍：{r.areaTypes.join('、')}</p>
-                )}
-              </details>
+              {/* ── 審查問題 ── */}
+              {zoneSubTab === 'issues' && (() => {
+                // 分類統計／篩選要掃描整個 issues[]（透過 buildCategoryResults 分好的 4 筆結果），
+                // 不能只看 issues[0]——養護管理這種常常不是排在第一筆的分類，只看第一筆會讓
+                // 統計數字永遠是 0、篩選也篩不到，即使卡片內容裡明明有養護警示。
+                const categoryCounts: Record<IssueCategoryGroup, number> = { watering: 0, drainage: 0, sunlight: 0, maintenance: 0 }
+                for (const c of r.proximityConflicts) {
+                  for (const res of buildCategoryResults(c.issues)) {
+                    if (res.severity !== 'normal') categoryCounts[res.category]++
+                  }
+                }
 
-              {/* 面狀植栽待補充 */}
-              {r.areaLayerNotes.length > 0 && (
-                <div className="p-2.5 bg-blue-50 border border-blue-200 rounded-xl text-xs text-blue-800">
-                  <strong>📐 面狀植栽待補充：</strong>
-                  以下 HATCH 有識別到種植範圍，但圖層名稱未含植物名稱，請確認：
-                  <ul className="mt-1 space-y-0.5">
-                    {r.areaLayerNotes.map((note, i) => (
-                      <li key={i} className="font-mono">· {note}</li>
-                    ))}
-                  </ul>
-                  <p className="mt-1 text-blue-600">
-                    在 AutoCAD 將 HATCH 圖層改名為含植物名稱（例如「地被-麥門冬」）後重新上傳，系統可自動識別。
+                const categoryFiltered = categoryFilter === 'all'
+                  ? r.proximityConflicts
+                  : r.proximityConflicts.filter(c =>
+                      buildCategoryResults(c.issues).some(res => res.category === categoryFilter && res.severity !== 'normal'))
+                const emphasizeCategory = categoryFilter !== 'all' ? categoryFilter : undefined
+
+                const severeCards = categoryFiltered.filter(c => c.riskLevel === 'high')
+                const warningCards = categoryFiltered.filter(c => c.riskLevel === 'medium')
+                const passedCards = categoryFiltered.filter(c => c.riskLevel === 'low' || c.riskLevel === 'unmatched')
+                const filterStats = { total: categoryFiltered.length, severe: severeCards.length, warning: warningCards.length, passed: passedCards.length }
+                const WARNING_PREVIEW = 3
+                const visibleWarningCards = showAllIssues ? warningCards : warningCards.slice(0, WARNING_PREVIEW)
+                const hiddenWarningCount = warningCards.length - visibleWarningCards.length
+
+                if (r.proximityConflicts.length === 0) {
+                  return <p className="text-base text-stone-400 py-6 text-center">本區沒有空間鄰近配對需要檢討。</p>
+                }
+                return (
+                  <div className="space-y-4">
+                    <CategoryFilterBar filter={categoryFilter} onChange={setCategoryFilter} counts={categoryCounts} total={r.proximityConflicts.length} />
+                    <RiskFilterBar filter={riskFilter} onChange={setRiskFilter} stats={filterStats} />
+
+                    {(riskFilter === 'all' || riskFilter === 'severe') && severeCards.length > 0 && (
+                      <div className="space-y-2">
+                        <p className="text-sm font-bold text-red-600">🔴 嚴重（{severeCards.length}）</p>
+                        <div className="grid grid-cols-1 gap-3">
+                          {severeCards.map(c => (
+                            <ProximityConflictCard key={c.id} conflict={c} onLocate={setLocatorTarget} defaultExpanded emphasizeCategory={emphasizeCategory} />
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {(riskFilter === 'all' || riskFilter === 'warning') && warningCards.length > 0 && (
+                      <div className="space-y-2">
+                        <p className="text-sm font-bold text-amber-600">🟡 警示（{warningCards.length}）</p>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          {visibleWarningCards.map(c => (
+                            <ProximityConflictCard key={c.id} conflict={c} onLocate={setLocatorTarget} emphasizeCategory={emphasizeCategory} />
+                          ))}
+                        </div>
+                        {hiddenWarningCount > 0 && (
+                          <button
+                            type="button" onClick={() => setShowAllIssues(true)}
+                            className="text-sm font-semibold text-green-700 hover:text-green-800"
+                          >
+                            查看全部問題（還有 {hiddenWarningCount} 項）
+                          </button>
+                        )}
+                        {showAllIssues && warningCards.length > WARNING_PREVIEW && (
+                          <button
+                            type="button" onClick={() => setShowAllIssues(false)}
+                            className="text-sm font-semibold text-stone-500 hover:text-stone-700 ml-4"
+                          >
+                            收合
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {(riskFilter === 'all' || riskFilter === 'passed') && passedCards.length > 0 && (
+                      riskFilter === 'passed' ? (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          {passedCards.map(c => (
+                            <ProximityConflictCard key={c.id} conflict={c} onLocate={setLocatorTarget} emphasizeCategory={emphasizeCategory} />
+                          ))}
+                        </div>
+                      ) : (
+                        <details>
+                          <summary className="text-sm font-semibold text-stone-500 cursor-pointer select-none">
+                            已通過項目（{passedCards.length}）
+                          </summary>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2">
+                            {passedCards.map(c => (
+                              <ProximityConflictCard key={c.id} conflict={c} onLocate={setLocatorTarget} />
+                            ))}
+                          </div>
+                        </details>
+                      )
+                    )}
+
+                    {riskFilter === 'severe' && severeCards.length === 0 && (
+                      <p className="text-sm text-stone-400 py-4 text-center">此分區沒有嚴重項目。</p>
+                    )}
+                    {riskFilter === 'warning' && warningCards.length === 0 && (
+                      <p className="text-sm text-stone-400 py-4 text-center">此分區沒有警示項目。</p>
+                    )}
+                    {riskFilter === 'passed' && passedCards.length === 0 && (
+                      <p className="text-sm text-stone-400 py-4 text-center">此分區沒有已通過項目。</p>
+                    )}
+                  </div>
+                )
+              })()}
+
+              {/* ── 待確認 ── */}
+              {zoneSubTab === 'pending' && (
+                <div className="space-y-4">
+                  <p className="text-base text-stone-600">
+                    已確認 <span className="font-bold text-emerald-700">{confirmedCnt}</span> 項、待確認 <span className="font-bold text-amber-700">{pendingCnt}</span> 項
                   </p>
+
+                  {/* 圖層或圖塊尚未對應到植物名稱的項目 */}
+                  {stats && stats.unknownPlants.length > 0 && (
+                    <div className="rounded-lg border border-amber-200 bg-amber-50/60 p-4">
+                      <p className="text-base font-bold text-amber-800 mb-2">待確認植栽（圖層或圖塊尚未對應植物名稱）</p>
+                      <ul className="text-sm text-amber-700 space-y-1.5">
+                        {stats.unknownPlants.map((u, i) => (
+                          <li key={i} className="font-mono">
+                            · {u.source === 'hatch' ? 'HATCH' : 'BLOCK'} layer=&quot;{u.layerName}&quot;{u.blockName ? ` block="${u.blockName}"` : ''}
+                            {u.hatchCount !== undefined ? ` 區塊數=${u.hatchCount} 面積=${(u.areaM2 ?? 0).toFixed(2)}m²` : ''}
+                            {u.count !== undefined ? ` 數量=${u.count}` : ''}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* 索引表 HATCH 圖例對照結果 */}
+                  {r.finalReviewResults.length > 0 && (
+                    <div className="rounded-xl border border-blue-200 overflow-hidden bg-white">
+                      <div className="px-4 py-2.5 bg-blue-50 border-b border-blue-100">
+                        <p className="text-lg font-bold text-blue-900">植栽索引表判讀結果</p>
+                      </div>
+                      <div className="divide-y divide-stone-100">
+                        {r.finalReviewResults.map((fr, i) => (
+                          <div key={i} className={`px-4 py-3 ${fr.matchedPlantName ? '' : 'bg-amber-50/40'}`}>
+                            {fr.matchedPlantName ? (
+                              <>
+                                <div className="flex items-center gap-2 mb-1 flex-wrap">
+                                  <span className="text-base font-bold text-stone-800">
+                                    偵測到{fr.detectedPatternType === 'INSERT' ? '植栽圖塊' : '鋪面/地被'}：{fr.matchedPlantName}
+                                  </span>
+                                  <span className={`text-sm px-2 py-0.5 rounded-full border font-medium ${
+                                    fr.confidence === 'high'   ? 'bg-emerald-50 border-emerald-200 text-emerald-700' :
+                                    fr.confidence === 'medium' ? 'bg-amber-50 border-amber-200 text-amber-700' :
+                                                                  'bg-red-50 border-red-200 text-red-600'
+                                  }`}>
+                                    {fr.confidence === 'high' ? '高信心' : fr.confidence === 'medium' ? '中信心' : '低信心'}
+                                  </span>
+                                </div>
+                                {fr.matchedLegendRow && (
+                                  <p className="text-sm text-stone-500">對應索引表：{fr.matchedLegendRow}</p>
+                                )}
+                                <p className="text-sm text-stone-500">
+                                  判讀依據：{fr.matchReason || '索引表 HATCH 圖例比對'}
+                                  {fr.matchScore > 0 && `（相似度 ${fr.matchScore}%）`}
+                                </p>
+                              </>
+                            ) : (
+                              <>
+                                <p className="text-sm font-semibold text-amber-700">未能與索引表圖例穩定對應</p>
+                                {fr.noMatchReasons && fr.noMatchReasons.length > 0 && (
+                                  <ul className="mt-1 space-y-0.5">
+                                    {fr.noMatchReasons.map((reason, j) => (
+                                      <li key={j} className="text-sm text-amber-600">• {reason}</li>
+                                    ))}
+                                  </ul>
+                                )}
+                              </>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 地被 / 鋪面 HATCH（正式資料來源：hatchPlants）── 只列名稱／代號，技術欄位收進「查看辨識細節」 */}
+                  {(() => {
+                    const hp = r.hatchPlants
+                    if (!hp) return null
+                    const allItems = [...hp.confirmed, ...hp.candidates]
+                    const totalHatch = allItems.length + hp.unmatchedCount
+                    if (allItems.length > 0) {
+                      return (
+                        <div className="rounded-xl border border-emerald-300 overflow-hidden">
+                          <div className="px-4 py-2.5 bg-emerald-600">
+                            <p className="text-base font-bold text-white">{r.zoneName}｜地被 / 鋪面 HATCH（{allItems.length} 種）</p>
+                          </div>
+                          <div className="divide-y divide-stone-100">
+                            {hp.confirmed.map((h, i) => (
+                              <div key={`c${i}`} className="px-4 py-2.5 flex items-center gap-2 flex-wrap">
+                                <span className="font-semibold text-stone-800 text-base">{h.plantName}</span>
+                                {h.legendCode && <span className="text-sm text-stone-500">索引表 {h.legendCode}</span>}
+                                <span className="text-sm text-emerald-700">✓ 已確認</span>
+                              </div>
+                            ))}
+                            {hp.candidates.map((h, i) => (
+                              <div key={`k${i}`} className="px-4 py-2.5 flex items-center gap-2 flex-wrap bg-amber-50/40">
+                                <span className="font-semibold text-stone-800 text-base">{h.plantName}</span>
+                                {h.legendCode && <span className="text-sm text-stone-500">索引表 {h.legendCode}</span>}
+                                <span className="text-sm text-amber-700 font-semibold">候選，需人工確認</span>
+                              </div>
+                            ))}
+                          </div>
+                          <details className="border-t border-stone-100">
+                            <summary className="px-4 py-2 text-sm text-stone-500 cursor-pointer hover:text-stone-700">
+                              查看辨識細節（信心度／比對來源）
+                            </summary>
+                            <div className="px-4 py-2 space-y-1">
+                              {allItems.map((h, i) => (
+                                <p key={i} className="text-sm text-stone-500">
+                                  {h.plantName}：信心度 {h.confidence}%，來源：{h.source}
+                                </p>
+                              ))}
+                            </div>
+                          </details>
+                          {hp.unmatchedCount > 0 && (
+                            <div className="px-4 py-1.5 bg-stone-50 border-t border-stone-100 text-sm text-stone-400">
+                              另有 {hp.unmatchedCount} 個 HATCH 未能穩定對應索引表圖例
+                            </div>
+                          )}
+                        </div>
+                      )
+                    }
+                    if (totalHatch > 0) {
+                      return (
+                        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+                          <p className="text-base font-semibold text-amber-800">
+                            本區有 HATCH {totalHatch} 個，但尚未能穩定對應索引表圖例
+                          </p>
+                        </div>
+                      )
+                    }
+                    return null
+                  })()}
+
+                  {/* 本區已辨識植物 */}
+                  {(() => {
+                    const plantMap = new Map(r.plants.map(p => [p.name, p]))
+                    return visibleEntries.length > 0 ? (
+                      <div className="rounded-xl border border-stone-200 overflow-hidden">
+                        <div className="px-4 py-2.5 bg-stone-50 border-b border-stone-100">
+                          <p className="text-lg font-bold text-stone-700">
+                            {r.zoneName}｜已判讀植物（{visibleEntries.length} 種）
+                          </p>
+                        </div>
+                        <div className="divide-y divide-stone-100">
+                          {visibleEntries.map((b, i) => {
+                            const dbPlant = b.plantName ? plantMap.get(b.plantName) : undefined
+                            return (
+                              <div key={i} className="px-4 py-2.5">
+                                <div className="flex items-start gap-3">
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <span className="font-semibold text-stone-800 text-base">{b.plantName}</span>
+                                      <span className={`text-sm px-1.5 py-0.5 rounded-full border font-medium ${
+                                        b.matchStatus === 'db-matched' ? 'bg-emerald-50 border-emerald-200 text-emerald-700' :
+                                        'bg-amber-50 border-amber-200 text-amber-600'
+                                      }`}>
+                                        {dbPlant?.subCategory || dbPlant?.category || b.detectedType || '面狀植栽'}
+                                      </span>
+                                    </div>
+                                    {dbPlant && (
+                                      <div className="flex flex-wrap gap-x-4 gap-y-0.5 mt-1 text-sm text-stone-500">
+                                        {dbPlant.height && <span>樹高 {dbPlant.height}</span>}
+                                        {dbPlant.sunRequirement && <span>日照 {dbPlant.sunRequirement}</span>}
+                                        {dbPlant.waterRequirement && <span>需水 {dbPlant.waterRequirement}</span>}
+                                        {dbPlant.maintenanceLevel && <span>維護 {dbPlant.maintenanceLevel}</span>}
+                                      </div>
+                                    )}
+                                  </div>
+                                  <div className="flex-shrink-0 text-right">
+                                    <span className="text-lg font-bold text-stone-700">{b.count}</span>
+                                    <span className="text-sm text-stone-400 ml-0.5">株</span>
+                                  </div>
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                        <details className="border-t border-stone-100">
+                          <summary className="px-4 py-2 text-sm text-stone-500 cursor-pointer hover:text-stone-700">
+                            查看辨識細節（索引表對照／信心度／來源標籤／未辨識統計）
+                          </summary>
+                          <div className="px-4 py-2 space-y-1.5">
+                            {visibleEntries.map((b, i) => {
+                              const legendRow = r.finalReviewResults.find(fr => fr.matchedPlantName === b.plantName)
+                              return (
+                                <p key={i} className="text-sm text-stone-500">
+                                  {b.plantName}
+                                  {legendRow?.matchedLegendRow && `｜索引表 ${legendRow.matchedLegendRow}`}
+                                  {legendRow?.matchScore != null && legendRow.matchScore > 0 && `｜信心度 ${legendRow.matchScore}%`}
+                                  {`｜來源：${sourceLabel(b)}`}
+                                </p>
+                              )
+                            })}
+                            {(unmatchedHatch > 0 || unmatchedPoly > 0) && (
+                              <p className="text-sm text-stone-400 pt-1.5 border-t border-stone-100">
+                                未辨識：HATCH × {unmatchedHatch}，邊界 × {unmatchedPoly}（已排除於審查結果外，若需確認請查閱 DXF 原圖索引表）
+                              </p>
+                            )}
+                          </div>
+                        </details>
+                      </div>
+                    ) : (
+                      <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+                        <p className="text-base font-semibold text-amber-800">本區尚未偵測到可穩定對應索引表的 HATCH 圖例。</p>
+                        {(unmatchedHatch > 0 || unmatchedPoly > 0) && (
+                          <p className="mt-1 text-sm text-amber-600">未辨識 HATCH：{unmatchedHatch} 個，空間邊界線：{unmatchedPoly} 個</p>
+                        )}
+                      </div>
+                    )
+                  })()}
+
+                  {/* 面狀植栽待補充 */}
+                  {r.areaLayerNotes.length > 0 && (
+                    <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-base text-blue-800 leading-relaxed">
+                      <strong>📐 面狀植栽待補充：</strong>
+                      以下 HATCH 有識別到種植範圍，但圖層名稱未含植物名稱，請確認：
+                      <ul className="mt-1 space-y-0.5">
+                        {r.areaLayerNotes.map((note, i) => (
+                          <li key={i} className="font-mono text-sm">· {note}</li>
+                        ))}
+                      </ul>
+                      <p className="mt-1 text-blue-600 text-sm">
+                        在 AutoCAD 將 HATCH 圖層改名為含植物名稱（例如「地被-麥門冬」）後重新上傳，系統可自動識別。
+                      </p>
+                    </div>
+                  )}
                 </div>
               )}
 
-              {/* 審查回覆文字（預設收合）*/}
+              {/* 審查回覆文字（預設收合，各子頁籤皆可查看）*/}
               {r.evalResult && (
                 <details className="rounded-xl border border-stone-200 overflow-hidden">
-                  <summary className="px-4 py-2.5 bg-stone-50 text-xs font-semibold text-stone-600 cursor-pointer">
+                  <summary className="px-4 py-2.5 bg-stone-50 text-sm font-semibold text-stone-600 cursor-pointer">
                     {r.zoneName} 審查回覆文字（可複製）
                   </summary>
-                  <div className="px-4 py-3 text-xs text-stone-700 whitespace-pre-wrap leading-relaxed bg-white">
+                  <div className="px-4 py-3 text-sm text-stone-700 whitespace-pre-wrap leading-relaxed bg-white">
                     {r.evalResult.reviewText}
                   </div>
                 </details>
+              )}
+
+              {locatorTarget && (
+                <DrawingLocatorModal
+                  instances={r.spatialInstances}
+                  targetIds={[locatorTarget.plantA.instanceId, locatorTarget.plantB.instanceId]}
+                  distanceCm={locatorTarget.distanceCm}
+                  relationshipLabel={
+                    locatorTarget.proximity === 'overlap' ? '範圍重疊'
+                    : locatorTarget.proximity === 'touching' ? '邊界相接'
+                    : locatorTarget.nearBand === 'adjacent' ? '鄰近－直接相鄰' : '鄰近－可能影響'
+                  }
+                  onClose={() => setLocatorTarget(null)}
+                />
               )}
             </div>
           )

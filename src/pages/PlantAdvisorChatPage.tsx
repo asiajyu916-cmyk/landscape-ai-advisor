@@ -17,9 +17,11 @@ import type { CsvPlantRecord, PlantImageData } from '@/types/csvPlant'
 import { savePlantsToStorage, loadPlantsWithCsvMerge } from '@/data/plantStore'
 import { loadImageStore, saveImageStore, upsertPlantImage } from '@/data/plantStore'
 import {
-  CONDITIONS, parseTypeIntent, matchesCategory, getAdvisorReply, type AdvisorReply, type PlantCondition,
+  CONDITIONS, parseTypeIntent, matchesCategory, getAdvisorReply, analyzeCombo, type AdvisorReply, type PlantCondition,
 } from '@/utils/plantAdvisor'
+import { buildComboSummary, type ComboSummary } from '@/utils/comboAnalysisPresentation'
 import { PlantCardItem, PlantDetailDrawer, AdvisorReplyCard, type PlantMatchTier } from './LandscapeAdvisorPage'
+import ComboAnalysisCard from '@/components/advisor/ComboAnalysisCard'
 
 type CategoryKey = 'tree' | 'shrub' | 'groundcover' | 'lawn'
 
@@ -110,14 +112,18 @@ const TYPE_FILTERS: Array<{ key: CategoryKey; label: string }> = [
   { key: 'lawn', label: '草皮' },
 ]
 
-// 快速篩選只暴露需求指定的 6 個條件（CONDITIONS 裡還有全日照/耐濕/原生等，
-// 保留給自然語言問句用，不塞進按鈕列，避免按鈕過多）
-const QUICK_CONDITION_KEYS = ['drought', 'shade', 'lowmaint', 'showy', 'leafdrop', 'toxic']
+// 快速篩選暴露的條件（CONDITIONS 裡還有全日照/耐濕/原生等，保留給自然語言問句用，
+// 不塞進按鈕列，避免按鈕過多）。不含「低維護」——maintenanceLevel 是從「維護管理」
+// 欄位文字推導，本地資料庫幾乎每筆都會提到修剪/排水/病蟲等通用種植說明，導致這個
+// 篩選幾乎永遠查無結果，故從快速篩選按鈕移除（CONDITIONS 本身保留，自然語言問句
+// 仍可透過「低維護」等關鍵字觸發，查無結果時會走 API 補充建議流程）
+const QUICK_CONDITION_KEYS = ['drought', 'shade', 'showy', 'leafdrop', 'toxic']
 
 interface ChatMsg {
   role: 'user' | 'assistant'
   text?: string
   reply?: AdvisorReply   // 有值時以 AdvisorReplyCard 呈現豐富格式（搭配徽章／風險清單／完整搭配方案）
+  combo?: ComboSummary   // 有值時以 ComboAnalysisCard 呈現「分析這組配置」的分層結果
 }
 
 interface ApiSuggestion { name: string; reason: string; sourceUrl?: string }
@@ -136,6 +142,24 @@ export default function PlantAdvisorChatPage() {
   const [apiSuggestions, setApiSuggestions] = useState<ApiSuggestion[] | null>(null)
   const [apiNote, setApiNote] = useState('')
   const [detail, setDetail] = useState<CsvPlantRecord | null>(null)
+
+  // ── 多選植物暫存區（點卡片「加入」只先暫存，不立即送審；按「分析這組配置」才
+  // 一次整合判斷。依 id 去重，分析後保留清單方便使用者繼續調整）───────────────
+  const [selectedPlants, setSelectedPlants] = useState<CsvPlantRecord[]>([])
+  const addSelectedPlant = useCallback((plant: CsvPlantRecord) => {
+    setSelectedPlants(prev => prev.some(p => p.id === plant.id) ? prev : [...prev, plant])
+  }, [])
+  const removeSelectedPlant = useCallback((id: string) => {
+    setSelectedPlants(prev => prev.filter(p => p.id !== id))
+  }, [])
+  const clearSelectedPlants = useCallback(() => setSelectedPlants([]), [])
+
+  const handleAnalyzeCombo = useCallback(() => {
+    if (selectedPlants.length < 2) return
+    const reply = analyzeCombo(selectedPlants, plants)
+    const combo = buildComboSummary(reply, selectedPlants)
+    setMessages(prev => [...prev, { role: 'assistant', combo }])
+  }, [selectedPlants, plants])
 
   const handleSaveImage = useCallback((plantName: string, data: Partial<PlantImageData>) => {
     setImageStore(prev => {
@@ -368,6 +392,12 @@ export default function PlantAdvisorChatPage() {
                   <AdvisorReplyCard r={m.reply} hidePairCategories />
                 </div>
               </div>
+            ) : m.combo ? (
+              <div key={i} className="flex justify-start w-full">
+                <div className="w-full min-w-0">
+                  <ComboAnalysisCard summary={m.combo} />
+                </div>
+              </div>
             ) : (
               <div key={i} className="flex justify-start">
                 <div className="max-w-[85%] rounded-2xl rounded-bl-md px-3.5 py-2.5 text-sm bg-stone-100 text-stone-700 whitespace-pre-line">
@@ -376,6 +406,34 @@ export default function PlantAdvisorChatPage() {
               </div>
             ))}
           </div>
+          {/* 已選植物暫存區：點卡片「加入」只先加進這裡，不立即送審；chips 可換行，
+              每個都能單獨用 × 移除，避免誤觸；至少 2 種才能分析 */}
+          {selectedPlants.length > 0 && (
+            <div className="flex-shrink-0 border-t border-stone-100 px-3 pt-3">
+              <div className="flex items-center justify-between mb-1.5">
+                <p className="text-xs font-semibold text-stone-500">已選植物 {selectedPlants.length} 種</p>
+                <button onClick={clearSelectedPlants} className="text-xs text-stone-400 hover:text-stone-600">清除全部</button>
+              </div>
+              <div className="flex flex-wrap gap-1.5 mb-2">
+                {selectedPlants.map(p => (
+                  <span key={p.id}
+                    className="inline-flex items-center gap-1 pl-2.5 pr-1.5 py-1 rounded-full bg-green-50 border border-green-200 text-xs text-green-800 font-medium">
+                    {p.name}
+                    <button onClick={() => removeSelectedPlant(p.id)} title={`移除${p.name}`}
+                      className="p-0.5 rounded-full hover:bg-green-100 text-green-600">
+                      <XIcon size={11} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+              <button onClick={handleAnalyzeCombo} disabled={selectedPlants.length < 2}
+                className={`w-full py-2 rounded-xl text-sm font-semibold transition-colors ${
+                  selectedPlants.length >= 2 ? 'bg-green-700 text-white hover:bg-green-800' : 'bg-stone-100 text-stone-400 cursor-not-allowed'
+                }`}>
+                {selectedPlants.length >= 2 ? '分析這組配置' : '請至少選擇 2 種植物'}
+              </button>
+            </div>
+          )}
           <div className="flex-shrink-0 p-3 border-t border-stone-100">
             <div className="flex gap-2">
               <input value={input} onChange={e => setInput(e.target.value)}
@@ -399,7 +457,7 @@ export default function PlantAdvisorChatPage() {
         </div>
 
         {/* 右側：AI 推薦植栽結果卡片 */}
-        <div className="flex-1 overflow-y-auto p-5 relative">
+        <div className="flex-1 min-w-0 overflow-y-auto p-5 relative">
           <div className="flex items-center justify-between mb-4">
             <p className="text-sm text-stone-500">
               {isSearchMode
@@ -409,12 +467,13 @@ export default function PlantAdvisorChatPage() {
           </div>
 
           {displayCards.length > 0 ? (
-            <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))' }}>
+            <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))' }}>
               {displayCards.map(c => (
                 <PlantCardItem key={c.plant.id} plant={c.plant} imageData={imageStore[c.plant.name]}
-                  added={false} fresh={false} isActive={detail?.id === c.plant.id}
+                  added={selectedPlants.some(p => p.id === c.plant.id)} addedLabel="已選" fresh={false} isActive={detail?.id === c.plant.id}
                   matchInfo={{ tier: c.tier, reason: c.reason, caution: c.caution }}
-                  onDetail={() => setDetail(prev => prev?.id === c.plant.id ? null : c.plant)} onAdd={() => {}} />
+                  onDetail={() => setDetail(prev => prev?.id === c.plant.id ? null : c.plant)}
+                  onAdd={() => addSelectedPlant(c.plant)} />
               ))}
             </div>
           ) : isSearchMode ? (
@@ -457,8 +516,8 @@ export default function PlantAdvisorChatPage() {
             <PlantDetailDrawer
               plant={detail}
               onClose={() => setDetail(null)}
-              onAdd={() => {}}
-              added={false}
+              onAdd={() => addSelectedPlant(detail)}
+              added={selectedPlants.some(p => p.id === detail.id)}
               imageData={imageStore[detail.name]}
               onSaveImage={data => handleSaveImage(detail.name, data)}
               onDelete={() => handleDeletePlant(detail.id)}

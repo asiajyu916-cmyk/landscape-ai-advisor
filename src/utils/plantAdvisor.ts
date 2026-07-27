@@ -318,6 +318,42 @@ export type QueryIntent =
   | 'irrigation_advice'      // 澆灌衝突原則
   | 'general_design_advice'  // 一般配植建議
 
+// ── 落葉性正規化（篩選／推薦分數／卡片顯示／注意事項共用同一套判定）────────────
+// CSV「是否容易落葉」欄位實際內容是 是／否／季節性換葉／-／待查／空白（不是「容易落葉」
+// 「落葉性強」這類敘述句），欄位空白時才退回用 category/subCategory/treeForm/
+// maintenanceNote 文字判斷。evergreen／leafdrop 兩個條件、卡片顯示文字全部呼叫
+// 這裡，不得各自另外寫一套中文字串比對，避免「季節性換葉」在不同地方判定不一致。
+export type LeafHabit = 'evergreen' | 'deciduous' | 'semi_deciduous' | 'seasonal_leaf_drop' | 'unknown'
+
+export function normalizeLeafHabit(p: Pick<CsvPlantRecord, 'leafDropStatus' | 'category' | 'subCategory' | 'treeForm' | 'maintenanceNote'>): LeafHabit {
+  const raw = (p.leafDropStatus || '').trim()
+  if (raw === '是') return 'deciduous'
+  if (raw === '否') return 'evergreen'
+  if (/季節性換葉|季節性落葉/.test(raw)) return 'seasonal_leaf_drop'
+  if (/半落葉|半常綠/.test(raw)) return 'semi_deciduous'
+  if (/落葉性強|容易落葉|落葉量大/.test(raw)) return 'deciduous'
+  if (/常綠/.test(raw)) return 'evergreen'
+  // 欄位空白／「-」／「待查」等未填寫情況，退回從樹型與類別文字判斷
+  const text = p.category + p.subCategory + p.treeForm + p.maintenanceNote
+  if (/半落葉|半常綠/.test(text)) return 'semi_deciduous'
+  if (/常綠/.test(text)) return 'evergreen'
+  if (/落葉/.test(text)) return 'deciduous'
+  return 'unknown'
+}
+
+/** 「容易落葉」篩選／推薦分數／卡片標籤／注意事項唯一共用的判定：落葉、半落葉、季節性換葉都算 */
+export function isEasyLeafDrop(habit: LeafHabit): boolean {
+  return habit === 'deciduous' || habit === 'semi_deciduous' || habit === 'seasonal_leaf_drop'
+}
+
+const LEAF_HABIT_LABEL: Record<LeafHabit, string> = {
+  evergreen: '常綠',
+  deciduous: '落葉性強',
+  semi_deciduous: '半落葉',
+  seasonal_leaf_drop: '季節性換葉',
+  unknown: '未特別標註',
+}
+
 // ── 條件查詢引擎（condition_search）──────────────────────────────────────────
 
 export interface PlantCondition {
@@ -378,7 +414,7 @@ export const CONDITIONS: PlantCondition[] = [
   },
   {
     key: 'evergreen', label: '常綠植物（落葉少）', pattern: /常綠|不落葉|落葉少|不容易落葉|不掉葉/,
-    test: p => !/落葉/.test(p.category + p.subCategory + p.treeForm + p.maintenanceNote),
+    test: p => normalizeLeafHabit(p) === 'evergreen',
     why: () => '常綠性，全年維持綠量、落葉清理負擔低',
     fallbackNote: '常綠樹種',
   },
@@ -395,16 +431,11 @@ export const CONDITIONS: PlantCondition[] = [
     fallbackNote: '需留意毒性資料',
   },
   {
-    key: 'leafdrop', label: '容易落葉植物', pattern: /容易落葉|落葉性強|落葉量大|掉葉/,
-    // 優先看「是否容易落葉」專用欄位（AI 搜尋補建的資料通常有填）；CSV 內建資料庫這欄
-    // 目前多半空白，退回從 category/subCategory/treeForm/maintenanceNote 文字判斷是否
-    // 標註為「落葉」樹種（與下面 evergreen 規則的判斷邏輯對稱，避免這條規則永遠查無結果）。
-    test: p => {
-      if (p.leafDropStatus) return /落葉性強|容易落葉/.test(p.leafDropStatus)
-      const text = p.category + p.subCategory + p.treeForm + p.maintenanceNote
-      return /落葉/.test(text) && !/常綠/.test(text)
-    },
-    why: p => p.leafDropStatus ? `落葉性：${p.leafDropStatus}` : `類型標註「${p.category}」，屬落葉性植物`,
+    key: 'leafdrop', label: '容易落葉植物', pattern: /容易落葉|落葉性強|落葉量大|掉葉|季節性換葉|季節性落葉/,
+    // 落葉、半落葉、季節性換葉都算「容易落葉」，統一交給 normalizeLeafHabit／isEasyLeafDrop
+    // 判斷，不在這裡另外寫中文字串比對（避免跟 evergreen／卡片顯示各自判定出現落差）。
+    test: p => isEasyLeafDrop(normalizeLeafHabit(p)),
+    why: p => `落葉性：${LEAF_HABIT_LABEL[normalizeLeafHabit(p)]}`,
     fallbackNote: '落葉性較明顯，需留意清理',
   },
 ]
@@ -514,7 +545,7 @@ function conditionSearchReply(q: string, conds: PlantCondition[], db: CsvPlantRe
 
 // ── 組合分析（多植物相容性 → 完整回覆）────────────────────────────────────────
 
-function analyzeCombo(plants: CsvPlantRecord[], db: CsvPlantRecord[], zoneName?: string): AdvisorReply {
+export function analyzeCombo(plants: CsvPlantRecord[], db: CsvPlantRecord[], zoneName?: string): AdvisorReply {
   const risks: string[] = []
   const fixes: string[] = []
   const badPairs: AdvisorReply['badPairs'] = []
@@ -541,6 +572,23 @@ function analyzeCombo(plants: CsvPlantRecord[], db: CsvPlantRecord[], zoneName?:
     score -= 8
     risks.push(`${highMaint.map(p => p.name).join('、')} 維護需求高，整體養護人力與預算偏重。`)
     fixes.push('高維護植栽建議集中於可及性高的區位，或以低維護同類植物替換部分數量。')
+  }
+
+  // 毒性／安全性風險
+  const toxic = plants.filter(p => p.toxicity && /有毒|毒性(強|中)/.test(p.toxicity))
+  if (toxic.length > 0) {
+    score -= 5
+    risks.push(`${toxic.map(p => p.name).join('、')} 具毒性（${toxic.map(p => p.toxicity).join('・')}），兒童／寵物易接觸的區域需留意。`)
+    fixes.push(`${toxic.map(p => p.name).join('、')} 建議避開遊戲區、步道邊緣等易誤觸範圍，或設置警示標示。`)
+  }
+
+  // 生長速度（無專屬欄位，從既有種植說明文字粗略判斷，僅供參考）
+  const fastGrowing = plants.filter(p => /生長快|生長迅速|生長勢強/.test(p.maintenanceNote + p.treeForm))
+  const slowGrowing = plants.filter(p => /生長緩慢|生長緩|生長勢弱/.test(p.maintenanceNote + p.treeForm))
+  if (fastGrowing.length > 0 && slowGrowing.length > 0) {
+    score -= 4
+    risks.push(`${fastGrowing.map(p => p.name).join('、')} 生長較快，可能提早遮蔽或壓迫生長較緩的 ${slowGrowing.map(p => p.name).join('、')}。`)
+    fixes.push('生長速度差異大的植栽建議加大種植間距，或提高修剪頻率維持層次平衡。')
   }
 
   // 層次結構

@@ -1319,7 +1319,7 @@ const MATCH_TIER_STYLE: Record<PlantMatchTier, string> = {
   caution: 'bg-orange-100 text-orange-700 border-orange-300',
 }
 
-export function PlantCardItem({ plant, imageData, added, fresh, isActive, onDetail, onAdd, matchInfo }: {
+export function PlantCardItem({ plant, imageData, added, fresh, isActive, onDetail, onAdd, matchInfo, addedLabel = '已在組合' }: {
   plant: CsvPlantRecord
   imageData?: PlantImageData
   added: boolean
@@ -1328,6 +1328,7 @@ export function PlantCardItem({ plant, imageData, added, fresh, isActive, onDeta
   onDetail: () => void
   onAdd: () => void
   matchInfo?: PlantMatchInfo
+  addedLabel?: string   // 已加入時的按鈕文字，不同頁面「加入」的意義不同（正式配置 vs 暫存多選），預設沿用既有措辭
 }) {
   const approvedUrl = (!imageData?.imageReviewStatus || imageData.imageReviewStatus === 'approved')
     ? imageData?.imageUrl : undefined
@@ -1344,7 +1345,7 @@ export function PlantCardItem({ plant, imageData, added, fresh, isActive, onDeta
   return (
     <div
       onClick={onDetail}
-      className={`bg-white rounded-2xl border overflow-hidden flex flex-col cursor-pointer transition-all hover:shadow-lg ${
+      className={`bg-white rounded-2xl border overflow-hidden flex flex-col min-w-0 w-full cursor-pointer transition-all hover:shadow-lg ${
         isActive ? 'border-green-400 shadow-md ring-2 ring-green-200' : 'border-stone-200 hover:border-green-300'
       }`}>
 
@@ -1385,8 +1386,8 @@ export function PlantCardItem({ plant, imageData, added, fresh, isActive, onDeta
       )}
 
       {/* ② Name */}
-      <div className="px-3.5 pt-3 pb-1">
-        <p className="font-bold text-stone-900 text-[15px] leading-tight">{plant.name}</p>
+      <div className="px-3.5 pt-3 pb-1 min-w-0">
+        <p className="font-bold text-stone-900 text-[15px] leading-tight truncate">{plant.name}</p>
         {plant.scientificName && (
           <p className="text-[11px] text-stone-400 italic mt-0.5 truncate">{plant.scientificName}</p>
         )}
@@ -1433,14 +1434,14 @@ export function PlantCardItem({ plant, imageData, added, fresh, isActive, onDeta
       {/* ③.6 適配原因／注意事項（僅在有 matchInfo 時顯示）*/}
       {matchInfo?.reason && (
         <div className="px-3.5 pb-1.5">
-          <p className="text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1.5 leading-snug">
+          <p className="text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1.5 leading-snug line-clamp-2">
             <span className="font-semibold">適配原因：</span>{matchInfo.reason}
           </p>
         </div>
       )}
       {matchInfo?.caution && (
         <div className="px-3.5 pb-1.5">
-          <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1.5 leading-snug">
+          <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1.5 leading-snug line-clamp-2">
             <span className="font-semibold">注意事項：</span>{matchInfo.caution}
           </p>
         </div>
@@ -1475,7 +1476,7 @@ export function PlantCardItem({ plant, imageData, added, fresh, isActive, onDeta
             added ? 'bg-stone-100 text-stone-400 cursor-not-allowed' :
             'bg-green-700 text-white hover:bg-green-800'
           }`}>
-          {fresh ? '✓ 已加入' : added ? '已在組合' : '加入'}
+          {fresh ? '✓ 已加入' : added ? addedLabel : '加入'}
         </button>
       </div>
     </div>
@@ -3687,9 +3688,14 @@ tfoot{display:table-footer-group}
             )}
           </div>
 
-          {/* 桌機版工具列 */}
-          <div className="hidden md:flex items-center gap-2">
-            <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border ${
+          {/* 桌機版工具列 —— min-w-0 + overflow-x-auto：空間不夠時整條工具列在自己
+              範圍內橫向捲動，不會讓「127 筆植栽資料庫」「植栽資料庫」這類徽章/按鈕
+              文字被壓到換行變形；各區塊 flex-shrink-0 + whitespace-nowrap 確保寬度固定。
+              scrollbar 相關 class／style：Windows/Chromium 預設會畫出常駐灰色捲軸軌道，
+              這裡隱藏視覺捲軸（滾動功能不受影響，仍可用滑鼠滾輪／觸控板橫向捲動）*/}
+          <div className="hidden md:flex items-center gap-2 min-w-0 flex-1 overflow-x-auto [&::-webkit-scrollbar]:hidden"
+            style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}>
+            <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border flex-shrink-0 whitespace-nowrap ${
               dbStatus === 'loaded' ? 'bg-green-800/40 text-green-200 border-green-700/50'
               : dbStatus === 'loading' ? 'bg-white/10 text-white/60 border-white/20'
               : 'bg-amber-800/40 text-amber-200 border-amber-700/50'
@@ -3698,16 +3704,16 @@ tfoot{display:table-footer-group}
                dbStatus === 'loading' ? <><RefreshCw size={11} className="animate-spin" />載入中…</> :
                <><AlertTriangle size={11} />未載入資料庫</>}
             </div>
-            <div className="flex items-center gap-1.5 border-l border-white/20 pl-2">
+            <div className="flex items-center gap-1.5 border-l border-white/20 pl-2 flex-shrink-0">
               {canManagePlants && (
                 <button onClick={() => setShowCsvImport(true)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-white/10 border border-white/20 rounded-lg text-xs text-white hover:bg-white/20 transition-colors font-medium">
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-white/10 border border-white/20 rounded-lg text-xs text-white hover:bg-white/20 transition-colors font-medium flex-shrink-0 whitespace-nowrap">
                   <Upload size={12} />匯入 CSV
                 </button>
               )}
               {canViewPlantDatabase && (
                 <button onClick={() => setShowDb(true)} disabled={allPlants.length === 0}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border flex-shrink-0 whitespace-nowrap ${
                     allPlants.length > 0 ? 'bg-white/10 border-white/20 text-white hover:bg-white/20' : 'border-white/10 text-white/30 cursor-not-allowed'
                   }`}>
                   <Database size={12} />植栽資料庫
@@ -3715,10 +3721,10 @@ tfoot{display:table-footer-group}
               )}
             </div>
             {canExportPlantData && (
-              <div className="flex items-center gap-1.5 border-l border-white/20 pl-2">
+              <div className="flex items-center gap-1.5 border-l border-white/20 pl-2 flex-shrink-0">
                 <div className="flex flex-col items-end gap-0.5">
                   <button onClick={handleExportPdf} disabled={!result || pdfGenerating}
-                    className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                    className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors flex-shrink-0 whitespace-nowrap ${
                       result && !pdfGenerating ? 'bg-[#d8f3dc] text-[#1a4731] hover:bg-white' : 'bg-white/10 text-white/30 cursor-not-allowed'
                     }`}>
                     {pdfGenerating ? <RefreshCw size={12} className="animate-spin" /> : <FileOutput size={12} />}
@@ -3727,7 +3733,7 @@ tfoot{display:table-footer-group}
                   {pdfGenError && <p className="text-[10px] text-red-300">{pdfGenError}</p>}
                 </div>
                 <button onClick={handleExport} disabled={!result}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border flex-shrink-0 whitespace-nowrap ${
                     result ? 'bg-white/10 border-white/20 text-white hover:bg-white/20' : 'border-white/10 text-white/30 cursor-not-allowed'
                   }`}>
                   <FileDown size={12} />txt
@@ -3735,13 +3741,13 @@ tfoot{display:table-footer-group}
               </div>
             )}
             {/* 使用者資訊 + 登出 */}
-            <div className="flex items-center gap-2 border-l border-white/20 pl-2">
+            <div className="flex items-center gap-2 border-l border-white/20 pl-2 flex-shrink-0">
               <div className="text-right leading-tight">
                 <p className="text-xs font-semibold text-white truncate max-w-[140px]">{profile?.displayName || profile?.email}</p>
                 {profile?.displayName && <p className="text-[10px] text-green-200/60 truncate max-w-[140px]">{profile.email}</p>}
               </div>
               <button onClick={() => signOut()} title="登出"
-                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white/10 border border-white/20 text-white hover:bg-white/20 transition-colors">
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white/10 border border-white/20 text-white hover:bg-white/20 transition-colors flex-shrink-0">
                 <LogOut size={13} />
               </button>
             </div>

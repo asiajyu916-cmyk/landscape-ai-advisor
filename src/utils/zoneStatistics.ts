@@ -35,6 +35,9 @@ import type { CsvPlantRecord } from '@/types/csvPlant'
 
 export const UNIT_DIVISOR: Record<DrawingUnit, number> = { mm: 1_000_000, cm: 10_000, m: 1 }
 
+/** 線性距離換算（非面積）：1 圖面單位 = 多少公分。供空間鄰近判斷（plantProximity.ts）使用 */
+export const CM_PER_DRAWING_UNIT: Record<DrawingUnit, number> = { mm: 0.1, cm: 1, m: 100 }
+
 /** HEADER $INSUNITS 原始代碼 → DrawingUnit；僅認 mm(4)/cm(5)/m(6)，其餘一律「無法辨識」交給 UI 詢問 */
 export function unitFromInsUnits(code?: number): DrawingUnit | undefined {
   if (code === 4) return 'mm'
@@ -43,7 +46,7 @@ export function unitFromInsUnits(code?: number): DrawingUnit | undefined {
   return undefined
 }
 
-const AREA_EPS = 1e-6   // 圖面單位²，濾除浮點雜訊交集
+export const AREA_EPS = 1e-6   // 圖面單位²，濾除浮點雜訊交集
 const round2 = (n: number) => Math.round(n * 100) / 100
 
 // ── 去重／內容指紋 ─────────────────────────────────────────────────────────────
@@ -79,10 +82,10 @@ function dedupLoopsByFingerprint(loops: DxfPolygon[]): DxfPolygon[] {
   return out
 }
 
-interface HandleGroup { handle: string | undefined; loops: DxfPolygon[] }
+export interface HandleGroup { handle: string | undefined; loops: DxfPolygon[] }
 
 /** 同一 HATCH 實體（同一 handle）的多個 loop 分為一組，供孔洞判斷用 */
-function groupHatchLoopsByHandle(polys: DxfPolygon[]): HandleGroup[] {
+export function groupHatchLoopsByHandle(polys: DxfPolygon[]): HandleGroup[] {
   const map = new Map<string, DxfPolygon[]>()
   const noHandle: DxfPolygon[] = []
   for (const p of polys) {
@@ -106,10 +109,10 @@ function groupHatchLoopsByHandle(polys: DxfPolygon[]): HandleGroup[] {
 
 // ── 孔洞／島狀區域判斷 ─────────────────────────────────────────────────────────
 
-interface LoopGroup { outer: DxfPolygon; holes: DxfPolygon[] }
+export interface LoopGroup { outer: DxfPolygon; holes: DxfPolygon[] }
 
 /** 同一 handle 內：面積由大到小排序，重心落在較大 loop 內者視為孔洞；否則為新的外邊界（支援島狀多重面域） */
-function classifyOuterAndHoles(loops: DxfPolygon[]): LoopGroup[] {
+export function classifyOuterAndHoles(loops: DxfPolygon[]): LoopGroup[] {
   const sorted = [...loops].sort((a, b) => polygonArea(b.vertices) - polygonArea(a.vertices))
   const outers: LoopGroup[] = []
   for (const loop of sorted) {
@@ -131,7 +134,7 @@ function snap(n: number): number {
   return Math.round(n * 1e6) / 1e6
 }
 
-function toRing(vertices: Array<{ x: number; y: number }>): PcRing {
+export function toRing(vertices: Array<{ x: number; y: number }>): PcRing {
   const ring: PcRing = []
   for (const v of vertices) {
     const pt: [number, number] = [snap(v.x), snap(v.y)]
@@ -143,7 +146,7 @@ function toRing(vertices: Array<{ x: number; y: number }>): PcRing {
   return ring
 }
 
-function toClippingPolygon(group: LoopGroup): PcPolygon {
+export function toClippingPolygon(group: LoopGroup): PcPolygon {
   return [toRing(group.outer.vertices), ...group.holes.map(h => toRing(h.vertices))]
 }
 
@@ -163,7 +166,7 @@ function polygonWithHolesArea(poly: PcPolygon): number {
   return Math.max(0, area)
 }
 
-function multiPolygonArea(mp: PcMultiPolygon): number {
+export function multiPolygonArea(mp: PcMultiPolygon): number {
   return mp.reduce((s, poly) => s + polygonWithHolesArea(poly), 0)
 }
 

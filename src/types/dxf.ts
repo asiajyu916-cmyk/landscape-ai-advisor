@@ -1,5 +1,7 @@
 // ── DXF 解析相關型別 ──────────────────────────────────────────────────────────
 
+import type { IssueDetail } from '@/utils/plantEvaluator'
+
 // ── 植栽索引表 ────────────────────────────────────────────────────────────────
 
 export interface PlantScheduleEntry {
@@ -210,6 +212,68 @@ export interface MultiLayerResult {
   underlayerDesc: string  // 所在範圍描述
   riskReasons: string[]
   suggestions: string[]
+}
+
+// ── 空間鄰近式植栽衝突檢討 ──────────────────────────────────────────────────────
+// 取代「同分區內所有已比對植物全組合比較」：先做分區篩選，再做空間鄰近篩選
+// （only overlap/touching/near 才繼續），最後才對「這一對」植物做特性衝突判斷。
+// 見 src/utils/plantProximity.ts。
+
+/** overlap=範圍重疊；touching=邊界相接；near=邊界距離在設定值內；far=超過設定距離，不比對 */
+export type ProximityLevel = 'overlap' | 'touching' | 'near' | 'far'
+
+/** near 再細分：adjacent=0~50cm 直接相鄰；influence=50~100cm 可能影響（門檻見 ProximityConfig） */
+export type NearBand = 'adjacent' | 'influence'
+
+export type SpatialInstanceKind = 'tree' | 'shrub-hatch' | 'lawn-hatch' | 'groundcover-hatch' | 'unknown-hatch'
+
+/**
+ * 一個逐一實體的空間植栽單位：每個灌木/地被/草皮 HATCH（依 DXF entity handle 分組，
+ * 不同 handle 絕不合併，即使同名同圖層）視為獨立種植區；每棵樹為一個 INSERT 實例。
+ */
+export interface SpatialPlantInstance {
+  id: string
+  kind: SpatialInstanceKind
+  zoneName: string
+  label: string                 // 種植區塊標籤，例如 "H-12"
+  plantName?: string
+  center: { x: number; y: number }
+  bbox: { minX: number; maxX: number; minY: number; maxY: number }
+  canopyRadius?: number         // 樹木限定：冠幅 buffer 半徑（圖面單位）
+  polygonRings?: Array<Array<{ x: number; y: number }>>  // HATCH 限定：外邊界＋孔洞
+  sourceHandles: string[]
+}
+
+/**
+ * high/medium/low 依 judgment × proximity 交叉決定（見 plantProximity.ts 的
+ * deriveRiskLevel）；unmatched＝空間上確實鄰近/相接/重疊，但至少一邊植物名稱
+ * 比對不到資料庫，無法判斷相容性——不可因此整筆丟棄，仍需計入統計/可篩選。
+ */
+export type RiskLevel = 'high' | 'medium' | 'low' | 'unmatched'
+
+export interface PlantConflictResult {
+  id: string
+  zoneName: string
+  locationLabel: string          // 例如 "A區／種植區塊 H-12"
+  plantA: { name: string; label: string; kind: SpatialInstanceKind; instanceId: string }
+  plantB: { name: string; label: string; kind: SpatialInstanceKind; instanceId: string }
+  proximity: ProximityLevel
+  nearBand?: NearBand
+  distanceCm: number
+  judgment: 'ok' | 'caution' | 'conflict' | 'unmatched'
+  riskLevel: RiskLevel
+  issues: IssueDetail[]
+}
+
+/** 喬木盤點（不做兩兩相容性衝突卡，只做空間事實盤點，見 plantProximity.ts 的 computeZoneTreeInventory） */
+export interface TreeInventoryItem {
+  plantName: string
+  count: number
+  minSpacingCm?: number          // 與同分區最近一棵其他樹的距離（cm）；僅一棵時 undefined
+  canopyOverlapCount: number     // 樹冠與其他樹重疊的株數
+  shadedUnderstory: Array<{ plantName: string; label: string }>  // 樹冠壓到的灌木/地被 HATCH
+  buildingProximity: 'unsupported'   // 尚未支援：無建築圖層辨識依據
+  drivewayProximity: 'unsupported'   // 尚未支援：無車道圖層辨識依據
 }
 
 // ── 分區植栽面積與喬木數量統計 ──────────────────────────────────────────────────
