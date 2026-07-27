@@ -33,3 +33,8 @@ yarn-error.log*
 
 # TypeScript cache
 *.tsbuildinfo
+
+# 備份壓縮檔／臨時測試腳本（不上正式站）
+src.rar
+src.zip
+test-parser.mjs
