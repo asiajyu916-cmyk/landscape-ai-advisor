@@ -16,7 +16,9 @@ import {
 
 interface Props {
   conflict: PlantConflictResult
-  onLocate: (conflict: PlantConflictResult) => void
+  /** 「在圖面定位」需要 DxfReviewPage 的圖面畫布——沒有畫布可定位的情境（如 AI 配植
+   * 評估頁的分區檢視）不傳這個 prop，按鈕就不會顯示 */
+  onLocate?: (conflict: PlantConflictResult) => void
   defaultExpanded?: boolean
   /** 目前分類篩選（非「全部」時），有指定就強調這個分類的內容，取代自動判斷的主分類 */
   emphasizeCategory?: IssueCategoryGroup
@@ -150,13 +152,15 @@ export default function ProximityConflictCard({ conflict: c, onLocate, defaultEx
                 </>
               )}
 
-              <button
-                type="button"
-                onClick={() => onLocate(c)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-stone-300 bg-white text-base font-medium text-stone-600 hover:bg-stone-50"
-              >
-                <MapPin size={14} />在圖面定位
-              </button>
+              {onLocate && (
+                <button
+                  type="button"
+                  onClick={() => onLocate(c)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-stone-300 bg-white text-base font-medium text-stone-600 hover:bg-stone-50"
+                >
+                  <MapPin size={14} />在圖面定位
+                </button>
+              )}
             </div>
           )}
         </div>

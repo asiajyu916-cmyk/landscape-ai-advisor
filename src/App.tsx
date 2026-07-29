@@ -76,15 +76,16 @@ function AuthenticatedApp() {
           />
         ) : <NoPermissionNotice featureName="PDF 審圖" />
       )}
-      {activeTab === 'dxf' && (
-        hasPermission(profile?.role, 'canReviewDxf') ? (
-          <DxfReviewPage
-            activeTab={activeTab}
-            onTabChange={setActiveTab}
-            onImport={handleDxfImport}
-          />
-        ) : <NoPermissionNotice featureName="DXF 審查" />
-      )}
+      {/* DxfReviewPage 只要有權限就永遠掛載（比照上面 LandscapeAdvisorPage 的模式）——
+          切離 DXF 分頁時元件自己用 activeTab 決定要不要用 CSS 藏起來，不會 unmount，
+          這樣使用者從 AI 配植評估「返回 DXF 分區審查」時不必重新上傳圖面 */}
+      {hasPermission(profile?.role, 'canReviewDxf') ? (
+        <DxfReviewPage
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+          onImport={handleDxfImport}
+        />
+      ) : (activeTab === 'dxf' && <NoPermissionNotice featureName="DXF 審查" />)}
       {activeTab === 'advisor' && (
         hasPermission(profile?.role, 'canUseAiPlanting')
           ? <PlantAdvisorChatPage />

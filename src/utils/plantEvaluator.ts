@@ -27,6 +27,22 @@ export interface CatSummary {
   summary: string
 }
 
+// 替代植栽建議（跟 LandscapeAdvisorPage.tsx 本地版本逐欄位對齊，方便 StoredZone 直接
+// 餵給既有的 AltCard 元件而不用轉型——兩邊各自維護一份是刻意的，見 evaluate() 內註解）
+export interface AltOption {
+  plant: CsvPlantRecord
+  reason: string
+  riskReduction: string
+  sameSubCategory?: boolean
+}
+
+export interface AltSuggestion {
+  originalPlant: SelectedCsvPlant
+  noSameType?: boolean
+  problemLabels: string[]
+  alternatives: AltOption[]
+}
+
 export interface EvalResult {
   score: number
   compatLevel: CompatLevel
@@ -40,6 +56,9 @@ export interface EvalResult {
    * 只要有嚴重配對，風險等級就是「高」，即使 score 因為多數配對通過而不算太低。
    * evaluate() 產生的 EvalResult 不填這個欄位。 */
   overallRiskLevel?: '高' | '中' | '低'
+  /** DXF 分區審查用：evaluate() 才會填，aggregatePairConflictsToEvalResult() 不填，
+   * 分區的 evalResult 是事後另外呼叫一次 evaluate() 補上這個欄位（見 buildZoneReviews）。 */
+  alternatives?: AltSuggestion[]
 }
 
 // ── Core evaluate ─────────────────────────────────────────────────────────────
@@ -247,6 +266,99 @@ export function evaluate(plants: SelectedCsvPlant[], allPlants: CsvPlantRecord[]
   else if (score >= 40) compatLevel = '需調整配置'
   else                  compatLevel = '高風險不建議'
 
+  // ── Alternatives（逐字對齊 LandscapeAdvisorPage.tsx 本地 evaluate() 同一段，兩邊
+  // 各自維護一份是刻意的——見檔頭與 EvalResult.alternatives 註解）──────────────
+  const problemPlants = plants.filter(p =>
+    p.status === '不建議' || p.status === '需注意' || problemIds.has(p.instanceId)
+  )
+  const selectedIds = new Set(plants.map(p => p.id))
+
+  const alternatives: AltSuggestion[] = problemPlants.map(target => {
+    const others = plants.filter(p => p.instanceId !== target.instanceId)
+    // 優先同 subCategory（大喬木→大喬木），其次同 normalizedCategory，絕不跨大類
+    const sameSubCat = allPlants.filter(c =>
+      c.subCategory === target.subCategory && c.subCategory !== '' && !selectedIds.has(c.id)
+    )
+    const sameCat = allPlants.filter(c =>
+      c.normalizedCategory === target.normalizedCategory && !selectedIds.has(c.id)
+    )
+    // subCategory 有值時嚴格同層，不跨大喬木/小喬木/灌木等；subCategory 為空才 fallback 同大類
+    const candidates = (target.subCategory && target.subCategory !== '')
+      ? sameSubCat
+      : sameCat
+    const strictMode = sameSubCat.length >= 1
+
+    type Scored = { plant: CsvPlantRecord; score: number; reasons: string[]; reductions: string[] }
+    const scored: Scored[] = candidates.map(c => {
+      let sc = 0; const reasons: string[] = []; const reductions: string[] = []
+
+      // water compatibility
+      const targetWaterConflicts = others.filter(o => Math.abs(waterScore(o.waterRequirement) - waterScore(target.waterRequirement)) >= 1).length
+      const candWaterConflicts = others.filter(o => Math.abs(waterScore(o.waterRequirement) - waterScore(c.waterRequirement)) >= 1).length
+      if (candWaterConflicts < targetWaterConflicts) {
+        sc += 15; reasons.push(`水分需求（${c.waterRequirement}）與本區其他植栽更為接近`); reductions.push('降低澆水衝突風險')
+      }
+
+      // sun compatibility
+      const candSuns = [...others.map(o => o.sunRequirement), c.sunRequirement]
+      const targSuns = [...others.map(o => o.sunRequirement), target.sunRequirement]
+      if (sunConflictLevel(candSuns) === 'none' && sunConflictLevel(targSuns) !== 'none') {
+        sc += 15; reasons.push(`日照需求（${c.sunRequirement}）消除了日照衝突`); reductions.push('消除日照需求極端差異')
+      } else if (sunConflictLevel(candSuns) === 'mild' && sunConflictLevel(targSuns) === 'severe') {
+        sc += 8; reasons.push(`日照需求（${c.sunRequirement}）降低日照衝突程度`)
+      }
+
+      // drainage
+      if (c.wetTolerance !== '待查' && target.wetTolerance !== c.wetTolerance) {
+        const candWets = [...others.map(o => o.wetTolerance), c.wetTolerance]
+        const targWets = [...others.map(o => o.wetTolerance), target.wetTolerance]
+        if (drainageConflictLevel(candWets) === 'none' && drainageConflictLevel(targWets) !== 'none') {
+          sc += 10; reasons.push(`耐濕性（${c.wetTolerance}）與本區排水條件更相容`); reductions.push('解除排水條件衝突')
+        }
+      }
+
+      // maintenance
+      if (c.maintenanceLevel === '低' && target.maintenanceLevel !== '低') {
+        sc += 8; reasons.push('維護需求低，便於統一養護管理'); reductions.push('降低整體養護成本')
+      }
+
+      // data completeness
+      if (c.dataComplete && !target.dataComplete) {
+        sc += 5; reasons.push('資料來源完整，可靠性較高')
+      }
+
+      return { plant: c, score: sc, reasons, reductions }
+    })
+
+    const top3 = scored.filter(s => s.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 3)
+      .map(s => ({
+        plant: s.plant,
+        reason: s.reasons.slice(0, 2).join('；') || '整體習性與本區植物較相容',
+        riskReduction: s.reductions.length > 0 ? s.reductions.slice(0, 2).join('、') : '提高整體配置相容性',
+        sameSubCategory: s.plant.subCategory === target.subCategory,
+      }))
+
+    const noSameType = top3.length === 0 && candidates.length === 0
+
+    const pLabels: string[] = []
+    if (target.status === '不建議') pLabels.push('不建議')
+    else if (target.status === '需注意') pLabels.push('需注意')
+    if (problemIds.has(target.instanceId)) {
+      issues.forEach(iss => {
+        if (iss.cause.includes(target.name)) pLabels.push(iss.category)
+      })
+    }
+
+    return {
+      originalPlant: target,
+      problemLabels: [...new Set(pLabels)],
+      alternatives: top3,
+      noSameType: noSameType || (!strictMode && top3.length === 0),
+    }
+  }).filter(s => s.alternatives.length > 0 || s.noSameType)
+
   const categories: CatSummary[] = categoriesFromIssues(issues)
 
   const allDanger  = issues.filter(i => i.level === 'danger')
@@ -296,8 +408,7 @@ export function evaluate(plants: SelectedCsvPlant[], allPlants: CsvPlantRecord[]
     reviewText += `\n\n【相近植物替代評估】\n本次評估中，以下植物因本地資料庫查無完全相符資料，經人工確認以名稱相近植物暫代進行模擬評估：\n${substituteList}\n\n本結果使用相近植物資料進行模擬，不代表原植物品種的正式生育特性，僅供初步參考，正式設計文件請另行查證原始植物之官方生育資料。`
   }
 
-  void allPlants // 保留參數以維持與 LandscapeAdvisorPage 相同介面
-  return { score, compatLevel, categories, issues, aiSuggestion, adjustmentPlan, reviewText }
+  return { score, compatLevel, categories, issues, aiSuggestion, adjustmentPlan, reviewText, alternatives }
 }
 
 // ── 逐對（空間鄰近）評估 ─────────────────────────────────────────────────────

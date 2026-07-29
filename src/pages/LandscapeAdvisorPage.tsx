@@ -30,6 +30,10 @@ import type {
   PlantImageData, ImageStore, CandidatePhoto, ImageReviewStatus,
 } from '@/types/csvPlant'
 import type { SimilarPlantCandidate, PlantSearchResult, DraftPlantRecord } from '@/types/plantSearch'
+import type { AltSuggestion as DxfAltSuggestion } from '@/utils/plantEvaluator'
+import type { PlantConflictResult, TreeInventoryItem } from '@/types/dxf'
+import ProximityConflictCard from '@/components/dxf/ProximityConflictCard'
+import { exportHtmlAsPaginatedPdf } from '@/utils/pdfCanvasExport'
 
 // ── tiny helpers ──────────────────────────────────────────────────────────────
 function uid() { return Math.random().toString(36).slice(2) }
@@ -78,6 +82,24 @@ interface EvalResult {
   aiSuggestion: string
   adjustmentPlan: string[]
   reviewText: string
+}
+
+// DXF 分區審查橋接資料（見 DxfReviewPage.tsx saveZoneReviews 的 full 投影，
+// 存在 sessionStorage['dxf-zone-review-full']）。搬到 module scope，讓
+// ZoneAwareResultPanel（獨立 function component，才能安全使用 hooks）能引用同一個型別。
+type StoredZone = {
+  zoneName: string; status: string; plantCount: number
+  score?: number; compatLevel?: string
+  issueCount: number; dangerCount: number; mainIssues: string[]
+  categories?: Array<{ key:string; label:string; count:number; level:string; statusLabel:string; summary:string }>
+  issues?: Array<{ category:string; level:string; cause:string; impact:string; suggestion:string }>
+  aiSuggestion?: string; adjustmentPlan?: string[]; reviewText?: string
+  alternatives?: DxfAltSuggestion[]
+  proximityConflicts?: PlantConflictResult[]
+  treeInventory?: TreeInventoryItem[]
+  boundaryArea?: number
+  plantNames?: string[]
+  hatchLabelsByPlantName?: Record<string, string[]>
 }
 
 // ── Evaluation core ───────────────────────────────────────────────────────────
@@ -603,7 +625,13 @@ function AltPlantPhoto({ name }: { name: string }) {
   )
 }
 
-function AltCard({ suggestion }: { suggestion: AltSuggestion }) {
+function AltCard({ suggestion, adoptedName, onAdopt }: {
+  suggestion: AltSuggestion
+  /** 分區替代植栽用：這株原植物目前已選用的替代植物名稱（若有） */
+  adoptedName?: string
+  /** 分區替代植栽用：有傳才會顯示「加入替換方案」按鈕（全案／無分區情境不傳） */
+  onAdopt?: (altName: string) => void
+}) {
   const [open, setOpen] = useState(true)
   const p = suggestion.originalPlant
   const origType = p.subCategory || p.category
@@ -710,6 +738,18 @@ function AltCard({ suggestion }: { suggestion: AltSuggestion }) {
                       {!alt.plant.dataComplete && (
                         <p className="text-[12px] text-amber-600 mt-1">⚠ 資料初步判定</p>
                       )}
+                      {onAdopt && (
+                        <button
+                          onClick={() => onAdopt(alt.plant.name)}
+                          disabled={adoptedName === alt.plant.name}
+                          className={`mt-1 w-full py-1.5 rounded-lg text-[13px] font-semibold transition-colors ${
+                            adoptedName === alt.plant.name
+                              ? 'bg-emerald-100 text-emerald-700 cursor-not-allowed'
+                              : 'bg-[#1a4731] text-white hover:bg-[#2d6a4f]'
+                          }`}>
+                          {adoptedName === alt.plant.name ? '✓ 已選用' : '加入替換方案'}
+                        </button>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -728,6 +768,408 @@ function AltCard({ suggestion }: { suggestion: AltSuggestion }) {
                 </div>
               </details>
             </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── ZoneAwareResultPanel ──────────────────────────────────────────────────────
+// DXF 分區導向連續性：常駐頂層分頁（全案總覽｜A區｜B區｜...｜AI 配植助理）＋
+// 每個分區固定 7 個第二層分頁（區域總結／問題分析／問題明細／衝突植栽／替代植栽／
+// 配置修正建議／AI審查回覆）。只在 storedZones.length > 0 時取代原本的扁平 TABS，
+// 完全不影響「無分區、手動加植物」那條既有流程。獨立 function component（而非
+// render 內的 IIFE）是刻意的——內部要用 useState 管理分頁狀態，IIFE 裡呼叫 hooks
+// 在 storedZones 從有變空時會違反 Hooks 規則。
+type ZoneSubTab = 'summary' | 'categories' | 'issues' | 'conflicts' | 'alternatives' | 'plan' | 'aiReply'
+
+const ZONE_SUB_TABS: Array<{ id: ZoneSubTab; label: string }> = [
+  { id: 'summary',     label: '區域總結' },
+  { id: 'categories',  label: '問題分析' },
+  { id: 'issues',      label: '問題明細' },
+  { id: 'conflicts',   label: '衝突植栽' },
+  { id: 'alternatives', label: '替代植栽' },
+  { id: 'plan',        label: '配置修正建議' },
+  { id: 'aiReply',     label: 'AI審查回覆' },
+]
+
+function ZoneAwareResultPanel({
+  storedZones, activeZoneId, setActiveZoneId, viewMode, setViewMode, result, selectedPlantsCount,
+  allPlants, zonePlantingTable, advisorPrefill, setAdvisorPrefill, onTabChange,
+  adoptedSubstitutes, onAdoptSubstitute,
+}: {
+  storedZones: StoredZone[]
+  activeZoneId: string | null
+  setActiveZoneId: (id: string | null) => void
+  viewMode: 'overview' | 'assistant'
+  setViewMode: (mode: 'overview' | 'assistant') => void
+  result: EvalResult
+  selectedPlantsCount: number
+  allPlants: CsvPlantRecord[]
+  zonePlantingTable: Array<{ zoneName: string; shrubs: string[]; trees: string[] }>
+  advisorPrefill?: string
+  setAdvisorPrefill: (q: string | undefined) => void
+  onTabChange?: (tab: 'pdf' | 'landscape' | 'dxf' | 'advisor') => void
+  adoptedSubstitutes: Record<string, Record<string, string>>
+  onAdoptSubstitute: (zoneName: string, originalName: string, altName: string) => void
+}) {
+  const [subTab, setSubTab] = useState<ZoneSubTab>('summary')
+
+  const activeZone = storedZones.find(z => z.zoneName === activeZoneId) ?? null
+  const selectZone = (zoneName: string | null) => {
+    setActiveZoneId(zoneName)
+    setSubTab('summary')
+  }
+  const dangerCount = result.issues.filter(i => i.level === 'danger').length
+  const activeIssues = result.issues.filter(i => i.level !== 'ok')
+  const zoneAdopted = activeZone ? (adoptedSubstitutes[activeZone.zoneName] ?? {}) : {}
+
+  return (
+    <div className="space-y-4">
+      {/* ── 第一層：常駐分區分頁列 ── */}
+      <div className="flex items-center gap-2 flex-wrap justify-between">
+        <div className="flex items-center gap-1.5 flex-wrap bg-stone-100 rounded-2xl p-1.5">
+          <button onClick={() => { selectZone(null); setViewMode('overview') }}
+            className={`px-4 py-2 rounded-xl text-sm font-semibold whitespace-nowrap transition-all ${
+              activeZoneId === null && viewMode === 'overview'
+                ? 'bg-[#1a4731] text-white shadow-md' : 'text-stone-500 hover:text-stone-800 hover:bg-white/70'
+            }`}>
+            全案總覽
+          </button>
+          {storedZones.map(z => (
+            <button key={z.zoneName} onClick={() => { selectZone(z.zoneName); setViewMode('overview') }}
+              className={`px-4 py-2 rounded-xl text-sm font-semibold whitespace-nowrap transition-all ${
+                activeZoneId === z.zoneName
+                  ? 'bg-[#1a4731] text-white shadow-md' : 'text-stone-500 hover:text-stone-800 hover:bg-white/70'
+              }`}>
+              {z.zoneName}
+              {z.dangerCount > 0 && <span className="ml-1.5 text-[11px] text-red-300">●{z.dangerCount}</span>}
+            </button>
+          ))}
+          <button onClick={() => { selectZone(null); setViewMode('assistant') }}
+            className={`px-4 py-2 rounded-xl text-sm font-semibold whitespace-nowrap transition-all ${
+              viewMode === 'assistant'
+                ? 'bg-[#1a4731] text-white shadow-md' : 'text-stone-500 hover:text-stone-800 hover:bg-white/70'
+            }`}>
+            AI 配植助理
+          </button>
+        </div>
+        {onTabChange && (
+          <button onClick={() => onTabChange('dxf')}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-semibold text-green-700 hover:bg-green-50 whitespace-nowrap">
+            <ArrowRight size={14} className="rotate-180" />返回 DXF 分區審查
+          </button>
+        )}
+      </div>
+
+      {/* ── AI 配植助理（跟分區同層，不是分區底下的分頁）── */}
+      {viewMode === 'assistant' && (
+        <AdvisorChat
+          db={allPlants}
+          zones={zonePlantingTable.length > 0 ? zonePlantingTable : undefined}
+          prefill={advisorPrefill}
+          onPrefillConsumed={() => setAdvisorPrefill(undefined)}
+        />
+      )}
+
+      {/* ── 全案總覽：只放整體彙總，不放任何單一分區細節 ── */}
+      {viewMode === 'overview' && !activeZone && (() => {
+        const ovScoreClr = result.score >= 80 ? '#15803d' : result.score >= 60 ? '#d97706' : '#dc2626'
+        const priorityOrder = [...storedZones].sort((a, b) =>
+          b.dangerCount - a.dangerCount || (a.score ?? 100) - (b.score ?? 100))
+        return (
+          <div className="space-y-4">
+            <div className="bg-white border border-stone-200 rounded-2xl p-5 flex items-stretch gap-5">
+              <div className="flex items-center gap-4 flex-shrink-0">
+                <ScoreDial score={result.score} level={result.compatLevel} />
+                <div>
+                  <p className="text-[13px] text-stone-400 font-medium">配置相容性（全案）</p>
+                  <p className="text-[18px] font-black mt-0.5 leading-tight" style={{ color: ovScoreClr }}>{result.compatLevel}</p>
+                </div>
+              </div>
+              <div className="w-px bg-stone-100 flex-shrink-0" />
+              <div className="flex-1 grid grid-cols-3 gap-3">
+                {[
+                  { label: '主要問題', value: activeIssues.length, unit: '項', clr: activeIssues.length > 0 ? '#d97706' : '#78716c' },
+                  { label: '高風險問題', value: dangerCount, unit: '項', clr: dangerCount > 0 ? '#dc2626' : '#78716c' },
+                  { label: '已選植物', value: selectedPlantsCount, unit: '種', clr: '#1a4731' },
+                ].map(k => (
+                  <div key={k.label} className="bg-[#f7faf5] border border-stone-100 rounded-xl px-4 py-3">
+                    <p className="text-[12px] text-stone-400 font-semibold mb-1">{k.label}</p>
+                    <p className="text-[30px] font-black leading-none" style={{ color: k.clr }}>{k.value}</p>
+                    <p className="text-[13px] text-stone-400 mt-1">{k.unit}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <p className="text-[21px] font-bold text-stone-800 leading-tight pt-1">各區分數比較</p>
+            <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${Math.min(storedZones.length, 4)}, 1fr)` }}>
+              {storedZones.map(z => {
+                const zRiskLabel = z.dangerCount > 0 ? '高風險' : z.issueCount > 0 ? '中風險' : z.score !== undefined ? '低風險' : '待審查'
+                const zScoreClr = !z.score ? '#9ca3af' : z.score >= 80 ? '#15803d' : z.score >= 60 ? '#d97706' : '#dc2626'
+                const zRiskClr  = z.dangerCount > 0 ? '#dc2626' : z.issueCount > 0 ? '#d97706' : '#15803d'
+                const zBorder   = z.dangerCount > 0 ? 'border-red-300' : z.issueCount > 0 ? 'border-amber-300' : 'border-emerald-200'
+                return (
+                  <button key={z.zoneName} onClick={() => selectZone(z.zoneName)}
+                    className={`text-left rounded-xl border-2 px-5 py-4 bg-white ${zBorder} hover:shadow-sm hover:border-[#2d6a4f] transition-all`}>
+                    <p className="text-[20px] font-bold mb-1 text-stone-800">{z.zoneName}</p>
+                    <p className="font-black leading-none mb-1.5" style={{ fontSize: 28, color: zScoreClr }}>
+                      {z.score ?? '—'}<span className="text-[14px] font-normal text-stone-400"> /100</span>
+                    </p>
+                    <p className="text-[16px] font-bold mb-2" style={{ color: zRiskClr }}>{zRiskLabel}</p>
+                    <p className="text-[15px] leading-snug text-stone-600">問題 {z.issueCount} 項｜高風險 {z.dangerCount} 項</p>
+                  </button>
+                )
+              })}
+            </div>
+
+            {priorityOrder.length > 0 && (
+              <>
+                <p className="text-[21px] font-bold text-stone-800 leading-tight pt-1">全案修正優先順序</p>
+                <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm divide-y divide-stone-100">
+                  {priorityOrder.map((z, i) => (
+                    <button key={z.zoneName} onClick={() => selectZone(z.zoneName)}
+                      className="w-full flex items-center gap-3 px-5 py-3 text-left hover:bg-stone-50 transition-colors">
+                      <span className="w-6 h-6 rounded-full bg-stone-100 flex items-center justify-center text-[13px] font-bold text-stone-500 flex-shrink-0">{i + 1}</span>
+                      <span className="text-[16px] font-bold text-stone-800">{z.zoneName}</span>
+                      <span className="text-[14px] text-stone-500">{z.dangerCount > 0 ? `高風險 ${z.dangerCount} 項` : z.issueCount > 0 ? `需注意 ${z.issueCount} 項` : '無問題'}</span>
+                      <ArrowRight size={14} className="text-stone-300 ml-auto flex-shrink-0" />
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+
+            <p className="text-[21px] font-bold text-stone-800 leading-tight pt-1">問題分類統計（全案）</p>
+            <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+              <div className="p-5">
+                <CategoryGrid categories={result.categories} altCount={result.alternatives.length} />
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* ── 分區選定：固定 7 個第二層分頁 ── */}
+      {activeZone && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-3 px-4 py-2.5 bg-green-50 border border-green-200 rounded-xl flex-wrap">
+            <span className="text-sm font-bold text-green-800">目前查看：{activeZone.zoneName}</span>
+            {activeZone.score !== undefined && (
+              <span className={`text-sm font-bold ${activeZone.score >= 80 ? 'text-emerald-700' : activeZone.score >= 60 ? 'text-amber-700' : 'text-red-700'}`}>
+                {activeZone.score}/100
+              </span>
+            )}
+            <span className="text-sm text-green-700">{activeZone.compatLevel}</span>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap bg-stone-100 rounded-2xl p-1.5">
+            {ZONE_SUB_TABS.map(t => {
+              const count = t.id === 'issues' ? activeZone.issues?.length
+                : t.id === 'conflicts' ? activeZone.proximityConflicts?.length
+                : t.id === 'alternatives' ? activeZone.alternatives?.length
+                : undefined
+              return (
+                <button key={t.id} onClick={() => setSubTab(t.id)}
+                  className={`flex-1 px-3 py-2.5 rounded-xl text-[15px] font-semibold whitespace-nowrap transition-all ${
+                    subTab === t.id ? 'bg-[#1a4731] text-white shadow-md' : 'text-stone-500 hover:text-stone-800 hover:bg-white/70'
+                  }`}>
+                  {t.label}{count ? ` (${count})` : ''}
+                </button>
+              )
+            })}
+          </div>
+
+          {/* 區域總結 */}
+          {subTab === 'summary' && (
+            <div className="space-y-4">
+              <div className="bg-white border border-stone-200 rounded-2xl p-5">
+                <div className="flex items-center gap-4 flex-wrap">
+                  {activeZone.score !== undefined && (
+                    <ScoreDial score={activeZone.score}
+                      level={(activeZone.compatLevel as CompatLevel) ?? '可行但需補充說明'} />
+                  )}
+                  <div className="flex-1 grid grid-cols-3 gap-3 min-w-[240px]">
+                    {[
+                      { label: '審查狀態', value: activeZone.status },
+                      { label: '植栽數量', value: `${activeZone.plantCount} 個` },
+                      { label: '問題／高風險', value: `${activeZone.issueCount} ／ ${activeZone.dangerCount}` },
+                    ].map(k => (
+                      <div key={k.label} className="bg-[#f7faf5] border border-stone-100 rounded-xl px-3 py-2.5">
+                        <p className="text-[12px] text-stone-400 font-semibold mb-1">{k.label}</p>
+                        <p className="text-[16px] font-bold text-stone-800">{k.value}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {activeZone.plantNames && activeZone.plantNames.length > 0 && (
+                <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+                  <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
+                    <p className="text-sm font-semibold text-stone-800">本區植栽（{activeZone.plantNames.length} 種）</p>
+                  </div>
+                  <div className="p-5 flex flex-wrap gap-2">
+                    {activeZone.plantNames.map(name => (
+                      <span key={name} className="text-sm px-3 py-1 rounded-full bg-stone-100 text-stone-700 font-medium">
+                        {name}
+                        {activeZone.hatchLabelsByPlantName?.[name] && activeZone.hatchLabelsByPlantName[name].length > 0 && (
+                          <span className="text-stone-400 ml-1">（{activeZone.hatchLabelsByPlantName[name].length} 處）</span>
+                        )}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {activeZone.treeInventory && activeZone.treeInventory.length > 0 && (
+                <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+                  <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
+                    <p className="text-sm font-semibold text-stone-800">喬木盤點</p>
+                  </div>
+                  <div className="p-5 space-y-2">
+                    {activeZone.treeInventory.map((t, i) => (
+                      <div key={i} className="flex items-center justify-between text-sm">
+                        <span className="font-medium text-stone-700">{t.plantName}</span>
+                        <span className="text-stone-500">{t.count} 株{t.canopyOverlapCount > 0 ? `・樹冠重疊 ${t.canopyOverlapCount} 處` : ''}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {Object.keys(zoneAdopted).length > 0 && (
+                <div className="bg-white border border-emerald-200 rounded-2xl overflow-hidden shadow-sm">
+                  <div className="px-5 py-3 bg-emerald-50 border-b border-emerald-100">
+                    <p className="text-sm font-semibold text-emerald-800">已選替換方案</p>
+                  </div>
+                  <div className="p-5 space-y-1.5">
+                    {Object.entries(zoneAdopted).map(([orig, alt]) => (
+                      <p key={orig} className="text-sm text-stone-700"><span className="font-semibold">{orig}</span> → <span className="font-semibold text-emerald-700">{alt}</span></p>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 問題分析 */}
+          {subTab === 'categories' && (
+            <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+              <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
+                <p className="text-sm font-semibold text-stone-800 tracking-wide">{activeZone.zoneName} 問題分類總覽</p>
+              </div>
+              <div className="p-5">
+                {activeZone.categories && activeZone.categories.length > 0
+                  ? <CategoryGrid categories={activeZone.categories as never} altCount={activeZone.alternatives?.length ?? 0} />
+                  : <p className="text-sm text-stone-400 text-center py-8">此區無問題分析資料</p>
+                }
+              </div>
+            </div>
+          )}
+
+          {/* 問題明細 */}
+          {subTab === 'issues' && (
+            activeZone.issues && activeZone.issues.length > 0 ? (
+              <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+                <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
+                  <p className="text-sm font-semibold text-stone-800 tracking-wide">{activeZone.zoneName} 問題明細　{activeZone.issues.length} 項</p>
+                </div>
+                <div className="p-5 space-y-3">
+                  {activeZone.issues.map((issue, i) => <IssueCard key={i} issue={issue as never} />)}
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center py-16 text-stone-400">
+                <CheckCircle size={36} className="text-green-400 mb-3" />
+                <p className="text-sm font-medium">{activeZone.zoneName} 無審查問題</p>
+              </div>
+            )
+          )}
+
+          {/* 衝突植栽 */}
+          {subTab === 'conflicts' && (
+            activeZone.proximityConflicts && activeZone.proximityConflicts.length > 0 ? (
+              <div className="space-y-3">
+                {activeZone.proximityConflicts.map(c => <ProximityConflictCard key={c.id} conflict={c} defaultExpanded={false} />)}
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center py-16 text-stone-400">
+                <CheckCircle size={36} className="text-green-400 mb-3" />
+                <p className="text-sm font-medium">{activeZone.zoneName} 無空間鄰近衝突</p>
+              </div>
+            )
+          )}
+
+          {/* 替代植栽 */}
+          {subTab === 'alternatives' && (
+            activeZone.alternatives && activeZone.alternatives.length > 0 ? (
+              <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+                <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
+                  <p className="text-sm font-semibold text-stone-800 tracking-wide">替代植栽建議　{activeZone.alternatives.length} 種植栽可替換</p>
+                </div>
+                <div className="p-5 space-y-3">
+                  {activeZone.alternatives.map((s, i) => (
+                    <AltCard key={i} suggestion={s as never}
+                      adoptedName={zoneAdopted[s.originalPlant.name]}
+                      onAdopt={altName => onAdoptSubstitute(activeZone.zoneName, s.originalPlant.name, altName)} />
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center py-16 text-stone-400">
+                <p className="text-sm font-medium">無替代建議</p>
+              </div>
+            )
+          )}
+
+          {/* 配置修正建議 */}
+          {subTab === 'plan' && (
+            <div className="space-y-4">
+              <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+                <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
+                  <p className="text-sm font-semibold text-stone-800 tracking-wide">{activeZone.zoneName} 審查建議</p>
+                </div>
+                <div className="p-5">
+                  <p className="text-[16px] text-stone-600 leading-[1.85]">{activeZone.aiSuggestion || '（無建議）'}</p>
+                </div>
+              </div>
+              {activeZone.adjustmentPlan && activeZone.adjustmentPlan.length > 0 && (
+                <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+                  <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
+                    <p className="text-[15px] font-semibold text-stone-800 tracking-wide">配置調整方案</p>
+                  </div>
+                  <div className="p-5">
+                    <ul className="space-y-3">
+                      {activeZone.adjustmentPlan.map((p, i) => (
+                        <li key={i} className="flex items-start gap-3">
+                          <div className="w-6 h-6 rounded-full bg-green-100 flex items-center justify-center flex-shrink-0 mt-0.5">
+                            <span className="text-[13px] font-bold text-green-700">{i + 1}</span>
+                          </div>
+                          <p className="text-[16px] text-stone-600 leading-[1.85]">{p}</p>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* AI審查回覆 */}
+          {subTab === 'aiReply' && (
+            <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+              <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
+                <p className="text-sm font-semibold text-stone-800 tracking-wide">審查回覆文字</p>
+              </div>
+              <div className="p-5">
+                <div className="bg-stone-50 rounded-xl p-4 border border-stone-100 max-h-64 overflow-y-auto">
+                  <p className="text-[16px] text-stone-700 leading-[1.9] whitespace-pre-line">{activeZone.reviewText || '（無審查回覆）'}</p>
+                </div>
+              </div>
+            </div>
           )}
         </div>
       )}
@@ -3082,14 +3524,6 @@ export default function LandscapeAdvisorPage({
   }, [plantDbOnlyMode])
 
   // ── DXF 分區審查資料（從 localStorage 讀取）──────────────────────────────────
-  type StoredZone = {
-    zoneName: string; status: string; plantCount: number
-    score?: number; compatLevel?: string
-    issueCount: number; dangerCount: number; mainIssues: string[]
-    categories?: Array<{ key:string; label:string; count:number; level:string; statusLabel:string; summary:string }>
-    issues?: Array<{ category:string; level:string; cause:string; impact:string; suggestion:string }>
-    aiSuggestion?: string; adjustmentPlan?: string[]; reviewText?: string
-  }
   const [storedZones, setStoredZones] = useState<StoredZone[]>([])
   // 只有透過 DXF 匯入流程（dxfZonesLinked=true）才顯示分區審查摘要
   useEffect(() => {
@@ -3103,7 +3537,25 @@ export default function LandscapeAdvisorPage({
     }
   }, [activeTab, dxfZonesLinked])
   const [activeZoneId, setActiveZoneId] = useState<string | null>(null)
+  const [zoneViewMode, setZoneViewMode] = useState<'overview' | 'assistant'>('overview')
   const activeZone = storedZones.find(z => z.zoneName === activeZoneId) ?? null
+
+  // ── 分區替代植栽「加入替換方案」：只是使用者已決定要換的標記，不會反寫 DXF 資料、
+  // 不觸發重新解析——比照 storedZones 用 sessionStorage 持久化，回 DXF 分區審查
+  // 再回來不會消失 ──────────────────────────────────────────────────────────
+  const [adoptedSubstitutes, setAdoptedSubstitutes] = useState<Record<string, Record<string, string>>>(() => {
+    try {
+      const r = sessionStorage.getItem('dxf-zone-adopted-substitutes')
+      return r ? JSON.parse(r) : {}
+    } catch { return {} }
+  })
+  const handleAdoptSubstitute = useCallback((zoneName: string, originalName: string, altName: string) => {
+    setAdoptedSubstitutes(prev => {
+      const next = { ...prev, [zoneName]: { ...prev[zoneName], [originalName]: altName } }
+      try { sessionStorage.setItem('dxf-zone-adopted-substitutes', JSON.stringify(next)) } catch { /* quota exceeded */ }
+      return next
+    })
+  }, [])
 
   // ── DXF 頁「詢問 AI」跳轉：讀取 sessionStorage 帶入的問題 ────────────────────
   useEffect(() => {
@@ -3113,7 +3565,8 @@ export default function LandscapeAdvisorPage({
       if (q) {
         sessionStorage.removeItem('advisor-prefill')
         setAdvisorPrefill(q)
-        setActiveReviewTab('assistant')
+        setActiveReviewTab('assistant')   // 無分區（扁平流程）用的分頁狀態
+        setZoneViewMode('assistant')      // 分區導向面板用的分頁狀態，兩套並存互不影響
       }
     } catch { /* ignore */ }
   }, [activeTab])
@@ -3346,15 +3799,119 @@ export default function LandscapeAdvisorPage({
     if (!result || pdfGenerating) return
     setPdfGenerating(true)
     setPdfGenError(null)
-    let reportEl: HTMLDivElement | null = null
     try {
-      // ── Step 1: 建立專用報告 HTML ──
-      const now = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })
+      // ── Step 1: 準備資料 ──
+      const now = new Date()
+      const pad = (n: number) => String(n).padStart(2, '0')
+      // 自己組 24 小時制字串，不用 toLocaleString——那會依瀏覽器 locale 塞「上午/下午」，
+      // 而 jsPDF 內建字型（下面頁首頁尾改走 canvas 繪製後不再用到，但這裡統一先算好）
+      const genTime = `${now.getFullYear()}/${pad(now.getMonth() + 1)}/${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`
       const scoreClr = result.score >= 80 ? '#15803d' : result.score >= 60 ? '#d97706' : '#dc2626'
       const riskLabel = result.score >= 80 ? '低風險' : result.score >= 60 ? '中風險' : '高風險'
       const dangerCount = result.issues.filter(i => i.level === 'danger').length
       const activeIssues = result.issues.filter(i => i.level !== 'ok')
       const esc = (s: string) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      // 分區資料存在時，報告改成逐區呈現（區域總結/各區問題/各區替代植栽含 HATCH／距離）；
+      // 沒有分區資料（手動加植物、非 DXF 流程）維持原本的全案扁平報告，兩條路徑互不影響。
+      const zoneAware = storedZones.length > 0
+      const projectLabel = zoneAware ? `DXF 分區審查（共 ${storedZones.length} 區）` : '景觀 AI 配植評估'
+      const riskLevelLabel = (lv: string) => lv === 'high' ? '高風險' : lv === 'medium' ? '警示' : lv === 'low' ? '通過' : '未辨識'
+      const riskLevelClr   = (lv: string) => lv === 'high' ? '#dc2626' : lv === 'medium' ? '#d97706' : lv === 'low' ? '#15803d' : '#78716c'
+      const proximityLabel = (c: PlantConflictResult) =>
+        c.proximity === 'overlap' ? '範圍重疊' : c.proximity === 'touching' ? '邊界相接'
+        : c.nearBand === 'adjacent' ? '鄰近－直接相鄰' : '鄰近－可能影響'
+
+      // ── 替代植栽整合表（單一表格，不再每個原植物各自一張表）──
+      type AltRow = { origName: string; origType: string; altName: string; altType: string; reason: string; zoneName?: string }
+      const altRows: AltRow[] = zoneAware
+        ? storedZones.flatMap(z => (z.alternatives ?? []).flatMap(sugg => sugg.alternatives.map(a => ({
+            origName: sugg.originalPlant.name, origType: sugg.originalPlant.subCategory || sugg.originalPlant.category,
+            altName: a.plant.name, altType: a.plant.subCategory || a.plant.category,
+            reason: a.riskReduction, zoneName: z.zoneName,
+          }))))
+        : result.alternatives.flatMap(sugg => sugg.alternatives.map(a => ({
+            origName: sugg.originalPlant.name, origType: sugg.originalPlant.subCategory || sugg.originalPlant.category,
+            altName: a.plant.name, altType: a.plant.subCategory || a.plant.category,
+            reason: a.riskReduction,
+          })))
+      const noAltNames = (zoneAware
+        ? storedZones.flatMap(z => (z.alternatives ?? []).filter(s => s.alternatives.length === 0).map(s => s.originalPlant.name))
+        : result.alternatives.filter(s => s.alternatives.length === 0).map(s => s.originalPlant.name))
+
+      const altTableHtml = altRows.length === 0 && noAltNames.length === 0 ? '' : `
+  <div class="sec-hdr">替代植栽建議</div>
+  <div class="sec-body">
+    ${altRows.length > 0 ? `
+    <table>
+      <thead><tr><th>原植物</th><th>建議替代</th><th>植栽類型</th><th>推薦原因</th>${zoneAware ? '<th>所屬分區</th>' : ''}</tr></thead>
+      <tbody>${altRows.map(r => `
+      <tr><td><strong>${esc(r.origName)}</strong>（${esc(r.origType)}）</td><td><strong>${esc(r.altName)}</strong></td><td>${esc(r.altType)}</td><td>${esc(r.reason)}</td>${zoneAware ? `<td>${esc(r.zoneName ?? '—')}</td>` : ''}</tr>`).join('')}</tbody>
+    </table>` : ''}
+    ${noAltNames.length > 0 ? `<div class="no-break" style="color:#d97706;font-size:15px;margin-top:${altRows.length>0?'10px':'0'}">${esc(noAltNames.join('、'))}　目前無同類型高相容替代植栽，建議由設計者人工確認。</div>` : ''}
+  </div>`
+
+      // ── 各區問題明細（含衝突植栽：涉及植物／HATCH·BLOCK／距離）──
+      const zoneIssuesHtml = (z: StoredZone) => {
+        const issues = z.issues ?? []
+        const conflicts = z.proximityConflicts ?? []
+        return `
+  <div class="sec-hdr page-break">${esc(z.zoneName)}　問題明細${issues.length > 0 ? `（${issues.length} 項）` : ''}</div>
+  <div class="sec-body">
+    <div class="no-break" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px;font-size:15px;color:#44403c">
+      <div>分數：<strong style="color:${z.score === undefined ? '#78716c' : z.score >= 80 ? '#15803d' : z.score >= 60 ? '#d97706' : '#dc2626'}">${z.score ?? '—'}${z.score !== undefined ? '/100' : ''}</strong></div>
+      <div>狀態：<strong>${esc(z.status)}</strong></div>
+    </div>
+    ${issues.length > 0 ? issues.map(issue => `
+    <div class="issue no-break ${issue.level}">
+      <div class="i-title">［${esc(z.zoneName)}］${esc(issue.category)}</div>
+      <span class="badge ${issue.level === 'danger' ? 'b-d' : 'b-c'}">${issue.level === 'danger' ? '高風險' : '需注意'}</span>
+      <div class="i-lbl">問題原因</div><div class="i-txt">${esc(issue.cause)}</div>
+      <div class="i-lbl">實務影響</div><div class="i-txt">${esc(issue.impact)}</div>
+      <div class="i-lbl">修正建議</div><div class="i-txt">${esc(issue.suggestion)}</div>
+    </div>`).join('') : `<p style="color:#15803d;font-size:15px">✅ ${esc(z.zoneName)} 未發現需調整之問題項目。</p>`}
+    ${conflicts.length > 0 ? `
+    <div class="no-break" style="margin-top:16px">
+      <div style="font-size:16px;font-weight:700;color:#1a4731;margin-bottom:8px">衝突植栽（涉及植物／HATCH・BLOCK 來源／距離）</div>
+      <table>
+        <thead><tr><th>植物 A</th><th>植物 B</th><th>HATCH／BLOCK</th><th>空間關係</th><th>距離(cm)</th><th>風險</th></tr></thead>
+        <tbody>${conflicts.map(c => `
+        <tr><td>${esc(c.plantA.name)}</td><td>${esc(c.plantB.name)}</td>
+        <td style="font-family:monospace;font-size:12px">${esc(c.plantA.label)} ／ ${esc(c.plantB.label)}</td>
+        <td>${esc(proximityLabel(c))}</td><td style="text-align:right">${c.distanceCm}</td>
+        <td style="color:${riskLevelClr(c.riskLevel)};font-weight:700">${riskLevelLabel(c.riskLevel)}</td></tr>`).join('')}</tbody>
+      </table>
+    </div>` : ''}
+  </div>`
+      }
+
+      const zoneOverviewHtml = !zoneAware ? '' : `
+  <div class="sec-hdr page-break">分區總覽</div>
+  <div class="sec-body">
+    <table>
+      <thead><tr><th>分區</th><th>分數</th><th>風險等級</th><th>問題數</th><th>高風險數</th></tr></thead>
+      <tbody>${storedZones.map(z => {
+        const riskTxt = z.dangerCount > 0 ? '高風險' : z.issueCount > 0 ? '中風險' : z.score !== undefined ? '低風險' : '待審查'
+        const riskClr = z.dangerCount > 0 ? '#dc2626' : z.issueCount > 0 ? '#d97706' : '#15803d'
+        return `<tr><td><strong>${esc(z.zoneName)}</strong></td><td>${z.score ?? '—'}</td>
+        <td style="color:${riskClr};font-weight:700">${riskTxt}</td><td>${z.issueCount}</td><td>${z.dangerCount}</td></tr>`
+      }).join('')}</tbody>
+    </table>
+  </div>`
+
+      const issueDetailHtml = zoneAware
+        ? storedZones.map(z => zoneIssuesHtml(z)).join('')
+        : (activeIssues.length > 0 ? `
+  <div class="sec-hdr page-break">問題明細（${activeIssues.length} 項）</div>
+  <div class="sec-body">
+    ${activeIssues.map(issue => `
+    <div class="issue no-break ${issue.level}">
+      <div class="i-title">${esc(issue.category)}</div>
+      <span class="badge ${issue.level === 'danger' ? 'b-d' : 'b-c'}">${issue.level === 'danger' ? '高風險' : '需注意'}</span>
+      <div class="i-lbl">問題原因</div><div class="i-txt">${esc(issue.cause)}</div>
+      <div class="i-lbl">實務影響</div><div class="i-txt">${esc(issue.impact)}</div>
+      <div class="i-lbl">修正建議</div><div class="i-txt">${esc(issue.suggestion)}</div>
+    </div>`).join('')}
+  </div>` : '')
 
       const reportHtml = `
 <style>
@@ -3365,8 +3922,8 @@ body{font-family:'Microsoft JhengHei','微軟正黑體','Noto Sans TC',Arial,san
 .cover-hdr-text p{color:#86efac;font-size:13px}
 .cover-body{padding:36px 50px}
 .meta-box{background:#f7faf5;border:1px solid #d4e8d4;border-radius:10px;padding:24px;margin-bottom:24px}
-.meta-row{display:flex;gap:16px;margin-bottom:8px;font-size:12px}
-.meta-lbl{color:#57534e;width:90px;flex-shrink:0}
+.meta-row{display:flex;gap:16px;margin-bottom:8px;font-size:13px}
+.meta-lbl{color:#57534e;width:100px;flex-shrink:0}
 .meta-val{color:#1c1917;font-weight:700}
 .score-row{display:flex;align-items:center;gap:24px;padding:18px;background:#f7faf5;border-radius:10px;margin-bottom:28px}
 .score-circle{width:70px;height:70px;border-radius:50%;border:5px solid;display:flex;align-items:center;justify-content:center;flex-shrink:0}
@@ -3374,38 +3931,35 @@ body{font-family:'Microsoft JhengHei','微軟正黑體','Noto Sans TC',Arial,san
 .score-info-lbl{font-size:11px;color:#57534e}
 .score-info-val{font-size:20px;font-weight:900;margin-top:2px}
 .ai-summary{font-size:12px;color:#44403c;line-height:1.8;margin-top:6px}
-.kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:28px}
+.kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:16px}
 .kpi{background:#f7faf5;border:1px solid #d4e8d4;border-radius:8px;padding:14px;text-align:center}
 .kpi-v{font-size:28px;font-weight:900;line-height:1}
 .kpi-l{font-size:11px;color:#57534e;margin-top:3px}
-.sec-hdr{background:#1a4731;color:#fff;padding:9px 18px;font-size:13px;font-weight:700;border-radius:6px 6px 0 0;margin-top:24px}
+.priority-box{background:#f0fdf4;border:1.5px solid #bbf7d0;border-radius:10px;padding:16px 18px;margin-bottom:8px}
+.priority-title{font-size:14px;font-weight:700;color:#14532d;margin-bottom:8px}
+.priority-item{display:flex;gap:8px;font-size:13px;color:#166534;line-height:1.6;margin-bottom:4px}
+.sec-hdr{background:#1a4731;color:#fff;padding:9px 18px;font-size:15px;font-weight:700;border-radius:6px 6px 0 0;margin-top:24px}
 .sec-body{border:1px solid #d4e8d4;border-top:none;border-radius:0 0 6px 6px;padding:18px}
-.issue{border:1px solid #e7e5e4;border-radius:8px;padding:14px;margin-bottom:10px}
+.issue{border:1px solid #e7e5e4;border-radius:8px;padding:16px;margin-bottom:12px}
 .issue.danger{border-left:4px solid #dc2626}
 .issue.caution{border-left:4px solid #d97706}
-.i-title{font-size:14px;font-weight:700;margin-bottom:6px}
-.badge{display:inline-block;padding:2px 10px;border-radius:99px;font-size:11px;font-weight:700;margin-bottom:8px}
+.i-title{font-size:22px;font-weight:700;margin-bottom:8px}
+.badge{display:inline-block;padding:2px 10px;border-radius:99px;font-size:12px;font-weight:700;margin-bottom:10px}
 .b-d{background:#fef2f2;color:#dc2626}.b-c{background:#fffbeb;color:#d97706}
-.i-lbl{font-size:11px;color:#57534e;font-weight:700;margin-top:8px;margin-bottom:3px}
-.i-txt{font-size:12px;color:#44403c;line-height:1.75}
-table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:8px}
-th{background:#1a4731;color:#fff;padding:8px 12px;text-align:left;font-size:12px;font-weight:700}
+.i-lbl{font-size:16px;color:#374151;font-weight:700;margin-top:8px;margin-bottom:4px}
+.i-txt{font-size:15px;color:#44403c;line-height:1.5}
+table{width:100%;border-collapse:collapse;font-size:13px;margin-bottom:8px}
+th{background:#1a4731;color:#fff;padding:8px 12px;text-align:left;font-size:13px;font-weight:700}
 td{padding:8px 12px;border-bottom:1px solid #e7e5e4;vertical-align:top}
 tr:nth-child(even) td{background:#f7faf5}
-.alt-orig{font-size:13px;font-weight:700;color:#1a4731;margin-bottom:8px}
 .plan-item{display:flex;gap:10px;margin-bottom:8px;padding:10px;background:#f7faf5;border-radius:6px}
 .plan-num{width:22px;height:22px;background:#1a4731;color:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0}
-.plan-txt{font-size:12px;color:#44403c;line-height:1.75}
-.review-box{font-size:12px;color:#44403c;line-height:1.9;white-space:pre-line;padding:14px;background:#f7faf5;border-radius:6px;border:1px solid #d4e8d4}
-.footer{text-align:center;padding:14px;color:#78716c;font-size:10px;border-top:1px solid #e7e5e4;margin-top:20px}
-/* ── 分頁控制 ── */
+.plan-txt{font-size:13px;color:#44403c;line-height:1.6}
+.review-box{font-size:13px;color:#44403c;line-height:1.7;white-space:pre-line;padding:14px;background:#f7faf5;border-radius:6px;border:1px solid #d4e8d4}
+/* ── 分頁控制（頁首/頁尾改走 canvas 圖片繪製，這裡的 class 只用來讓 JS 量測邊界，
+     不再依賴瀏覽器列印引擎，見 handleExportPdf 內的 computePageBreaks）── */
 .no-break{break-inside:avoid;page-break-inside:avoid}
 .page-break{break-before:page;page-break-before:always}
-.sec-hdr{break-after:avoid;page-break-after:avoid}
-.sec-body{break-before:avoid;page-break-before:avoid}
-tr{break-inside:avoid;page-break-inside:avoid}
-thead{display:table-header-group}
-tfoot{display:table-footer-group}
 </style>
 
 <div class="cover-hdr">
@@ -3418,20 +3972,20 @@ tfoot{display:table-footer-group}
   </svg>
   <div class="cover-hdr-text">
     <h1>景觀 AI 設計審查顧問 2.0</h1>
-    <p>植栽配置評估報告　｜　AI 配植評估</p>
+    <p>植栽配置評估報告　｜　${esc(projectLabel)}</p>
   </div>
 </div>
 
 <div class="cover-body">
-  <div class="meta-box">
-    <div class="meta-row"><span class="meta-lbl">產生時間</span><span class="meta-val">${esc(now)}</span></div>
+  <div class="meta-box no-break">
+    <div class="meta-row"><span class="meta-lbl">報告名稱</span><span class="meta-val">植栽配置評估報告</span></div>
+    <div class="meta-row"><span class="meta-lbl">專案／圖面</span><span class="meta-val">${esc(projectLabel)}</span></div>
+    <div class="meta-row"><span class="meta-lbl">產生時間</span><span class="meta-val">${esc(genTime)}</span></div>
     <div class="meta-row"><span class="meta-lbl">審查植栽</span><span class="meta-val">${selectedPlants.length} 種</span></div>
-    <div class="meta-row"><span class="meta-lbl">總評分</span><span class="meta-val" style="color:${scoreClr}">${result.score} / 100（${riskLabel}）</span></div>
-    <div class="meta-row"><span class="meta-lbl">主要問題</span><span class="meta-val">${activeIssues.length} 項</span></div>
-    <div class="meta-row"><span class="meta-lbl">高風險問題</span><span class="meta-val" style="color:${dangerCount>0?'#dc2626':'#15803d'}">${dangerCount} 項</span></div>
+    <div class="meta-row"><span class="meta-lbl">總評分／風險等級</span><span class="meta-val" style="color:${scoreClr}">${result.score} / 100（${riskLabel}）</span></div>
   </div>
 
-  <div class="score-row">
+  <div class="score-row no-break">
     <div class="score-circle" style="border-color:${scoreClr}">
       <span class="score-num" style="color:${scoreClr}">${result.score}</span>
     </div>
@@ -3442,47 +3996,29 @@ tfoot{display:table-footer-group}
     </div>
   </div>
 
-  <div class="kpi-grid">
+  <div class="kpi-grid no-break">
     <div class="kpi"><div class="kpi-v" style="color:${scoreClr}">${result.score}</div><div class="kpi-l">配置相容性總分</div></div>
     <div class="kpi"><div class="kpi-v" style="color:${activeIssues.length>0?'#d97706':'#57534e'}">${activeIssues.length}</div><div class="kpi-l">主要問題</div></div>
     <div class="kpi"><div class="kpi-v" style="color:${dangerCount>0?'#dc2626':'#57534e'}">${dangerCount}</div><div class="kpi-l">高風險問題</div></div>
     <div class="kpi"><div class="kpi-v" style="color:#1a4731">${selectedPlants.length}</div><div class="kpi-l">審查植栽種數</div></div>
   </div>
 
-  ${activeIssues.length > 0 ? `
-  <div class="sec-hdr page-break">問題明細（${activeIssues.length} 項）</div>
-  <div class="sec-body">
-    ${activeIssues.map(issue => `
-    <div class="issue no-break ${issue.level}">
-      <div class="i-title">${esc(issue.category)}</div>
-      <span class="badge ${issue.level==='danger'?'b-d':'b-c'}">${issue.level==='danger'?'高風險':'需注意'}</span>
-      <div class="i-lbl">問題原因</div><div class="i-txt">${esc(issue.cause)}</div>
-      <div class="i-lbl">實務影響</div><div class="i-txt">${esc(issue.impact)}</div>
-      <div class="i-lbl">修正建議</div><div class="i-txt">${esc(issue.suggestion)}</div>
-    </div>`).join('')}
+  ${result.adjustmentPlan.length > 0 ? `
+  <div class="priority-box no-break">
+    <div class="priority-title">優先改善事項（前 3 項）</div>
+    ${result.adjustmentPlan.slice(0,3).map((p,i) => `<div class="priority-item"><strong>${i+1}.</strong><span>${esc(p)}</span></div>`).join('')}
   </div>` : ''}
 
-  ${result.alternatives.length > 0 ? `
-  <div class="sec-hdr page-break">替代植栽建議</div>
-  <div class="sec-body">
-    ${result.alternatives.map(alt => `
-    <div class="no-break" style="margin-bottom:16px">
-      <div class="alt-orig">原植栽：${esc(alt.originalPlant.name)}（${esc(alt.originalPlant.subCategory||alt.originalPlant.category)}）</div>
-      ${alt.alternatives.length>0 ? `
-      <table>
-        <thead><tr><th>建議替代</th><th>植栽類型</th><th>推薦原因</th></tr></thead>
-        <tbody>${alt.alternatives.map(a=>`
-        <tr><td><strong>${esc(a.plant.name)}</strong></td><td>${esc(a.plant.subCategory||a.plant.category)}</td><td>${esc(a.riskReduction)}</td></tr>`).join('')}</tbody>
-      </table>` : `<div style="color:#d97706;font-size:12px">目前無同類型高相容替代植栽</div>`}
-    </div>`).join('')}
-  </div>` : ''}
+  ${zoneOverviewHtml}
+  ${issueDetailHtml}
+  ${altTableHtml}
 
   ${result.adjustmentPlan.length>0||result.reviewText ? `
-  <div class="sec-hdr page-break">總結建議</div>
+  <div class="sec-hdr">總結建議</div>
   <div class="sec-body">
     ${result.adjustmentPlan.length>0 ? `
-    <div style="margin-bottom:16px">
-      <div style="font-size:13px;font-weight:700;color:#1a4731;margin-bottom:10px">優先改善事項</div>
+    <div class="no-break" style="margin-bottom:16px">
+      <div style="font-size:15px;font-weight:700;color:#1a4731;margin-bottom:10px">配置調整方案</div>
       ${result.adjustmentPlan.map((p,i)=>`
       <div class="plan-item">
         <div class="plan-num">${i+1}</div>
@@ -3490,11 +4026,13 @@ tfoot{display:table-footer-group}
       </div>`).join('')}
     </div>` : ''}
     ${result.reviewText ? `
-    <div style="font-size:13px;font-weight:700;color:#1a4731;margin-bottom:8px">審查回覆建議文字</div>
-    <div class="review-box">${esc(result.reviewText)}</div>` : ''}
+    <div class="no-break">
+    <div style="font-size:15px;font-weight:700;color:#1a4731;margin-bottom:8px">審查回覆建議文字</div>
+    <div class="review-box">${esc(result.reviewText)}</div>
+    </div>` : ''}
   </div>` : ''}
 
-  <div class="sec-hdr page-break">審查植栽清單</div>
+  <div class="sec-hdr">審查植栽清單</div>
   <div class="sec-body">
     <table>
       <thead><tr><th>#</th><th>植栽名稱</th><th>類型</th><th>日照</th><th>水分</th><th>耐旱</th><th>耐濕</th></tr></thead>
@@ -3503,126 +4041,19 @@ tfoot{display:table-footer-group}
       </tbody>
     </table>
   </div>
-
-  <div class="footer">景觀 AI 設計審查顧問 2.0　｜　植栽配置評估報告　｜　${esc(now)}</div>
 </div>`
 
-      // ── DEBUG: 確認 reportHtml 內容 ──
-      console.log('[PDF] reportHtml length =', reportHtml.length)
-      console.log('[PDF] reportHtml 前 1000 字元:', reportHtml.substring(0, 1000))
-
-      // ── Step 2: 注入報告容器（opacity:1，用全屏白色遮罩蓋住 App） ──
-      const overlay = document.createElement('div')
-      overlay.setAttribute('data-pdf-overlay', '1')
-      overlay.style.cssText = 'position:fixed;inset:0;background:#fff;z-index:99998;pointer-events:none;'
-      document.body.appendChild(overlay)
-
-      reportEl = document.createElement('div')
-      reportEl.id = 'printRoot'
-      reportEl.style.cssText = 'position:fixed;top:0;left:0;width:794px;z-index:99999;pointer-events:none;opacity:1;background:#fff;overflow:visible;'
-      reportEl.innerHTML = reportHtml
-      document.body.appendChild(reportEl)
-
-      // ── DEBUG: 確認 printRoot DOM ──
-      const printRoot = document.getElementById('printRoot')
-      console.log('[PDF] printRoot element:', printRoot)
-      console.log('[PDF] printRoot.innerHTML.length:', printRoot?.innerHTML.length)
-      console.log('[PDF] printRoot.innerHTML 前 1000 字元:', printRoot?.innerHTML.substring(0, 1000))
-
-      if (!printRoot || printRoot.innerHTML.length === 0) throw new Error('printRoot 為空或不存在')
-
-      // ── Step 3: 等待字型與圖片渲染 ──
-      await new Promise(r => setTimeout(r, 900))
-      const elH = reportEl.scrollHeight
-      console.log('[PDF] reportEl offsetWidth x scrollHeight:', reportEl.offsetWidth, 'x', elH)
-      if (elH === 0) throw new Error('reportEl 高度為 0，內容未渲染')
-
-      // ── Step 4: html2canvas 截圖（raw，確認可截到 position:fixed 元素）──
-      const html2canvas = (await import('html2canvas')).default
-      console.log('[PDF] 開始 html2canvas...')
-      const canvas = await html2canvas(reportEl, {
-        scale: 1.5,
-        useCORS: true,
-        allowTaint: false,
-        backgroundColor: '#ffffff',
-        logging: false,
-        width: 794,
-        height: elH,
-        windowWidth: 794,
-        windowHeight: elH,
-        scrollX: 0,
-        scrollY: 0,
+      const { warnings } = await exportHtmlAsPaginatedPdf({
+        reportHtml,
+        filename: '景觀AI設計審查報告.pdf',
+        headerText: '景觀 AI 設計審查顧問 2.0｜植栽配置評估報告',
+        footerLeft: projectLabel,
       })
-
-      // 截完立即移除
-      document.body.removeChild(reportEl)
-      document.body.removeChild(overlay)
-      reportEl = null
-
-      console.log('[PDF] canvas.width:', canvas.width)
-      console.log('[PDF] canvas.height:', canvas.height)
-      if (canvas.width === 0 || canvas.height === 0) {
-        throw new Error(`canvas 尺寸為 0 (${canvas.width}×${canvas.height})`)
-      }
-
-      // ── Step 5: 分頁轉 PDF（A4，含頁首頁尾）──
-      const { jsPDF } = await import('jspdf')
-      const PDF_W_MM = 210, PDF_H_MM = 297
-      const MARGIN_MM = 14           // 左右邊距
-      const TOP_MM    = 20           // 上邊距（含頁首）
-      const BOT_MM    = 18           // 下邊距（含頁尾）
-      const CONTENT_W_MM = PDF_W_MM - MARGIN_MM * 2   // 182mm
-      const CONTENT_H_MM = PDF_H_MM - TOP_MM - BOT_MM // 259mm
-
-      const pdf = new jsPDF({ orientation: 'p', unit: 'mm', format: 'a4' })
-      const genTime = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })
-
-      // canvas px per mm（canvas 寬對應 182mm 內容寬）
-      const pxPerMm = canvas.width / CONTENT_W_MM
-      const pageCanvasH = Math.floor(CONTENT_H_MM * pxPerMm)
-
-      let y = 0, pageNum = 0
-      while (y < canvas.height) {
-        if (pageNum > 0) pdf.addPage()
-        pageNum++
-
-        const sliceH = Math.min(pageCanvasH, canvas.height - y)
-        const pc = document.createElement('canvas')
-        pc.width = canvas.width; pc.height = sliceH
-        pc.getContext('2d')!.drawImage(canvas, 0, y, canvas.width, sliceH, 0, 0, canvas.width, sliceH)
-        const imgData = pc.toDataURL('image/jpeg', 0.92)
-        console.log(`[PDF] addImage page ${pageNum}, imgData.length=${imgData.length}`)
-
-        // 內容圖片（左右邊距 + 上方留空給頁首）
-        const imgH = sliceH / pxPerMm
-        pdf.addImage(imgData, 'JPEG', MARGIN_MM, TOP_MM, CONTENT_W_MM, imgH)
-
-        // 頁首
-        pdf.setDrawColor(26, 71, 49)
-        pdf.setLineWidth(0.35)
-        pdf.line(MARGIN_MM, TOP_MM - 2, PDF_W_MM - MARGIN_MM, TOP_MM - 2)
-        pdf.setFontSize(7); pdf.setTextColor(26, 71, 49)
-        pdf.text('Landscape AI Advisor 2.0  |  Plant Configuration & Review Report', MARGIN_MM, TOP_MM - 5)
-
-        // 頁尾
-        const footerY = PDF_H_MM - BOT_MM + 4
-        pdf.line(MARGIN_MM, footerY - 2, PDF_W_MM - MARGIN_MM, footerY - 2)
-        pdf.setFontSize(7); pdf.setTextColor(120, 120, 120)
-        pdf.text(genTime, MARGIN_MM, footerY)
-        pdf.text(`Page ${pageNum}`, PDF_W_MM - MARGIN_MM, footerY, { align: 'right' })
-
-        y += pageCanvasH
-      }
-
-      console.log('[PDF] 共', pdf.getNumberOfPages(), '頁，開始 save()')
-      pdf.save('景觀AI設計審查報告.pdf')
-      console.log('[PDF] save() 完成')
+      if (warnings.length > 0) setPdfGenError(`PDF 產生完成，但${warnings.join('；')}`)
 
     } catch (err) {
       console.error('[PDF] 產生失敗：', err)
       setPdfGenError(`PDF 產生失敗：${err instanceof Error ? err.message : String(err)}`)
-      if (reportEl && document.body.contains(reportEl)) document.body.removeChild(reportEl)
-      document.querySelectorAll('[data-pdf-overlay]').forEach(n => n.remove())
     } finally {
       setPdfGenerating(false)
     }
@@ -4051,8 +4482,25 @@ tfoot{display:table-footer-group}
                 onPrefillConsumed={() => setAdvisorPrefill(undefined)}
               />
             </div>
+          ) : storedZones.length > 0 ? (
+            <ZoneAwareResultPanel
+              storedZones={storedZones}
+              activeZoneId={activeZoneId}
+              setActiveZoneId={setActiveZoneId}
+              viewMode={zoneViewMode}
+              setViewMode={setZoneViewMode}
+              result={result}
+              selectedPlantsCount={selectedPlants.length}
+              allPlants={allPlants}
+              zonePlantingTable={zonePlantingTable}
+              advisorPrefill={advisorPrefill}
+              setAdvisorPrefill={setAdvisorPrefill}
+              onTabChange={onTabChange}
+              adoptedSubstitutes={adoptedSubstitutes}
+              onAdoptSubstitute={handleAdoptSubstitute}
+            />
           ) : (
-            /* Result tabs */
+            /* Result tabs（無 DXF 分區資料時的既有扁平流程，原封不動）*/
             (() => {
               const dangerCount = result.issues.filter(i => i.level === 'danger').length
               const TABS = [

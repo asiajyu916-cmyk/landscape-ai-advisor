@@ -2,15 +2,22 @@ import { useState, useRef, useCallback, useMemo, useEffect, Fragment } from 'rea
 import { createPortal } from 'react-dom'
 import {
   Upload, FileText, AlertTriangle, CheckCircle, HelpCircle,
-  ChevronDown, X, ArrowRight, Layers, Trash2, BookOpen, Table2, FileOutput, FileDown,
+  ChevronDown, X, ArrowRight, Layers, Trash2, BookOpen, Table2, FileOutput,
 } from 'lucide-react'
 import { parseDxf, detectPlantSchedule, findNearbyTexts } from '@/utils/dxfParser'
 import { analyzeMultiLayer, zoneLabel, detectZonesFromText, buildZonePlantList, buildZoneAssignDebug, polygonBBox, polygonArea, pointInPolygon, detectAnalysisScope, SCHEDULE_KEYWORD_RE } from '@/utils/spatialAnalysis'
 import type { ZoneAssignDebug, AnalysisScope } from '@/utils/spatialAnalysis'
 import { buildZoneStatistics, unitFromInsUnits } from '@/utils/zoneStatistics'
-import { exportZoneReviewPdf } from '@/utils/exportReviewPdf'
-import type { ZoneReviewPdfData } from '@/utils/exportReviewPdf'
-import { aggregatePairConflictsToEvalResult } from '@/utils/plantEvaluator'
+import { exportHtmlAsPaginatedPdf } from '@/utils/pdfCanvasExport'
+import {
+  escHtml, scoreColor, statusColor, getZoneColor, SPATIAL_KIND_LEGEND,
+  buildZoneEvents, buildZoneEventStats, computeReportScore, clusterZoneEvents, buildZoneFixStrategies,
+  buildZoneOverviewMapSvg, buildZoneLocalMapSvg,
+  buildShortZoneConclusion, buildTechnicalAppendixHtml,
+  BUCKET_LABEL, type ZoneEvent, type EventSeverity,
+  type EventGroup, type NeedsReviewSummary,
+} from '@/utils/dxfReportBuilder'
+import { aggregatePairConflictsToEvalResult, evaluate } from '@/utils/plantEvaluator'
 import type { EvalResult } from '@/utils/plantEvaluator'
 import { computeZonePlantConflicts } from '@/utils/plantProximity'
 import { loadPlantsFromStorage, savePlantsToStorage, loadPlantsWithCsvMerge } from '@/data/plantStore'
@@ -1966,6 +1973,9 @@ function buildZoneReviews(
     if (confirmed.length >= 1) {
       status = '可審查'
       evalResult = aggregatePairConflictsToEvalResult(proximityConflicts)
+      // 替代植栽建議另外呼叫一次 evaluate()（跟空間鄰近彙整分數是兩套獨立判斷，
+      // 這裡只取它的 alternatives，不覆蓋 aggregatePairConflictsToEvalResult 算出的分數/問題）
+      evalResult.alternatives = evaluate(confirmed, plantDB).alternatives
     } else if (hasAnyBlock) {
       status = '植物待確認'
     }
@@ -2306,7 +2316,8 @@ export default function DxfReviewPage({
   const [zonePlantLists, setZonePlantLists] = useState<ZonePlantList[]>([])
   const [detectedZones, setDetectedZones] = useState<DetectedZone[]>([])
   const [zoneReviews, setZoneReviews] = useState<ZoneReviewResult[]>([])
-  const [pdfHtml, setPdfHtml] = useState<string | null>(null)
+  const [pdfGenerating, setPdfGenerating] = useState(false)
+  const [pdfGenError, setPdfGenError] = useState<string | null>(null)
   // 分區植栽面積與喬木數量統計：圖面單位優先採用 DXF 內建 $INSUNITS；辨識不到時
   // 直接預設 cm（景觀 CAD 圖面繪製慣例）並照常計算，不阻擋、不強制使用者選擇——
   // unitAutoDefaulted 只用來在介面上標示「這是自動預設，非圖面內建」。
@@ -2314,6 +2325,21 @@ export default function DxfReviewPage({
   const [drawingUnit, setDrawingUnit] = useState<DrawingUnit>('cm')
   const [unitAutoDefaulted, setUnitAutoDefaulted] = useState(false)
   const [unitAnomaly, setUnitAnomaly] = useState(false)
+
+  // ── 常駐掛載後用 CSS 隱藏取代 unmount，捲動位置不會自動保留，離開/返回 dxf 分頁
+  // 時手動記住/還原（display:none 收合後高度歸零，還原要等瀏覽器重排完才做，
+  // 不能在同一個 tick 內還原，否則會被還沒展開的高度 clamp 掉）──────────────
+  const dxfScrollYRef = useRef(0)
+  const prevActiveTabRef = useRef(activeTab)
+  useEffect(() => {
+    if (prevActiveTabRef.current === 'dxf' && activeTab !== 'dxf') {
+      dxfScrollYRef.current = window.scrollY
+    }
+    if (prevActiveTabRef.current !== 'dxf' && activeTab === 'dxf') {
+      requestAnimationFrame(() => window.scrollTo(0, dxfScrollYRef.current))
+    }
+    prevActiveTabRef.current = activeTab
+  }, [activeTab])
 
   // 每次 zoneReviews 更新就持久化到 localStorage，供 AI配植頁與 PDF 讀取
   const saveZoneReviews = (reviews: ZoneReviewResult[], caller = 'unknown') => {
@@ -2346,6 +2372,18 @@ export default function DxfReviewPage({
         aiSuggestion:   r.evalResult?.aiSuggestion,
         adjustmentPlan: r.evalResult?.adjustmentPlan,
         reviewText:     r.evalResult?.reviewText,
+        // 分區導向連續性用：替代植栽／衝突植栽／喬木盤點，AI 配植評估頁的分區分頁需要
+        alternatives:        r.evalResult?.alternatives ?? [],
+        proximityConflicts:  r.proximityConflicts,
+        treeInventory:       r.treeInventory,
+        boundaryArea:        r.boundaryArea,
+        plantNames:          [...new Set(r.plants.map(p => p.name))],
+        hatchLabelsByPlantName: Object.fromEntries(
+          [...new Set(r.plants.map(p => p.name))].map(name => [
+            name,
+            r.blockEntries.filter(b => b.plantName === name).map(b => b.blockName),
+          ])
+        ),
       }))
       // sessionStorage：同一 tab 有效，關閉 tab 或新開 session 自動清除
       sessionStorage.setItem('dxf-zone-review-full', JSON.stringify(full))
@@ -2356,7 +2394,7 @@ export default function DxfReviewPage({
       // 清除舊版 localStorage（避免殘留舊資料被其他邏輯讀取）
       localStorage.removeItem('dxf-zone-review-full')
       localStorage.removeItem('dxf-zone-review-summary')
-    } catch { /* quota exceeded */ }
+    } catch (err) { console.warn('saveZoneReviews: sessionStorage 寫入失敗（可能超過容量）', err) }
   }
   const [zoneDebug, setZoneDebug] = useState<ZoneAssignDebug | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
@@ -2632,11 +2670,338 @@ export default function DxfReviewPage({
   const partial   = mappings.filter(m => m.matchStatus === 'partial')
   const unmatched = mappings.filter(m => m.matchStatus === 'unmatched')
 
+  // ── DXF 分區審查 PDF 匯出：原本用 window.open()+window.print()，彈出視窗常被
+  // 瀏覽器封鎖或列印被安靜擋掉，使用者點了沒反應；改成跟 AI 配植評估報告共用同一套
+  // exportHtmlAsPaginatedPdf 引擎（html2canvas 截圖＋DOM量測智慧分頁＋canvas文字
+  // 頁首頁尾），直接下載檔案，不依賴瀏覽器的列印/彈出視窗權限 ──────────────────
+  const handleExportZonePdf = async () => {
+    if (zoneReviews.length === 0 || pdfGenerating) return
+    setPdfGenerating(true)
+    setPdfGenError(null)
+    try {
+      const now = new Date()
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const genTime = `${now.getFullYear()}/${pad(now.getMonth() + 1)}/${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`
+      const esc = escHtml
+
+      // 每區事件卡：地圖標記／page1優先順序／page2問題群卡全部共用同一份，
+      // 避免各自重算導致編號兜不起來
+      const eventsByZone = new Map<string, ZoneEvent[]>()
+      const statsByZoneEvents = new Map<string, ReturnType<typeof buildZoneEventStats>>()
+      const scoreByZone = new Map<string, ReturnType<typeof computeReportScore>>()
+      const groupsByZone = new Map<string, EventGroup[]>()
+      const needsReviewByZone = new Map<string, NeedsReviewSummary>()
+      for (const r of zoneReviews) {
+        const events = buildZoneEvents(r.zoneName, r.proximityConflicts ?? [])
+        const stats = buildZoneEventStats(events, r.proximityConflicts ?? [])
+        eventsByZone.set(r.zoneName, events)
+        statsByZoneEvents.set(r.zoneName, stats)
+        scoreByZone.set(r.zoneName, computeReportScore(stats.dangerCount, stats.cautionCount, stats.needsReviewCount))
+        const { groups, needsReview } = clusterZoneEvents(r.zoneName, events, r.spatialInstances ?? [], drawingUnit)
+        groupsByZone.set(r.zoneName, groups)
+        needsReviewByZone.set(r.zoneName, needsReview)
+      }
+      const zoneAreaStats = new Map(zoneStatistics.map(s => [s.zoneId, s]))
+
+      // ── 暫時除錯輸出：先確認群聚結果合理再接 PDF 排版（依使用者要求）──────────
+      console.group('[DXF-CLUSTER-DEBUG]')
+      for (const r of zoneReviews) {
+        const conflicts = r.proximityConflicts ?? []
+        const groups = groupsByZone.get(r.zoneName) ?? []
+        const nr = needsReviewByZone.get(r.zoneName)
+        console.log(`${r.zoneName}：原始配對 ${conflicts.length} 組 → 整併為 ${groups.length} 個問題群 + needs-review ${nr?.count ?? 0} 項`)
+        console.table(groups.map(g => ({
+          群組: g.id, 嚴重度: g.maxSeverity, 主分類: g.primaryBucket,
+          次分類: g.secondaryBuckets.join('、'), 配對數: g.pairCount,
+          涉及配對ID: g.sourceConflictIds.join(','), 位置: g.locationCodes.join(','),
+          跨度cm: g.diameterCm,
+        })))
+        if (nr && nr.count > 0) {
+          console.log(`${r.zoneName} needs-review 摘要：${nr.reasonSummary}，代表案例 ${nr.representatives.length} 筆：`,
+            nr.representatives.map(e => `${e.plantAName}×${e.plantBName}(${e.overlapLabel})`))
+        }
+      }
+      console.groupEnd()
+
+      const allGroups = [...groupsByZone.values()].flat()
+      const sortGroupsBySeverity = (a: EventGroup, b: EventGroup) => (a.maxSeverity === b.maxSeverity ? 0 : a.maxSeverity === 'danger' ? -1 : 1)
+      const overallDanger = allGroups.filter(g => g.maxSeverity === 'danger').length
+      const overallCaution = allGroups.filter(g => g.maxSeverity === 'caution').length
+      const overallNeedsReview = [...needsReviewByZone.values()].reduce((sum, nr) => sum + nr.count, 0)
+      const overallScore = computeReportScore(overallDanger, overallCaution, overallNeedsReview)
+      const totalPlantSpecies = new Set(zoneReviews.flatMap(r => r.plants.map(p => p.name))).size
+      const top3 = [...allGroups].sort(sortGroupsBySeverity).slice(0, 3)
+
+      // ── 封面 ──
+      const coverHtml = `
+<div class="cover-hdr">
+  <svg width="44" height="44" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+    <path d="M16 1L28 5V18C28 26 22.5 30.5 16 32C9.5 30.5 4 26 4 18V5Z" fill="rgba(255,255,255,0.15)" stroke="white" stroke-width="1.5"/>
+    <polygon points="16,8 20.5,14.5 11.5,14.5" fill="white"/>
+    <polygon points="16,12 22,21.5 10,21.5" fill="white" opacity="0.9"/>
+    <rect x="14.5" y="21.5" width="3" height="3.5" rx="0.5" fill="white" opacity="0.75"/>
+    <polyline points="20,23 22,26 26.5,21" fill="none" stroke="#86efac" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>
+  <div class="cover-hdr-text">
+    <h1>景觀 AI 設計審查顧問 2.0</h1>
+    <p>DXF 分區植栽審查報告　｜　${esc(fileName || '（未命名圖面）')}</p>
+  </div>
+</div>
+<div class="cover-body">
+  <div class="meta-box no-break">
+    <div class="meta-row"><span class="meta-lbl">報告名稱</span><span class="meta-val">DXF 分區植栽審查報告</span></div>
+    <div class="meta-row"><span class="meta-lbl">專案名稱</span><span class="meta-val">—</span></div>
+    <div class="meta-row"><span class="meta-lbl">原始圖面名稱</span><span class="meta-val">${esc(fileName || '（未命名圖面）')}</span></div>
+    <div class="meta-row"><span class="meta-lbl">圖面版本</span><span class="meta-val">—</span></div>
+    <div class="meta-row"><span class="meta-lbl">產生時間</span><span class="meta-val">${esc(genTime)}</span></div>
+    <div class="meta-row"><span class="meta-lbl">分析單位</span><span class="meta-val">${zoneReviews.length} 分區</span></div>
+  </div>
+  <div class="score-summary no-break" style="border-left-color:${scoreColor(overallScore.score)}">
+    <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap">
+      <span style="font-size:26px;font-weight:900;color:${scoreColor(overallScore.score)}">${overallScore.score}<span style="font-size:14px;font-weight:400;color:#78716c"> / 100</span></span>
+      <span style="font-size:16px;font-weight:700;color:${scoreColor(overallScore.score)}">綜合評估：${esc(overallScore.tier)}（${esc(overallScore.tierNote)}）</span>
+    </div>
+    <div style="font-size:13px;color:#44403c;margin-top:6px">${esc(overallScore.reasonLine)}</div>
+  </div>
+  <div class="kpi-grid no-break">
+    <div class="kpi"><div class="kpi-v" style="color:#1a4731">${zoneReviews.length}</div><div class="kpi-l">分區數量</div></div>
+    <div class="kpi"><div class="kpi-v" style="color:${overallDanger > 0 ? '#dc2626' : '#57534e'}">${overallDanger}</div><div class="kpi-l">高風險問題數</div></div>
+    <div class="kpi"><div class="kpi-v" style="color:${overallCaution > 0 ? '#d97706' : '#57534e'}">${overallCaution}</div><div class="kpi-l">一般改善問題數</div></div>
+    <div class="kpi"><div class="kpi-v" style="color:${overallNeedsReview > 0 ? '#b45309' : '#57534e'}">${overallNeedsReview}</div><div class="kpi-l">需人工確認數</div></div>
+  </div>
+  <div class="priority-box no-break">
+    <div class="priority-title">最優先修正事項</div>
+    ${top3.length > 0
+      ? top3.map((e, i) => `<div class="priority-line">${i + 1}. 【${esc(e.zoneName)}${esc(e.id)}】${esc(e.title)}</div>`).join('')
+      : `<p style="color:#15803d;font-size:13px">✅ 全案未發現需優先修正之高風險項目。</p>`}
+  </div>
+  <p class="ai-disclaimer">AI 判讀結果仍建議由專業人員（景觀設計師／審查委員）現場或圖面覆核，本報告不取代專業判斷。</p>
+</div>`
+
+      // ── 全區分區總覽 ──
+      const zoneSummaries = zoneReviews.map(r => {
+        const s = statsByZoneEvents.get(r.zoneName)!
+        return { zoneName: r.zoneName, score: scoreByZone.get(r.zoneName)!.score, dangerCount: s.dangerCount, cautionCount: s.cautionCount, needsReviewCount: s.needsReviewCount }
+      })
+      const overviewSvg = buildZoneOverviewMapSvg(detectedZones, zoneSummaries)
+      const overviewMapHtml = `
+  <div class="sec-hdr page-break">全區分區總覽</div>
+  <div class="sec-body no-break">
+    ${overviewSvg ? `<div style="text-align:center">${overviewSvg}</div>` : `<p style="color:#78716c;font-size:13px;margin-bottom:10px">本圖面未偵測到可繪製之分區邊界，僅列出統計數據。</p>`}
+    <table style="margin-top:14px">
+      <thead><tr><th></th><th>分區</th><th>分數</th><th>高風險</th><th>一般改善</th><th>需人工確認</th><th>審查狀態</th></tr></thead>
+      <tbody>${zoneReviews.map((r, i) => {
+        const s = zoneSummaries[i]
+        return `<tr><td><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${getZoneColor(i)}"></span></td>
+        <td><strong>${esc(r.zoneName)}</strong></td>
+        <td style="color:${scoreColor(s.score)};font-weight:700">${s.score}</td>
+        <td style="color:${s.dangerCount > 0 ? '#dc2626' : '#78716c'}">${s.dangerCount}</td>
+        <td style="color:${s.cautionCount > 0 ? '#d97706' : '#78716c'}">${s.cautionCount}</td>
+        <td style="color:${s.needsReviewCount > 0 ? '#b45309' : '#78716c'}">${s.needsReviewCount}</td>
+        <td style="color:${statusColor(r.status)}">${esc(r.status)}</td></tr>`
+      }).join('')}</tbody>
+    </table>
+  </div>`
+
+      // ── 每分區 2 頁：page1 局部圖＋統計＋優先順序／page2 問題群卡＋needs-review
+      // 摘要＋區域層級修正策略＋分區結論。群組數少（實測 1-3 群），不再需要獨立
+      // 第三頁裝修正方案——修正方案本身也從「每個事件各自一份」改成「每區彙整
+      // 3-5 項」，內容量遠小於舊版，兩頁綽綽有餘。
+      const zonePagesHtml = zoneReviews.map(r => {
+        const groups = groupsByZone.get(r.zoneName) ?? []
+        const nr = needsReviewByZone.get(r.zoneName)!
+        const stats = statsByZoneEvents.get(r.zoneName)!
+        const reportScore = scoreByZone.get(r.zoneName)!
+        const detectedZone = detectedZones.find(z => z.name === r.zoneName)
+        const areaStats = zoneAreaStats.get(r.zoneName)
+        const localSvg = buildZoneLocalMapSvg({
+          zoneName: r.zoneName, zoneBoundary: detectedZone?.boundary, allZones: detectedZones,
+          instances: r.spatialInstances ?? [], groups,
+        })
+        const priority = [...groups].sort(sortGroupsBySeverity).slice(0, 3)
+        const groupDangerCount = groups.filter(g => g.maxSeverity === 'danger').length
+        const groupCautionCount = groups.filter(g => g.maxSeverity === 'caution').length
+
+        const page1 = `
+  <div class="sec-hdr page-break">${esc(r.zoneName)}　分區圖面與審查</div>
+  <div class="sec-body no-break">
+    ${localSvg ? `<div style="text-align:center">${localSvg}</div><div class="map-caption">圖面單位：${esc(drawingUnit)}</div>` : `<p style="color:#78716c;font-size:13px">本分區無圖面幾何資料，略過分區地圖。</p>`}
+    <div class="legend-row">${SPATIAL_KIND_LEGEND.map(l => `<span><i style="background:${l.color}"></i>${esc(l.label)}</span>`).join('')}</div>
+    <table style="margin-top:14px">
+      <tbody>
+        <tr><td>分區分數</td><td style="color:${scoreColor(reportScore.score)};font-weight:700">${reportScore.score}（${esc(reportScore.tier)}）</td>
+        <td>面積</td><td>${areaStats ? areaStats.zoneAreaM2.toFixed(1) + ' m²' : '—'}</td></tr>
+        <tr><td>喬木數</td><td>${areaStats?.treeTotalCount ?? r.spatialInstances.filter(i => i.kind === 'tree').length}</td>
+        <td>灌木／地被面積</td><td>${areaStats ? (areaStats.shrubAreaM2 + areaStats.groundLawnAreaM2).toFixed(1) + ' m²' : '—'}</td></tr>
+        <tr><td>高風險／一般改善／需人工確認</td><td colspan="3">${groupDangerCount} ／ ${groupCautionCount} ／ ${nr.count}</td></tr>
+      </tbody>
+    </table>
+    <div style="margin-top:12px">
+      <div style="font-size:14px;font-weight:700;color:#1a4731;margin-bottom:6px">修正優先順序</div>
+      ${priority.length > 0 ? priority.map((g, i) => `<div class="priority-line">${i + 1}. 【${esc(g.id)}】${esc(g.title)}</div>`).join('') : `<p style="color:#15803d;font-size:13px">✅ 未發現優先處理事項。</p>`}
+    </div>
+    <div class="no-break" style="margin-top:14px;padding:12px;background:#f7faf5;border-radius:6px;font-size:13px;color:#44403c">
+      ${esc(buildShortZoneConclusion(r.zoneName, stats, reportScore))}
+    </div>
+  </div>`
+
+        // page2：問題群卡（同分區＋同根本原因＋同一圖面位置＝一張卡）＋needs-review
+        // 摘要區塊（不逐項展開）＋區域層級修正策略（3-5 項，取代逐事件的替代方案）
+        const groupCardsHtml = groups.length > 0 ? groups.map(g => `
+    <div class="issue no-break ${g.maxSeverity}">
+      <div class="i-title">${esc(g.id)}｜${esc(g.title)}</div>
+      <span class="badge ${g.maxSeverity === 'danger' ? 'b-d' : 'b-c'}">${g.maxSeverity === 'danger' ? '高風險' : '一般改善'}</span>
+      <div class="i-lbl">涉及植物</div><div class="i-txt">${esc(g.plantNames.join('、'))}</div>
+      <div class="i-lbl">圖面位置</div><div class="i-txt" style="font-family:monospace">${esc(g.locationCodes.join('／'))}</div>
+      <div class="i-lbl">問題類型</div><div class="i-txt">${esc(BUCKET_LABEL[g.primaryBucket])}${g.secondaryBuckets.length > 0 ? `（同時涉及：${esc(g.secondaryBuckets.map(b => BUCKET_LABEL[b]).join('、'))}）` : ''}</div>
+      <div class="i-lbl">問題原因</div><div class="i-txt">${esc(g.cause)}</div>
+      <div class="i-lbl">可能影響</div><div class="i-txt">${esc(g.impact)}</div>
+      <div class="i-lbl">修正建議</div><div class="i-txt">${esc(g.suggestion)}</div>
+      <div class="review-note" style="background:#f7faf5;color:#57534e;border-left-color:#a8a29e">共涉及 ${g.pairCount} 組配對（${esc(g.sourceConflictIds.map(id => id.replace(/^conflict-/, '')).join('、'))}），完整明細見技術附錄。合併依據：${g.mergeReason === 'shared-instance' ? `共用植物實例（${esc(g.sharedInstanceIds.join('、'))}）` : g.mergeReason === 'distance' ? `位置相鄰，群組跨度約 ${g.diameterCm}cm` : '單一配對'}。</div>
+    </div>`).join('') : `<p class="no-break" style="color:#15803d;font-size:15px">✅ 本分區未發現需處理之問題群。</p>`
+
+        const needsReviewHtml = nr.count > 0 ? `
+    <div class="no-break" style="margin-top:16px;padding:12px;background:#fffbeb;border-radius:6px">
+      <div style="font-weight:700;color:#b45309;margin-bottom:6px">需人工確認（共 ${nr.count} 筆）</div>
+      <div style="font-size:13px;color:#44403c;margin-bottom:8px">${esc(nr.reasonSummary)}，皆因資料不足無法確認是否為實際衝突，不列入高風險或扣分計算。</div>
+      <div style="font-size:12px;color:#78716c;margin-bottom:4px">代表案例：</div>
+      <ul style="padding-left:18px;font-size:12px;color:#44403c;line-height:1.6">${nr.representatives.map(e => `<li>${esc(e.plantAName)}×${esc(e.plantBName)}（${esc(e.overlapLabel)}）</li>`).join('')}</ul>
+      <p style="font-size:12px;color:#78716c;margin-top:4px">完整清單（共 ${nr.count} 筆）詳見技術附錄。</p>
+    </div>` : ''
+
+        const strategies = buildZoneFixStrategies(groups, nr.count)
+        const strategiesHtml = `
+    <div class="no-break" style="margin-top:16px">
+      <div style="font-size:14px;font-weight:700;color:#1a4731;margin-bottom:6px">${esc(r.zoneName)}修正策略</div>
+      <ol style="padding-left:18px;font-size:13px;color:#44403c;line-height:1.6">${strategies.map(s => `<li>${esc(s)}</li>`).join('')}</ol>
+    </div>`
+
+        const page2 = `
+  <div class="sec-hdr page-break">${esc(r.zoneName)}　問題清單</div>
+  <div class="sec-body">
+    ${groupCardsHtml}
+    ${needsReviewHtml}
+    ${strategiesHtml}
+  </div>`
+
+        return page1 + page2
+      }).join('')
+
+      // ── 最終結論頁 ──
+      const keepAsIsZones = zoneReviews.filter(r => (groupsByZone.get(r.zoneName)?.length ?? 0) === 0 && (needsReviewByZone.get(r.zoneName)?.count ?? 0) === 0)
+      const finalPriority = [...allGroups].sort(sortGroupsBySeverity).slice(0, 8)
+      const conclusionHtml = `
+  <div class="sec-hdr page-break">最終結論</div>
+  <div class="sec-body">
+    <p class="no-break" style="font-size:13px;color:#44403c;line-height:1.8">
+      ${esc(overallScore.reasonLine)}。本次共分析 ${zoneReviews.length} 個分區，全案綜合評估為「${esc(overallScore.tier)}」（${esc(overallScore.tierNote)}）。
+      ${overallDanger > 0 ? '建議優先處理高風險項目後再提送審查，需人工確認事項請於施工前完成現場或圖面覆核。' : '整體配置相容性良好，建議依常規養護計畫執行並持續留意一般改善事項。'}
+    </p>
+    ${finalPriority.length > 0 ? `
+    <div class="no-break" style="margin-top:14px">
+      <div style="font-size:14px;font-weight:700;color:#1a4731;margin-bottom:6px">優先修正清單</div>
+      <ol style="padding-left:18px;font-size:13px;color:#44403c;line-height:1.6">${finalPriority.map(g => `<li>【${esc(g.zoneName)}${esc(g.id)}】${esc(g.title)}</li>`).join('')}</ol>
+    </div>` : ''}
+    ${keepAsIsZones.length > 0 ? `
+    <div class="no-break" style="margin-top:14px">
+      <div style="font-size:14px;font-weight:700;color:#15803d;margin-bottom:6px">可保留項目</div>
+      <p style="font-size:13px;color:#44403c">${keepAsIsZones.map(r => esc(r.zoneName)).join('、')} 未發現需調整之問題項目，現有配置可保留。</p>
+    </div>` : ''}
+    ${overallNeedsReview > 0 ? `
+    <div class="no-break" style="margin-top:14px;padding:12px;background:#fffbeb;border-radius:6px">
+      <div style="font-weight:700;color:#b45309;margin-bottom:6px">需人工確認項目彙總（全案共 ${overallNeedsReview} 項）</div>
+      <p style="font-size:13px;color:#44403c">${zoneReviews.map(r => {
+        const nr = needsReviewByZone.get(r.zoneName)
+        return nr && nr.count > 0 ? `${esc(r.zoneName)}：${nr.count} 項（${esc(nr.reasonSummary)}）` : ''
+      }).filter(Boolean).join('；')}。各區代表案例已列於分區問題清單頁，完整逐筆清單請見技術附錄。</p>
+    </div>` : ''}
+    <div class="no-break" style="margin-top:14px;padding:12px;background:#f7faf5;border-radius:6px;font-size:13px;color:#44403c">
+      建議下一步：由景觀設計師／審查委員針對標示為「需人工確認」之項目進行現場或圖面覆核，並於施工前確認修正建議之可行性。
+    </div>
+  </div>`
+
+      // ── 技術附錄（逐對明細，不計入主報告頁數）──
+      const appendixHtml = buildTechnicalAppendixHtml(zoneReviews.map(r => ({
+        zoneName: r.zoneName, proximityConflicts: r.proximityConflicts ?? [], treeInventory: r.treeInventory ?? [], evalResult: r.evalResult,
+        groups: groupsByZone.get(r.zoneName) ?? [],
+      })))
+
+      const reportHtml = `
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Microsoft JhengHei','微軟正黑體','Noto Sans TC',Arial,sans-serif;background:#fff;color:#1c1917;font-size:13px;line-height:1.7;width:794px}
+.cover-hdr{background:#1a4731;padding:36px 50px 28px;display:flex;align-items:center;gap:18px}
+.cover-hdr-text h1{color:#fff;font-size:22px;font-weight:900;margin-bottom:4px}
+.cover-hdr-text p{color:#86efac;font-size:13px}
+.cover-body{padding:36px 50px}
+.report-body{padding:0 50px 40px}
+.meta-box{background:#f7faf5;border:1px solid #d4e8d4;border-radius:10px;padding:24px;margin-bottom:20px}
+.meta-row{display:flex;gap:16px;margin-bottom:8px;font-size:13px}
+.meta-lbl{color:#57534e;width:100px;flex-shrink:0}
+.meta-val{color:#1c1917;font-weight:700}
+.score-summary{background:#f7faf5;border:1px solid #d4e8d4;border-left:5px solid #1a4731;border-radius:8px;padding:16px 18px;margin-bottom:20px}
+.kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px}
+.kpi{background:#f7faf5;border:1px solid #d4e8d4;border-radius:8px;padding:14px;text-align:center}
+.kpi-v{font-size:28px;font-weight:900;line-height:1}
+.kpi-l{font-size:11px;color:#57534e;margin-top:3px}
+.priority-box{background:#f0fdf4;border:1.5px solid #bbf7d0;border-radius:10px;padding:16px 18px;margin-bottom:14px}
+.priority-title{font-size:14px;font-weight:700;color:#14532d;margin-bottom:8px}
+.ai-disclaimer{font-size:11px;color:#78716c;text-align:center;padding-top:6px;border-top:1px dashed #d4e8d4}
+.sec-hdr{background:#1a4731;color:#fff;padding:9px 18px;font-size:15px;font-weight:700;border-radius:6px 6px 0 0;margin-top:24px}
+.sec-body{border:1px solid #d4e8d4;border-top:none;border-radius:0 0 6px 6px;padding:18px}
+.issue{border:1px solid #e7e5e4;border-radius:8px;padding:16px;margin-bottom:12px;margin-top:14px}
+.issue.danger{border-left:4px solid #dc2626}
+.issue.caution{border-left:4px solid #d97706}
+.issue.needs-review{border-left:4px solid #ca8a04}
+.i-title{font-size:20px;font-weight:700;margin-bottom:8px}
+.badge{display:inline-block;padding:2px 10px;border-radius:99px;font-size:12px;font-weight:700;margin-bottom:10px}
+.b-d{background:#fef2f2;color:#dc2626}.b-c{background:#fffbeb;color:#d97706}.b-r{background:#fefce8;color:#b45309}
+.i-lbl{font-size:15px;color:#374151;font-weight:700;margin-top:8px;margin-bottom:4px}
+.i-txt{font-size:14px;color:#44403c;line-height:1.5}
+.review-note{margin-top:10px;padding:8px 10px;background:#fffbeb;border-radius:6px;font-size:12.5px;color:#92400e}
+table{width:100%;border-collapse:collapse;font-size:13px;margin-bottom:8px}
+th{background:#1a4731;color:#fff;padding:8px 12px;text-align:left;font-size:13px;font-weight:700}
+td{padding:8px 12px;border-bottom:1px solid #e7e5e4;vertical-align:top}
+tr:nth-child(even) td{background:#f7faf5}
+.map-caption{font-size:11px;color:#78716c;text-align:center;margin-top:6px}
+.legend-row{display:flex;gap:14px;flex-wrap:wrap;justify-content:center;margin-top:8px;font-size:11px;color:#57534e}
+.legend-row i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:middle}
+.priority-line{font-size:13px;color:#44403c;line-height:1.6;margin-bottom:4px}
+.plan-card{border:1px solid #e7e5e4;border-radius:6px;padding:10px 12px;margin-top:8px;background:#fafaf9}
+.plan-title{font-size:13px;font-weight:700;color:#1a4731;margin-bottom:4px}
+.plan-row{font-size:12.5px;color:#44403c;line-height:1.6}
+.appendix-divider{background:#44403c;color:#fff;padding:14px 18px;font-size:16px;font-weight:700;border-radius:6px;margin-top:24px;margin-bottom:16px}
+.no-break{break-inside:avoid;page-break-inside:avoid}
+.page-break{break-before:page;page-break-before:always}
+</style>
+${coverHtml}
+<div class="report-body">
+  ${overviewMapHtml}
+  ${zonePagesHtml}
+  ${conclusionHtml}
+</div>
+${appendixHtml}`
+
+      const { warnings } = await exportHtmlAsPaginatedPdf({
+        reportHtml,
+        filename: `DXF分區審查報告_${fileName || 'report'}.pdf`,
+        headerText: '景觀 AI 設計審查顧問 2.0｜DXF 分區審查報告',
+        footerLeft: fileName || 'DXF 分區審查',
+      })
+      if (warnings.length > 0) setPdfGenError(`PDF 產生完成，但${warnings.join('；')}`)
+    } catch (err) {
+      console.error('[DXF-PDF] 產生失敗：', err)
+      setPdfGenError(`PDF 產生失敗：${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setPdfGenerating(false)
+    }
+  }
+
   // ── Upload screen ──────────────────────────────────────────────────────────
 
   if (!parseResult) {
     return (
-      <div className="min-h-screen flex flex-col" style={{ background: 'radial-gradient(circle at 85% 15%, rgba(121,190,140,0.16) 0%, transparent 30%), radial-gradient(circle at 20% 85%, rgba(183,220,190,0.18) 0%, transparent 35%), linear-gradient(135deg, #f7faf5 0%, #eef6ef 48%, #e5f1e8 100%)' }}>
+      <div className={activeTab === 'dxf' ? 'min-h-screen flex flex-col' : 'hidden'} style={{ background: 'radial-gradient(circle at 85% 15%, rgba(121,190,140,0.16) 0%, transparent 30%), radial-gradient(circle at 20% 85%, rgba(183,220,190,0.18) 0%, transparent 35%), linear-gradient(135deg, #f7faf5 0%, #eef6ef 48%, #e5f1e8 100%)' }}>
         <main className="flex-1 flex flex-col items-center justify-center px-8 py-8">
           {/* Step guide */}
           <div className="flex items-center gap-3 mb-10 text-sm text-stone-500 flex-wrap justify-center">
@@ -2690,7 +3055,7 @@ export default function DxfReviewPage({
   const { stats, texts, polygons } = parseResult
 
   return (
-    <div className="min-h-screen flex flex-col" style={{ background: 'radial-gradient(circle at 85% 15%, rgba(121,190,140,0.16) 0%, transparent 30%), radial-gradient(circle at 20% 85%, rgba(183,220,190,0.18) 0%, transparent 35%), linear-gradient(135deg, #f7faf5 0%, #eef6ef 48%, #e5f1e8 100%)' }}>
+    <div className={activeTab === 'dxf' ? 'min-h-screen flex flex-col' : 'hidden'} style={{ background: 'radial-gradient(circle at 85% 15%, rgba(121,190,140,0.16) 0%, transparent 30%), radial-gradient(circle at 20% 85%, rgba(183,220,190,0.18) 0%, transparent 35%), linear-gradient(135deg, #f7faf5 0%, #eef6ef 48%, #e5f1e8 100%)' }}>
 
       {/* ── 工具列（原 Header 內容，移至內容區） ── */}
       <div className="border-b border-stone-200 bg-white/80 backdrop-blur-sm">
@@ -2702,21 +3067,15 @@ export default function DxfReviewPage({
           </p>
           <div className="flex items-center gap-2 flex-shrink-0">
             {zoneReviews.length > 0 && (
-              <button
-                onClick={() => {
-                  const pdfData: ZoneReviewPdfData[] = zoneReviews.map(r => ({
-                    zoneName: r.zoneName,
-                    status: r.status,
-                    blockEntries: r.blockEntries,
-                    plants: r.plants,
-                    evalResult: r.evalResult,
-                  }))
-                  const html = exportZoneReviewPdf(pdfData, fileName, { returnHtml: true })
-                  if (typeof html === 'string') setPdfHtml(html)
-                }}
-                className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-[#1a4731] text-white text-xs font-bold hover:bg-[#2d6a4f] transition-colors whitespace-nowrap">
-                <FileOutput size={13} />匯出分區審查 PDF
-              </button>
+              <div className="flex flex-col items-end gap-1">
+                <button
+                  onClick={handleExportZonePdf}
+                  disabled={pdfGenerating}
+                  className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-[#1a4731] text-white text-xs font-bold hover:bg-[#2d6a4f] transition-colors whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed">
+                  <FileOutput size={13} />{pdfGenerating ? '產生中…' : '匯出分區審查 PDF'}
+                </button>
+                {pdfGenError && <p className="text-[10px] text-red-500 max-w-xs text-right">{pdfGenError}</p>}
+              </div>
             )}
             <button onClick={() => { setParseResult(null); setFileName(''); setMappings([]); sessionStorage.removeItem('dxf-zone-review-full'); sessionStorage.removeItem('dxf-zone-review-summary') }}
               className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-stone-300 text-xs text-stone-600 hover:bg-stone-100 transition-colors whitespace-nowrap">
@@ -2984,75 +3343,6 @@ export default function DxfReviewPage({
       {/* Close dropdown overlay */}
       {dropdown && <div className="fixed inset-0 z-40" onClick={() => setDropdown(null)} />}
 
-      {/* PDF 已產生 Modal */}
-      {pdfHtml && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm mx-4 overflow-hidden">
-            <div className="px-6 pt-6 pb-4 flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center">
-                <FileOutput size={20} className="text-green-700" />
-              </div>
-              <div>
-                <p className="text-base font-bold text-stone-800">PDF 已產生完成</p>
-                <p className="text-xs text-stone-400">請選擇預覽或下載</p>
-              </div>
-            </div>
-            <div className="px-6 pb-6 flex flex-col gap-3">
-              <button
-                onClick={() => {
-                  try {
-                    console.log('[DXF-PDF-Preview] pdfHtml 長度:', pdfHtml?.length)
-                    const win = window.open('', '_blank', 'width=900,height=700')
-                    console.log('[DXF-PDF-Preview] window.open 結果:', win)
-                    if (!win) {
-                      console.error('[DXF-PDF-Preview] window.open 回傳 null')
-                      alert('彈出視窗被封鎖，請改用「下載 HTML 報告」。')
-                      return
-                    }
-                    win.document.open()
-                    win.document.write(pdfHtml!)
-                    win.document.close()
-                    console.log('[DXF-PDF-Preview] document.write 完成')
-                    setTimeout(() => {
-                      try { win.print() }
-                      catch (e) { console.error('[DXF-PDF-Preview] win.print() 例外：', e) }
-                    }, 800)
-                    setPdfHtml(null)
-                  } catch (err) {
-                    console.error('[DXF-PDF-Preview] 例外：', err)
-                    alert(`預覽失敗：${err instanceof Error ? err.message : String(err)}`)
-                  }
-                }}
-                className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-[#1a4731] text-white font-semibold text-sm hover:bg-[#2d6a4f] transition-colors">
-                <FileOutput size={16} />預覽 PDF（可列印）
-              </button>
-              <button
-                onClick={() => {
-                  try {
-                    console.log('[DXF-PDF-Download] 建立 Blob...')
-                    const blob = new Blob([pdfHtml!], { type: 'text/html;charset=utf-8' })
-                    const url = URL.createObjectURL(blob)
-                    console.log('[DXF-PDF-Download] Blob URL:', url)
-                    const a = document.createElement('a')
-                    a.href = url; a.download = `DXF分區審查報告_${fileName || 'report'}.html`; a.click()
-                    URL.revokeObjectURL(url)
-                    setPdfHtml(null)
-                  } catch (err) {
-                    console.error('[DXF-PDF-Download] 例外：', err)
-                    alert(`下載失敗：${err instanceof Error ? err.message : String(err)}`)
-                  }
-                }}
-                className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border border-stone-200 text-stone-700 font-medium text-sm hover:bg-stone-50 transition-colors">
-                <FileDown size={16} />下載 HTML 報告
-              </button>
-              <button onClick={() => setPdfHtml(null)}
-                className="text-xs text-stone-400 hover:text-stone-600 text-center py-1">
-                取消
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
       {/* 詢問 AI：本頁內嵌抽屜，不離開審查頁、不卸載本頁狀態 */}
       {aiDrawerQuestion && (
         <AiAdvisorDrawer
