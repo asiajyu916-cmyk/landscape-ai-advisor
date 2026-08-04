@@ -2,6 +2,7 @@ import { useState } from 'react'
 import PdfReviewPage from '@/pages/PdfReviewPage'
 import type { ZonePlantingRow } from '@/utils/parsePdfZones'
 import type { ZoneReviewResult } from '@/utils/evaluateZone'
+import type { LayerOverrideAction } from '@/types/dxf'
 import LandscapeAdvisorPage from '@/pages/LandscapeAdvisorPage'
 import DxfReviewPage from '@/pages/DxfReviewPage'
 import PlantAdvisorChatPage from '@/pages/PlantAdvisorChatPage'
@@ -37,6 +38,26 @@ function AuthenticatedApp() {
   // 只有透過 DXF 匯入流程才顯示分區審查摘要
   const [dxfZonesLinked, setDxfZonesLinked] = useState(false)
 
+  // ── 人工確認來源批次分類（AI 審查回覆頁的「灌木/地被/草皮/排除」按鈕）────────────
+  // 兩個頁面共用同一份狀態：LandscapeAdvisorPage 負責顯示按鈕、寫入這裡；
+  // DxfReviewPage 負責把它套進分析管線、立即重跑。key 見 layerOverrideKey()。
+  const [layerOverrides, setLayerOverrides] = useState<Map<string, LayerOverrideAction>>(() => {
+    try {
+      const r = sessionStorage.getItem('dxf-layer-overrides')
+      return r ? new Map(JSON.parse(r)) : new Map()
+    } catch { return new Map() }
+  })
+  const applyLayerOverride = (key: string, action: LayerOverrideAction) => {
+    setLayerOverrides(prev => {
+      const next = new Map(prev)
+      next.set(key, action)
+      try { sessionStorage.setItem('dxf-layer-overrides', JSON.stringify([...next.entries()])) } catch { /* quota exceeded */ }
+      return next
+    })
+  }
+  // DxfReviewPage 重新分析完成後 +1，LandscapeAdvisorPage 依此重讀 sessionStorage
+  const [zoneReviewsVersion, setZoneReviewsVersion] = useState(0)
+
   const handlePdfImport = (plantNames: string[], zoneTable?: ZonePlantingRow[]) => {
     setImportedPlantNames(plantNames)
     setImportedZoneTable(zoneTable)
@@ -62,6 +83,9 @@ function AuthenticatedApp() {
         zonePlantingTable={zonePlantingTable ?? []}
         pdfParsed={zonePlantingTable !== undefined}
         zoneReviewResults={zoneReviewResults}
+        layerOverrides={layerOverrides}
+        onApplyLayerOverride={applyLayerOverride}
+        zoneReviewsVersion={zoneReviewsVersion}
       />
       {/* PDF / DXF 頁面的內容渲染在共用 Header 下方 —— 沒有權限的分頁不 mount 對應
           元件（不是用 CSS 藏起來），改顯示無權限提示 */}
@@ -84,6 +108,8 @@ function AuthenticatedApp() {
           activeTab={activeTab}
           onTabChange={setActiveTab}
           onImport={handleDxfImport}
+          layerOverrides={layerOverrides}
+          onZoneReviewsUpdated={() => setZoneReviewsVersion(v => v + 1)}
         />
       ) : (activeTab === 'dxf' && <NoPermissionNotice featureName="DXF 審查" />)}
       {activeTab === 'advisor' && (

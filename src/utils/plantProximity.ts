@@ -11,7 +11,7 @@ import type { Polygon as PcPolygon } from 'polygon-clipping'
 import type {
   DxfParseResult, DxfInsert, DetectedZone, MappedItem, BlockExtent, DrawingUnit, ZoneType,
   ProximityLevel, NearBand, SpatialInstanceKind, SpatialPlantInstance, PlantConflictResult,
-  RiskLevel, TreeInventoryItem,
+  RiskLevel, TreeInventoryItem, LayerOverrideAction,
 } from '@/types/dxf'
 import type { CsvPlantRecord } from '@/types/csvPlant'
 import {
@@ -26,6 +26,7 @@ import {
 import { findPlantsByLayerName, normalizeLayerToken } from '@/utils/plantNameMatch'
 import { evaluatePlantPair } from '@/utils/plantEvaluator'
 import type { IssueDetail } from '@/utils/plantEvaluator'
+import { detectSiteDrainageEvidence } from '@/utils/siteDrainageContext'
 
 /** 本模組只需要 DxfParseResult 的幾何三個欄位，呼叫端不必組出完整的 DxfParseResult */
 export type SpatialDxfSource = Pick<DxfParseResult, 'inserts' | 'polygons' | 'blockExtents'>
@@ -147,6 +148,11 @@ function assignLocationLabels(zoneName: string, instances: SpatialPlantInstance[
 }
 
 /** 逐一實體建構每個分區的空間植栽單位（樹＝逐一 INSERT；灌木/地被/草皮＝逐一 HATCH handle-group，不合併） */
+/** 人工確認來源批次分類：key 為 `${zoneName}::${normalizeLayerToken(layer)}` */
+export function layerOverrideKey(zoneName: string, layer: string): string {
+  return `${zoneName}::${normalizeLayerToken(layer)}`
+}
+
 export function buildAllSpatialInstances(
   zones: DetectedZone[],
   dxf: SpatialDxfSource,
@@ -155,6 +161,7 @@ export function buildAllSpatialInstances(
   keywordMap: Map<string, string[]>,
   scope: AnalysisScope | undefined,
   unit: DrawingUnit,
+  layerOverrides?: Map<string, LayerOverrideAction>,
 ): Map<string, SpatialPlantInstance[]> {
   const instancesByZone = new Map<string, SpatialPlantInstance[]>()
   for (const z of zones) instancesByZone.set(z.name, [])
@@ -220,13 +227,21 @@ export function buildAllSpatialInstances(
       for (const asn of asns) {
         const zone = zones[asn.zoneIdx]
         if (!zone) continue
+
+        // 使用者在「AI 審查回覆」批次確認過的圖層：灌木/地被/草皮強制改判類型；
+        // 排除/暫時忽略則整個實體從分析中拿掉（不產生任何配對）——立即生效，
+        // 不需另外重跑上傳流程，見 layerOverrideKey()。
+        const override = layerOverrides?.get(layerOverrideKey(zone.name, island.outer.layer))
+        if (override === 'exclude') continue
+        const effectiveZoneType: ZoneType = override ?? island.outer.zoneType
+
         const rings = [island.outer.vertices, ...island.holes.map(h => h.vertices)]
         const bb = polygonBBox(island.outer.vertices)
         const plantName = resolvePlantNameForHatchLayer(island.outer.layer, keywordMap, plantDB)
         hatchSeq++
         instancesByZone.get(zone.name)!.push({
           id: `hatch-${hg.handle ?? hatchSeq}-${zone.name}`,
-          kind: hatchInstanceKind(island.outer.zoneType),
+          kind: hatchInstanceKind(effectiveZoneType),
           zoneName: zone.name,
           label: '',
           plantName,
@@ -234,6 +249,8 @@ export function buildAllSpatialInstances(
           bbox: { minX: bb.minX, maxX: bb.maxX, minY: bb.minY, maxY: bb.maxY },
           polygonRings: rings,
           sourceHandles: hg.handle ? [hg.handle] : [],
+          sourceLayer: island.outer.layer,
+          hatchPattern: island.outer.hatchPattern,
         })
       }
     }
@@ -405,12 +422,13 @@ export function computeZonePlantConflicts(
   scope: AnalysisScope | undefined,
   unit: DrawingUnit,
   cfg: ProximityConfig = DEFAULT_PROXIMITY_CONFIG,
+  layerOverrides?: Map<string, LayerOverrideAction>,
 ): {
   resultsByZone: Map<string, PlantConflictResult[]>
   instancesByZone: Map<string, SpatialPlantInstance[]>
   treeInventoryByZone: Map<string, TreeInventoryItem[]>
 } {
-  const instancesByZone = buildAllSpatialInstances(zones, dxf, mappings, plantDB, keywordMap, scope, unit)
+  const instancesByZone = buildAllSpatialInstances(zones, dxf, mappings, plantDB, keywordMap, scope, unit, layerOverrides)
   const resultsByZone = new Map<string, PlantConflictResult[]>()
   const treeInventoryByZone = new Map<string, TreeInventoryItem[]>()
   let seq = 0
@@ -418,6 +436,10 @@ export function computeZonePlantConflicts(
   for (const [zoneName, instances] of instancesByZone) {
     const pairs = computeZoneProximityPairs(instances, unit, cfg)
     treeInventoryByZone.set(zoneName, computeZoneTreeInventory(instances, pairs))
+
+    // 排水衝突的「場地積水證據」是分區層級的判斷，不是逐對配對各自判斷——同一分區
+    // 內所有配對共用同一個場地條件，只掃描一次。見 siteDrainageContext.ts。
+    const siteDrainageEvidence = detectSiteDrainageEvidence([zoneName, ...instances.map(i => i.sourceLayer)])
 
     const results: PlantConflictResult[] = []
     for (const pair of pairs) {
@@ -433,7 +455,7 @@ export function computeZonePlantConflicts(
         judgment = 'unmatched'   // 空間上已符合鄰近條件，但比對不到植物資料，不可整筆丟棄
         issues = []
       } else {
-        const evalResult = evaluatePlantPair(recA, recB, plantDB)
+        const evalResult = evaluatePlantPair(recA, recB, plantDB, siteDrainageEvidence)
         judgment = evalResult.issues.some(i => i.level === 'danger') ? 'conflict'
           : evalResult.issues.some(i => i.level === 'caution') ? 'caution'
           : 'ok'
@@ -446,8 +468,8 @@ export function computeZonePlantConflicts(
         id: `conflict-${zoneName}-${seq}`,
         zoneName,
         locationLabel: `${zoneName}／種植區塊 ${pair.a.label}${pair.a.label !== pair.b.label ? `‑${pair.b.label}` : ''}`,
-        plantA: { name: pair.a.plantName, label: pair.a.label, kind: pair.a.kind, instanceId: pair.a.id },
-        plantB: { name: pair.b.plantName, label: pair.b.label, kind: pair.b.kind, instanceId: pair.b.id },
+        plantA: { name: pair.a.plantName, label: pair.a.label, kind: pair.a.kind, instanceId: pair.a.id, sourceLayer: pair.a.sourceLayer },
+        plantB: { name: pair.b.plantName, label: pair.b.label, kind: pair.b.kind, instanceId: pair.b.id, sourceLayer: pair.b.sourceLayer },
         proximity: pair.level,
         nearBand: pair.nearBand,
         distanceCm: Math.round(pair.distanceCm),

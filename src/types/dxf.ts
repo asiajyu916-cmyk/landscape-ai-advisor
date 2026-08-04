@@ -242,7 +242,12 @@ export interface SpatialPlantInstance {
   canopyRadius?: number         // 樹木限定：冠幅 buffer 半徑（圖面單位）
   polygonRings?: Array<Array<{ x: number; y: number }>>  // HATCH 限定：外邊界＋孔洞
   sourceHandles: string[]
+  sourceLayer?: string          // HATCH 限定：原始 DXF 圖層名稱（未正規化），供人工確認來源分組使用
+  hatchPattern?: string         // HATCH 限定：原始 HATCH pattern 名稱
 }
+
+/** 人工確認來源批次分類動作：套用後會強制該圖層的 zoneType，重新觸發整個分析管線 */
+export type LayerOverrideAction = 'shrub' | 'groundcover' | 'lawn' | 'exclude'
 
 /**
  * high/medium/low 依 judgment × proximity 交叉決定（見 plantProximity.ts 的
@@ -255,8 +260,8 @@ export interface PlantConflictResult {
   id: string
   zoneName: string
   locationLabel: string          // 例如 "A區／種植區塊 H-12"
-  plantA: { name: string; label: string; kind: SpatialInstanceKind; instanceId: string }
-  plantB: { name: string; label: string; kind: SpatialInstanceKind; instanceId: string }
+  plantA: { name: string; label: string; kind: SpatialInstanceKind; instanceId: string; sourceLayer?: string }
+  plantB: { name: string; label: string; kind: SpatialInstanceKind; instanceId: string; sourceLayer?: string }
   proximity: ProximityLevel
   nearBand?: NearBand
   distanceCm: number

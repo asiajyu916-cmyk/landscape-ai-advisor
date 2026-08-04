@@ -31,9 +31,17 @@ import type {
 } from '@/types/csvPlant'
 import type { SimilarPlantCandidate, PlantSearchResult, DraftPlantRecord } from '@/types/plantSearch'
 import type { AltSuggestion as DxfAltSuggestion } from '@/utils/plantEvaluator'
-import type { PlantConflictResult, TreeInventoryItem } from '@/types/dxf'
+import type { PlantConflictResult, TreeInventoryItem, LayerOverrideAction } from '@/types/dxf'
+import { layerOverrideKey } from '@/utils/plantProximity'
 import ProximityConflictCard from '@/components/dxf/ProximityConflictCard'
 import { exportHtmlAsPaginatedPdf } from '@/utils/pdfCanvasExport'
+import { classifyOverlap } from '@/utils/dxfReportBuilder'
+import { deriveConclusion, classifyCategory, CATEGORY_GROUP_ORDER, CATEGORY_GROUP_META, type IssueCategoryGroup } from '@/utils/issueCategoryMeta'
+import {
+  gapSeverity, levelsGapSeverity, sunLevelOf, waterLevelOf, maintenanceLevelOf,
+  type GapSeverity,
+} from '@/utils/compatibilityLevels'
+import type { SiteDrainageEvidence } from '@/utils/siteDrainageContext'
 
 // ── tiny helpers ──────────────────────────────────────────────────────────────
 function uid() { return Math.random().toString(36).slice(2) }
@@ -108,90 +116,102 @@ function makeIssue(category: string, level: IssueLevel, cause: string, impact: s
   return { category, level, cause, impact, suggestion }
 }
 
-function evaluate(plants: SelectedCsvPlant[], allPlants: CsvPlantRecord[]): EvalResult {
+function evaluate(
+  plants: SelectedCsvPlant[],
+  allPlants: CsvPlantRecord[],
+  siteDrainageEvidence: SiteDrainageEvidence = 'ground-natural',
+): EvalResult {
   const issues: IssueDetail[] = []
   const problemIds = new Set<string>()
   let deductions = 0
 
-  const waterScores = plants.map(p => waterScore(p.waterRequirement))
-  const maxW = Math.max(...waterScores)
-  const minW = Math.min(...waterScores)
-  const waterGap = maxW - minW
+  // ── 程度差距判定（日照／澆水／排水／養護強度）──────────────────────────────
+  // 統一規則（見 compatibilityLevels.ts）：差距 0～2 級＝通過，不列入問題、不扣分；
+  // 差距 3 級＝提醒，輕微扣分；差距 4 級以上＝嚴重，列入主要問題與高風險。跟
+  // plantEvaluator.ts 的 evaluate() 共用同一套門檻函式，避免兩邊各自維護一份
+  // 判定標準、久了就飄移不一致。
 
-  // 1. 澆水衝突
-  if (waterGap >= 2) {
+  // 1. 澆水
+  const waterLevels = plants.map(p => waterLevelOf(p.waterRequirement))
+  const { severity: waterSeverity, gap: waterGap } = levelsGapSeverity(waterLevels)
+  if (waterSeverity === 'danger') {
     deductions += 20
-    plants.filter(p => waterScore(p.waterRequirement) === minW || waterScore(p.waterRequirement) === maxW)
+    const validW = waterLevels.filter((v): v is number => v !== undefined)
+    const maxW = Math.max(...validW), minW = Math.min(...validW)
+    plants.filter(p => { const lv = waterLevelOf(p.waterRequirement); return lv === minW || lv === maxW })
       .forEach(p => problemIds.add(p.instanceId))
     issues.push(makeIssue('澆水衝突', 'danger',
-      `本區植栽水分需求差異大（${[...new Set(plants.map(p => p.waterRequirement))].join('、')}），若以同一灌溉管理，高需水植物可能缺水，低需水植物可能積水爛根。`,
+      `本區植栽水分需求差距達 ${waterGap} 級（${[...new Set(plants.map(p => p.waterRequirement))].join('、')}），若以同一灌溉管理，高需水植物可能缺水，低需水植物可能積水爛根。`,
       '澆水管理無法同時兼顧所有植物需求，長期將導致部分植物衰退，增加後續養護難度。',
       '建議依水分需求高低設置獨立灌溉迴路，或替換為水分需求相近的植栽組合。'))
-  } else if (waterGap >= 1) {
-    deductions += 9
+  } else if (waterSeverity === 'caution') {
+    deductions += 6
     issues.push(makeIssue('澆水衝突', 'caution',
-      `本區植栽水分需求略有差異（${[...new Set(plants.map(p => p.waterRequirement))].join('、')}），需注意澆灌頻率管理。`,
+      `本區植栽水分需求差距 ${waterGap} 級（${[...new Set(plants.map(p => p.waterRequirement))].join('、')}），建議留意澆灌頻率管理。`,
       '若統一澆水頻率，部分植物可能受到輕微水分壓力，影響生長勢。',
       '建議於養護計畫中標示各植栽的適當給水量，並考慮分組澆灌。'))
   }
 
-  // 2. 土壤 / 排水衝突
-  const wets = plants.map(p => p.wetTolerance)
-  const drainLevel = drainageConflictLevel(wets)
-  const hasNotTolerant = wets.includes('不耐積水')
-  const hasTolerant = wets.includes('耐濕')
-  if (drainLevel === 'caution') {
-    deductions += 13
-    if (hasNotTolerant) plants.filter(p => p.wetTolerance === '不耐積水').forEach(p => problemIds.add(p.instanceId))
-    const wetTolerantPlants = plants.filter(p => p.wetTolerance === '耐濕' || p.wetTolerance === '稍耐濕')
-    wetTolerantPlants.forEach(p => problemIds.add(p.instanceId))
+  // 2. 排水／耐濕
+  // 耐濕等級不同本身不成立衝突，必須同時存在「場地積水證據」才可判定——見
+  // src/utils/siteDrainageContext.ts 與 plantEvaluator.ts 同一段的說明。這個手動加
+  // 植物的流程沒有 DXF 分區／圖層資料可判斷場地條件，預設為一樓自然土層
+  // （ground-natural，符合多數案件的實務常態），不會因為耐濕等級不同就判定衝突。
+  const dryPlants = plants.filter(p => p.wetTolerance === '不耐積水')
+  const wetPlants = plants.filter(p => p.wetTolerance === '耐濕')
+  const hasNotTolerant = dryPlants.length > 0
+  const drainSeverity: GapSeverity = !hasNotTolerant ? 'pass'
+    : siteDrainageEvidence === 'impervious-evidence' ? 'danger'
+    : siteDrainageEvidence === 'unknown-structure' ? 'caution'
+    : 'pass'
+
+  if (drainSeverity === 'danger') {
+    deductions += 15
+    dryPlants.forEach(p => problemIds.add(p.instanceId))
+    wetPlants.forEach(p => problemIds.add(p.instanceId))
+    issues.push(makeIssue('排水衝突', 'danger',
+      `本場地偵測到低窪、集水區、不透水底板或排水不良等積水證據，種植不耐積水植物（${dryPlants.map(p => p.name).join('、')}）風險較高${wetPlants.length > 0 ? `，且與耐濕植物（${wetPlants.map(p => p.name).join('、')}）混植，排水需求差異明顯` : ''}。`,
+      '場地已有積水證據時，不耐積水植物易發生爛根，長期影響存活率與景觀品質。',
+      '建議優先改善排水設計（如加高花台、增設排水層或明溝）、視情況移動植物位置，若無法改善排水，最後再考慮更換為耐積水植物。'))
+  } else if (drainSeverity === 'caution') {
+    deductions += 6
     issues.push(makeIssue('排水衝突', 'caution',
-      `本區同時包含不耐積水（${plants.filter(p => p.wetTolerance === '不耐積水').map(p => p.name).join('、')}）與耐濕（${wetTolerantPlants.map(p => p.name).join('、')}）的植物組合，排水條件需求相反。`,
-      '若採統一排水設計，不耐積水植物易發生爛根，耐濕植物則可能因過度排水而受影響。',
-      '建議分區配置並設置差異化排水層，或選用排水需求相近的替代植栽。'))
-  } else if (hasNotTolerant && plants.length > 1) {
-    deductions += 5
-    issues.push(makeIssue('排水衝突', 'caution',
-      `本區含不耐積水植物（${plants.filter(p => p.wetTolerance === '不耐積水').map(p => p.name).join('、')}），需確保排水設計符合需求。`,
-      '若排水層設計不足，不耐積水植物易在雨季受積水影響。',
-      '建議補充礫石排水層（10cm 以上），並確認種植基盤排水坡度。'))
+      `本區種植不耐積水植物（${dryPlants.map(p => p.name).join('、')}），但無法確認地下是否為自然土層（可能為地下室頂板、人工花台或屋頂綠化），建議先確認排水構造再判斷是否需要調整。`,
+      '若地下實際為不透水構造且排水設計不足，不耐積水植物易受積水影響；若確認為自然土層則通常無需特別處理。',
+      '建議確認地下構造與排水設施是否符合植栽需求，必要時安排現場或圖面覆核。'))
   }
 
-  // 3. 日照問題
-  const suns = plants.map(p => p.sunRequirement)
-  const sunLevel = sunConflictLevel(suns)
-  if (sunLevel === 'severe') {
+  // 3. 日照
+  const sunLevels = plants.map(p => sunLevelOf(p.sunRequirement))
+  const { severity: sunSeverity, gap: sunGap } = levelsGapSeverity(sunLevels)
+  if (sunSeverity === 'danger') {
     deductions += 16
-    plants.filter(p => p.sunRequirement === '半日照至遮陰').forEach(p => problemIds.add(p.instanceId))
+    const validSun = sunLevels.filter((v): v is number => v !== undefined)
+    const maxSun = Math.max(...validSun), minSun = Math.min(...validSun)
+    plants.filter(p => { const lv = sunLevelOf(p.sunRequirement); return lv === minSun || lv === maxSun })
+      .forEach(p => problemIds.add(p.instanceId))
     issues.push(makeIssue('日照問題', 'danger',
-      `本區同時包含全日照植物（${plants.filter(p => p.sunRequirement === '全日照').map(p => p.name).join('、')}）與半日照至遮陰植物（${plants.filter(p => p.sunRequirement === '半日照至遮陰').map(p => p.name).join('、')}），日照需求完全相反。`,
+      `本區植栽日照需求差距達 ${sunGap} 級（${[...new Set(plants.map(p => p.sunRequirement))].join('、')}），日照需求完全相反。`,
       '全日照環境下耐陰植物容易葉燒，遮蔭環境下全日照植物生長勢衰退，兩者無法共存於同一光照條件。',
       '建議將全日照與耐陰植物分區配置，或將耐陰植物換為全日照至半日照之替代植栽。'))
-  } else if (sunLevel === 'mild') {
+  } else if (sunSeverity === 'caution') {
     deductions += 7
     issues.push(makeIssue('日照問題', 'caution',
-      `本區植栽日照需求略有差異（${[...new Set(suns.filter(s => s !== '待查'))].join('、')}），需確認配置位置對應日照條件。`,
+      `本區植栽日照需求差距 ${sunGap} 級（${[...new Set(plants.map(p => p.sunRequirement).filter(s => s !== '待查'))].join('、')}），建議確認配置位置對應日照條件。`,
       '日照需求不一的植物若未依位置配置，可能造成部分植物生長差異，影響景觀均一性。',
       '建議確認場域各位置實際日照時數，將日照需求相近的植物集中配置。'))
   }
 
-  // 4. 維護風險
-  const mLevels = plants.map(p => p.maintenanceLevel)
-  const hasHighM = mLevels.includes('高')
-  const hasLowM = mLevels.includes('低')
-  if (hasHighM && hasLowM) {
-    deductions += 8
-    plants.filter(p => p.maintenanceLevel === '高').forEach(p => problemIds.add(p.instanceId))
-    issues.push(makeIssue('維護風險', 'caution',
-      `本區植栽維護頻率差異大，包含高維護植物（${plants.filter(p => p.maintenanceLevel === '高').map(p => p.name).join('、')}）與低維護植物。`,
+  // 4. 養護強度
+  const mLevels = plants.map(p => maintenanceLevelOf(p.maintenanceLevel))
+  const { severity: maintSeverity, gap: maintGap } = levelsGapSeverity(mLevels)
+  if (maintSeverity === 'danger' || maintSeverity === 'caution') {
+    deductions += maintSeverity === 'danger' ? 10 : 5
+    if (maintSeverity === 'danger') plants.filter(p => p.maintenanceLevel === '高').forEach(p => problemIds.add(p.instanceId))
+    issues.push(makeIssue('維護風險', maintSeverity,
+      `本區植栽維護強度差距 ${maintGap} 級，包含高維護植物（${plants.filter(p => p.maintenanceLevel === '高').map(p => p.name).join('、')}）與低維護植物。`,
       '若未建立差異化養護頻率計畫，高維護植物易疏於管理，影響整體景觀品質，也可能增加不必要的養護成本。',
       '建議於養護計畫中分別標示各植栽的修剪頻率、施肥需求，並與管理單位確認執行能力。'))
-  } else if (mLevels.filter(m => m !== '待查').length > 1 && mLevels.some(m => m === '中')) {
-    deductions += 3
-    issues.push(makeIssue('維護風險', 'caution',
-      '本區植栽維護需求略有差異，需在養護計畫中分別說明。',
-      '若統一採用相同養護方式，可能造成部分植物過度或不足管理。',
-      '建議建立分植物種類的養護時間表，標示修剪、施肥與灌溉頻率。'))
   }
 
   // 5. 根系 / 生長尺度風險
@@ -226,19 +246,20 @@ function evaluate(plants: SelectedCsvPlant[], allPlants: CsvPlantRecord[]): Eval
   if (plantsWithPh.length >= 2) {
     const phValues = plantsWithPh.map(p => phOrder[p.soilPh])
     const phGap = Math.max(...phValues) - Math.min(...phValues)
-    if (phGap >= 3) {
+    const phSeverity = gapSeverity(phGap)   // pH 本身已是 1~5 級，直接套用統一門檻
+    if (phSeverity === 'danger') {
       deductions += 15
       const acidP  = plantsWithPh.filter(p => phOrder[p.soilPh] <= 2).map(p => `${p.name}（${p.soilPh}）`)
       const alkaliP = plantsWithPh.filter(p => phOrder[p.soilPh] >= 4).map(p => `${p.name}（${p.soilPh}）`)
       issues.push(makeIssue('土壤酸鹼衝突', 'danger',
-        `本區植栽土壤 pH 需求差異懸殊：酸性偏好植物（${acidP.join('、')}）與鹼性偏好植物（${alkaliP.join('、')}）無法共存於同一土壤。`,
+        `本區植栽土壤 pH 需求差距達 ${phGap} 級：酸性偏好植物（${acidP.join('、')}）與鹼性偏好植物（${alkaliP.join('、')}）無法共存於同一土壤。`,
         '統一土壤 pH 將造成部分植物出現缺素症或生長停滯，長期影響植物存活率。',
         '建議依 pH 需求進行分區種植，各區土壤分別調整至適合 pH 範圍，或替換為相近 pH 需求的替代植栽。'))
-    } else if (phGap >= 2) {
-      deductions += 8
+    } else if (phSeverity === 'caution') {
+      deductions += 6
       const phList = [...new Set(plantsWithPh.map(p => `${p.name}（${p.soilPh}）`))]
       issues.push(makeIssue('土壤酸鹼衝突', 'caution',
-        `本區植栽土壤 pH 需求略有差異（${phList.join('、')}），需確認土壤酸鹼性可兼容各植栽。`,
+        `本區植栽土壤 pH 需求差距 ${phGap} 級（${phList.join('、')}），建議確認土壤酸鹼性可兼容各植栽。`,
         '不同 pH 偏好的植物在同一土壤中可能出現生長差異，影響景觀均一性。',
         '建議於施工前進行土壤 pH 檢測，必要時以硫磺粉或石灰調整，並定期監測。'))
     }
@@ -401,7 +422,7 @@ function evaluate(plants: SelectedCsvPlant[], allPlants: CsvPlantRecord[]): Eval
     return {
       key: c.key, label: c.key,
       count: matched.length, level: maxLevel,
-      statusLabel: maxLevel === 'danger' ? '高風險' : maxLevel === 'caution' ? '需注意' : '未發現',
+      statusLabel: maxLevel === 'danger' ? '嚴重' : maxLevel === 'caution' ? '提醒' : '未發現',
       summary: matched.length > 0 ? matched[0].cause.slice(0, 30) + '…' : c.okSummary,
     }
   })
@@ -413,23 +434,23 @@ function evaluate(plants: SelectedCsvPlant[], allPlants: CsvPlantRecord[]): Eval
   if (allDanger.length === 0 && allCaution.length === 0) {
     aiSuggestion = `本植栽組合整體相容性良好（${score}/100）。所選植栽在水分需求、日照條件及排水特性上具備高度一致性，可維持穩定的生長環境與低維護成本。建議依既定計畫執行，並於施工前確認各植栽之種植間距與覆土深度。`
   } else if (allDanger.length > 0) {
-    aiSuggestion = `本植栽組合存在 ${allDanger.length} 項高風險問題（${allDanger.map(i => i.category).join('、')}），建議於提送審查前優先調整。若需維持原配置，應於景觀設計說明書中補充完整的澆灌計畫、排水設計及養護管理方案。`
+    aiSuggestion = `本植栽組合存在 ${allDanger.length} 項嚴重問題（${allDanger.map(i => i.category).join('、')}），建議於提送審查前優先調整。若需維持原配置，應於景觀設計說明書中補充完整的澆灌計畫、排水設計及養護管理方案。`
   } else {
     aiSuggestion = `本植栽組合整體可行，但有 ${allCaution.length} 項注意事項（${allCaution.map(i => i.category).join('、')}）。建議透過分區澆灌、差異化養護計畫及施工說明書補充說明，以降低後續養護風險與審查疑義。`
   }
 
   // ── Adjustment plan ───────────────────────────────────────────────────────
   const adjustmentPlan: string[] = []
-  if (waterGap >= 2) adjustmentPlan.push('設置獨立分區灌溉迴路，依水分需求高低分組管理')
-  else if (waterGap >= 1) adjustmentPlan.push('調整澆灌頻率，於養護計畫中標示各植栽的適當給水量')
-  if (drainLevel === 'caution') adjustmentPlan.push('分區配置不耐積水與耐濕植物，並設置差異化排水層設計')
-  else if (hasNotTolerant) adjustmentPlan.push('補充礫石排水層（建議 10cm 以上），確認種植基盤排水坡度')
-  if (sunLevel === 'severe') adjustmentPlan.push('將全日照與耐陰植物分配至場域日照充足區與遮蔭區')
-  else if (sunLevel === 'mild') adjustmentPlan.push('確認場域各區塊實際日照時數，依日照需求分組配置')
-  if (hasHighM && hasLowM) adjustmentPlan.push('建立分植物養護時間表，標示各植栽修剪頻率與施肥計畫')
+  if (waterSeverity === 'danger') adjustmentPlan.push('設置獨立分區灌溉迴路，依水分需求高低分組管理')
+  else if (waterSeverity === 'caution') adjustmentPlan.push('調整澆灌頻率，於養護計畫中標示各植栽的適當給水量')
+  if (drainSeverity === 'danger') adjustmentPlan.push('改善排水設計（加高花台、增設排水層或明溝），並視情況調整不耐積水植物的位置')
+  else if (drainSeverity === 'caution') adjustmentPlan.push('確認地下構造與排水設施是否符合植栽需求（是否為地下室頂板、人工花台或屋頂綠化）')
+  if (sunSeverity === 'danger') adjustmentPlan.push('將全日照與耐陰植物分配至場域日照充足區與遮蔭區')
+  else if (sunSeverity === 'caution') adjustmentPlan.push('確認場域各區塊實際日照時數，依日照需求分組配置')
+  if (maintSeverity === 'danger' || maintSeverity === 'caution') adjustmentPlan.push('建立分植物養護時間表，標示各植栽修剪頻率與施肥計畫')
   if (tallTrees.length > 0 && groundcovers.length > 0) adjustmentPlan.push('規劃喬木與地被之種植間距，選用耐陰地被配置於冠幅範圍內')
   if (incompleteData.length > 0) adjustmentPlan.push(`補查 ${incompleteData.map(p => p.name).join('、')} 的官方日照水分資料，更新資料庫後重新評估`)
-  if (plantsWithPh.length >= 2 && (Math.max(...plantsWithPh.map(p => phOrder[p.soilPh])) - Math.min(...plantsWithPh.map(p => phOrder[p.soilPh]))) >= 2)
+  if (plantsWithPh.length >= 2 && gapSeverity(Math.max(...plantsWithPh.map(p => phOrder[p.soilPh])) - Math.min(...plantsWithPh.map(p => phOrder[p.soilPh]))) !== 'pass')
     adjustmentPlan.push('施工前進行土壤 pH 檢測，依各植栽需求調整酸鹼度，並分區管理')
   if (plantsNeedAmend.length > 0) adjustmentPlan.push('於景觀施工說明書中列明客土改良規格，竣工前確認執行')
   if (issues.some(i => i.category === '審查疑義風險')) adjustmentPlan.push('於景觀設計說明書中補充植栽配置邏輯、養護管理方式與各植栽資料來源引用')
@@ -466,27 +487,31 @@ function evaluate(plants: SelectedCsvPlant[], allPlants: CsvPlantRecord[]): Eval
 
 // ── Visual constants ──────────────────────────────────────────────────────────
 
+// 嚴重＝紅、提醒＝藍、通過＝綠（見 compatibilityLevels.ts）。CompatLevel 是「整體
+// 配置健康度」四段式評分桶（配置良好／可行但需補充說明／需調整配置／高風險不建議），
+// 跟單一 IssueLevel 的三色不是同一件事——後兩桶都對應「有嚴重問題」，用同一紅色
+// 深淺區分而不是另創第四色，避免整個介面出現超過三種語意色。
 const COMPAT_COLOR: Record<CompatLevel, string> = {
   '配置良好': 'text-emerald-700 border-emerald-300 bg-emerald-50',
-  '可行但需補充說明': 'text-amber-700 border-amber-300 bg-amber-50',
-  '需調整配置': 'text-orange-700 border-orange-300 bg-orange-50',
-  '高風險不建議': 'text-red-800 border-red-300 bg-red-50',
+  '可行但需補充說明': 'text-blue-700 border-blue-300 bg-blue-50',
+  '需調整配置': 'text-red-700 border-red-300 bg-red-50',
+  '高風險不建議': 'text-red-800 border-red-400 bg-red-100',
 }
 const COMPAT_RING: Record<CompatLevel, string> = {
   '配置良好': 'stroke-emerald-500',
-  '可行但需補充說明': 'stroke-amber-500',
-  '需調整配置': 'stroke-orange-500',
-  '高風險不建議': 'stroke-red-500',
+  '可行但需補充說明': 'stroke-blue-500',
+  '需調整配置': 'stroke-red-500',
+  '高風險不建議': 'stroke-red-700',
 }
 const LEVEL_CARD = {
   ok:      { bg: 'bg-emerald-50', border: 'border-emerald-100', count: 'text-emerald-600' },
-  caution: { bg: 'bg-amber-50',   border: 'border-amber-200',   count: 'text-amber-700'   },
-  danger:  { bg: 'bg-orange-50',  border: 'border-orange-200',  count: 'text-orange-700'  },
+  caution: { bg: 'bg-blue-50',    border: 'border-blue-200',    count: 'text-blue-700'   },
+  danger:  { bg: 'bg-red-50',     border: 'border-red-200',     count: 'text-red-700'  },
 }
 const LEVEL_ICON_SM = {
   ok:      <CheckCircle  size={13} className="text-emerald-500 flex-shrink-0" />,
-  caution: <AlertTriangle size={13} className="text-amber-500  flex-shrink-0" />,
-  danger:  <XCircle      size={13} className="text-orange-600 flex-shrink-0" />,
+  caution: <AlertTriangle size={13} className="text-blue-500  flex-shrink-0" />,
+  danger:  <XCircle      size={13} className="text-red-600 flex-shrink-0" />,
 }
 export const CAT_COLOR: Record<string, string> = {
   '喬木': 'bg-teal-50 text-teal-700', '大喬木': 'bg-teal-50 text-teal-700',
@@ -497,8 +522,8 @@ export const CAT_COLOR: Record<string, string> = {
 const CAT_LABEL: Record<string, string> = { tree: '喬木', shrub: '灌木', groundcover: '草本' }
 const STATUS_COLOR: Record<PlantStatus, string> = {
   '可用': 'bg-emerald-50 text-emerald-700 border-emerald-200',
-  '需注意': 'bg-amber-50 text-amber-700 border-amber-200',
-  '不建議': 'bg-orange-50 text-orange-700 border-orange-200',
+  '需注意': 'bg-blue-50 text-blue-700 border-blue-200',
+  '不建議': 'bg-red-50 text-red-700 border-red-200',
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -526,7 +551,7 @@ function ScoreDial({ score, level }: { score: number; level: CompatLevel }) {
           {score >= 80 ? '各項植栽相容性佳，養護管理負擔低。'
             : score >= 60 ? '整體可行，部分項目需補充養護說明。'
             : score >= 40 ? '植栽衝突較多，建議調整組合再行配置。'
-            : '高風險，強烈建議重新規劃植栽配置。'}
+            : '嚴重，強烈建議重新規劃植栽配置。'}
         </p>
       </div>
     </div>
@@ -565,11 +590,11 @@ function CategoryGrid({ categories, altCount }: { categories: CatSummary[]; altC
 
 function IssueCard({ issue }: { issue: IssueDetail }) {
   const [open, setOpen] = useState(true)
-  // 高風險：淡紅；中風險（caution）：淡橘
+  // 嚴重：淡紅；提醒（caution）：淡藍（見 compatibilityLevels.ts）
   const hdr = issue.level === 'danger'
     ? 'bg-red-50 border-red-100 text-red-800'
-    : 'bg-orange-50 border-orange-100 text-orange-800'
-  const bdr = issue.level === 'danger' ? 'border-red-200' : 'border-orange-200'
+    : 'bg-blue-50 border-blue-100 text-blue-800'
+  const bdr = issue.level === 'danger' ? 'border-red-200' : 'border-blue-200'
   return (
     <div className={`border rounded-xl overflow-hidden shadow-sm ${bdr}`}>
       {/* 標題列 */}
@@ -578,13 +603,13 @@ function IssueCard({ issue }: { issue: IssueDetail }) {
         <div className="flex items-center gap-3">
           {issue.level === 'danger'
             ? <XCircle size={18} className="text-red-600 flex-shrink-0" />
-            : <AlertTriangle size={18} className="text-orange-600 flex-shrink-0" />}
+            : <AlertTriangle size={18} className="text-blue-600 flex-shrink-0" />}
           <span className="font-bold text-[18px] leading-snug">{issue.category}</span>
           <span className={`text-[13px] px-3 py-1 rounded-full border font-bold ${
             issue.level === 'danger'
               ? 'bg-red-100 border-red-300 text-red-700'
-              : 'bg-orange-100 border-orange-300 text-orange-700'
-          }`}>{issue.level === 'danger' ? '高風險' : '需注意'}</span>
+              : 'bg-blue-100 border-blue-300 text-blue-700'
+          }`}>{issue.level === 'danger' ? '嚴重' : '提醒'}</span>
         </div>
         {open ? <ChevronUp size={16} className="flex-shrink-0" /> : <ChevronDown size={16} className="flex-shrink-0" />}
       </button>
@@ -775,6 +800,219 @@ function AltCard({ suggestion, adoptedName, onAdopt }: {
   )
 }
 
+// ── AI 審查回覆摘要 ────────────────────────────────────────────────────────────
+// 「AI 審查回覆」原本只是把 reviewText（長篇連續文字）整段印出來，讀者無法快速
+// 分辨結論／主要問題／建議。這裡把既有已經算好的資料（issues／proximityConflicts／
+// adjustmentPlan／compatLevel，全部沿用既有判斷邏輯，不重新計算任何風險判斷）
+// 重新摘要成 5 個區塊要用的精簡結構——純粹是資料整理與文字裁剪，不是新的審查邏輯。
+
+function capText(s: string, max: number): string { return s.length > max ? s.slice(0, max) + '…' : s }
+function dedupeStrings(arr: string[]): string[] { return [...new Set(arr)] }
+
+interface AiReplyTopIssue { id: number; name: string; pairCount: number; plants: string; locations: string; impact: string; suggestion: string }
+
+// 卡片標題固定 6-10 字，不用 deriveConclusion 的完整句子（那是給問題明細用的，AI
+// 審查回覆只需要讓人 5 秒內看懂「這是哪一類問題」，細節留給展開區塊或問題明細頁）。
+const CATEGORY_SHORT_TITLE: Record<IssueCategoryGroup, string> = {
+  watering: '澆水需求差異',
+  drainage: '排水條件不一致',
+  sunlight: '日照條件不一致',
+  maintenance: '養護管理差異',
+}
+
+// ── 人工確認來源分組（取代逐筆配對計數）─────────────────────────────────────────
+// 使用者原話：「23 筆配對若都來自同一個未知 HATCH 圖層，只應顯示 1 個未知圖層待
+// 確認，影響 23 組配對」。合併 key＝zone+unknownSourceType+layerName+blockName+
+// unknownReason（blockName 目前恆為「—」：HATCH 沒有 BLOCK，這裡誠實揭露資料
+// 本身的限制，不是漏做）。
+export type UnknownSourceType = 'unknown-hatch' | 'layered-planting' | 'same-kind-overlap' | 'generic-overlap' | 'unmatched-name'
+
+export interface UnknownSourceGroup {
+  key: string
+  zoneName: string
+  unknownSourceType: UnknownSourceType
+  layerName: string
+  blockName: string
+  unknownReason: string
+  pairCount: number
+  // 只有「單一具體圖層」的 unknown-hatch 來源才能安全套用批次分類按鈕——
+  // layered-planting/same-kind-overlap/generic-overlap/unmatched-name 這幾類
+  // 是「兩邊植物種類都已知、但重疊語意不明確」或「純粹名稱比對不到」，沒有單一
+  // 圖層可以重新分類，批次按鈕對它們沒有意義，只顯示摘要。
+  singleLayer: boolean
+  overrideApplied?: LayerOverrideAction
+}
+
+function buildUnknownSourceGroups(
+  zoneName: string,
+  conflicts: PlantConflictResult[],
+  overrides?: Map<string, LayerOverrideAction>,
+): UnknownSourceGroup[] {
+  const groups = new Map<string, UnknownSourceGroup>()
+  for (const c of conflicts) {
+    let sourceType: UnknownSourceType
+    let layerName = '—'
+    let reason: string
+    if (c.riskLevel === 'unmatched') {
+      sourceType = 'unmatched-name'
+      reason = '植物名稱未能比對資料庫'
+    } else {
+      const note = classifyOverlap(c.plantA.kind, c.plantB.kind, c.proximity)
+      if (note.certain) continue
+      reason = note.label
+      const aUnknown = c.plantA.kind === 'unknown-hatch'
+      const bUnknown = c.plantB.kind === 'unknown-hatch'
+      if (aUnknown || bUnknown) {
+        sourceType = 'unknown-hatch'
+        const layers = dedupeStrings(
+          [aUnknown ? c.plantA.sourceLayer : undefined, bUnknown ? c.plantB.sourceLayer : undefined]
+            .filter((x): x is string => !!x),
+        )
+        layerName = layers.length > 0 ? layers.join('／') : '(無圖層名稱)'
+      } else if (reason.includes('上下層')) {
+        sourceType = 'layered-planting'
+      } else if (reason.includes('同類型')) {
+        sourceType = 'same-kind-overlap'
+      } else {
+        sourceType = 'generic-overlap'
+      }
+    }
+    const key = `${zoneName}::${sourceType}::${layerName}::—::${reason}`
+    const existing = groups.get(key)
+    if (existing) { existing.pairCount++; continue }
+    const singleLayer = sourceType === 'unknown-hatch' && layerName !== '(無圖層名稱)' && !layerName.includes('／')
+    groups.set(key, {
+      key, zoneName, unknownSourceType: sourceType, layerName, blockName: '—', unknownReason: reason,
+      pairCount: 1, singleLayer,
+      overrideApplied: singleLayer ? overrides?.get(layerOverrideKey(zoneName, layerName)) : undefined,
+    })
+  }
+  return [...groups.values()].sort((a, b) => b.pairCount - a.pairCount)
+}
+
+const UNKNOWN_SOURCE_TYPE_LABEL: Record<UnknownSourceType, string> = {
+  'unknown-hatch': '未知圖層',
+  'layered-planting': '上下層配置',
+  'same-kind-overlap': '同類型套疊',
+  'generic-overlap': '範圍重疊',
+  'unmatched-name': '名稱未比對',
+}
+
+interface AiReplySummary {
+  compatLevel: string
+  recommendAction: string        // 建議調整／建議局部調整／無需調整
+  confirmedIssueCount: number
+  pendingSourceCount: number      // 待確認「來源」數（不是配對數）
+  pendingPairCount: number        // 這些來源總共影響幾組配對
+  oneLinerSummary: string
+  topIssues: AiReplyTopIssue[]
+  otherIssuesCount: number
+  priorityP1: string[]
+  priorityP2: string[]
+  priorityP3: string[]
+  unknownSourceGroups: UnknownSourceGroup[]
+  finalAdvice: string
+}
+
+function buildAiReplySummary(zone: StoredZone, layerOverrides?: Map<string, LayerOverrideAction>): AiReplySummary {
+  const issues = zone.issues ?? []
+  const activeIssues = issues.filter(i => i.level !== 'ok')
+  const dangerIssues = activeIssues.filter(i => i.level === 'danger')
+  const cautionIssues = activeIssues.filter(i => i.level === 'caution')
+  const conflicts = zone.proximityConflicts ?? []
+
+  // 人工確認以「來源」為單位，不是「配對」——見 buildUnknownSourceGroups 上方
+  // 的說明。overrideApplied 的來源代表使用者已按過批次按鈕、正等重新分析套用，
+  // 這裡先從「待確認」中排除，避免顯示已經處理過的項目。
+  const allUnknownSourceGroups = buildUnknownSourceGroups(zone.zoneName, conflicts, layerOverrides)
+  const pendingSourceGroups = allUnknownSourceGroups.filter(g => !g.overrideApplied)
+  const pendingSourceCount = pendingSourceGroups.length
+  const pendingPairCount = pendingSourceGroups.reduce((s, g) => s + g.pairCount, 0)
+
+  if (conflicts.length > 0) {
+    console.group(`[人工確認來源統計] ${zone.zoneName}`)
+    console.table(allUnknownSourceGroups.map(g => ({
+      未知圖層名稱: g.unknownSourceType === 'unknown-hatch' ? g.layerName : '—',
+      'HATCH pattern': '—',   // 目前 conflict 資料未逐一保留 pattern，僅圖層名稱可用於分組
+      BLOCK名稱: g.blockName,
+      unknown原因: g.unknownReason,
+      涉及分區: g.zoneName,
+      影響配對數: g.pairCount,
+      系統推測類型: UNKNOWN_SOURCE_TYPE_LABEL[g.unknownSourceType],
+      推測信心度: '—（尚無信心度模型，一律列入人工確認，見下方待辦）',
+      可批次分類: g.singleLayer ? '是' : '否',
+      已套用分類: g.overrideApplied ?? '（未分類）',
+    })))
+    console.groupEnd()
+  }
+
+  const recommendAction = dangerIssues.length > 0 ? '建議調整' : cautionIssues.length > 0 ? '建議局部調整' : '無需調整'
+
+  const topCategories = zone.mainIssues ?? []
+  const oneLinerSummary = `${zone.compatLevel || '評估中'}。${
+    topCategories.length > 0 ? `本區主要問題集中於${topCategories.slice(0, 2).join('與')}` : '未發現主要問題'
+  }${pendingSourceCount > 0 ? '，另有部分項目待人工確認' : ''}。`
+
+  // 「主要問題」依問題類型（classifyCategory 的 4 大分類）合併，不是每組植物各列一項——
+  // 同一分類底下不論有幾組配對，只出一張卡。有 proximityConflicts 時以「配對」為準
+  // （一個 PlantConflictResult＝一組配對，可反查雙方植物名稱與位置標籤去重）；沒有
+  // 逐對資料的情境（手動加植物、非 DXF 分區）退回用 zone.issues 本身計數。
+  const formatList = (names: string[], max = 6): string => {
+    if (names.length === 0) return '—'
+    return names.length > max ? `${names.slice(0, max).join('、')}等${names.length}項` : names.join('、')
+  }
+
+  interface CategoryGroup { name: string; pairCount: number; plants: string; locations: string; impact: string; suggestion: string; severity: 'danger' | 'caution' }
+  const categoryGroups: CategoryGroup[] = []
+  for (const group of CATEGORY_GROUP_ORDER) {
+    const groupConflicts = conflicts.filter(c => c.issues.some(i => i.level !== 'ok' && classifyCategory(i.category) === group))
+    const groupIssuesFromConflicts = groupConflicts.flatMap(c => c.issues.filter(i => i.level !== 'ok' && classifyCategory(i.category) === group))
+    const groupZoneIssues = activeIssues.filter(i => classifyCategory(i.category) === group)
+    const allGroupIssues = groupConflicts.length > 0 ? groupIssuesFromConflicts : groupZoneIssues
+    if (allGroupIssues.length === 0) continue
+
+    const worst = allGroupIssues.reduce((a, b) => (a.level === 'danger' ? a : b.level === 'danger' ? b : a))
+    const severity: 'danger' | 'caution' = allGroupIssues.some(i => i.level === 'danger') ? 'danger' : 'caution'
+    const name = CATEGORY_SHORT_TITLE[group]
+    const impact = capText(dedupeStrings(allGroupIssues.map(i => i.impact))[0] ?? '', 40)
+    const suggestion = capText(dedupeStrings(allGroupIssues.map(i => i.suggestion))[0] ?? '', 50)
+    const pairCount = groupConflicts.length > 0 ? groupConflicts.length : allGroupIssues.length
+    const plants = groupConflicts.length > 0
+      ? formatList(dedupeStrings(groupConflicts.flatMap(c => [c.plantA.name, c.plantB.name])))
+      : '—'
+    const locations = groupConflicts.length > 0
+      ? formatList(dedupeStrings(groupConflicts.flatMap(c => [c.plantA.label, c.plantB.label])))
+      : '—'
+    categoryGroups.push({ name, pairCount, plants, locations, impact, suggestion, severity })
+  }
+  categoryGroups.sort((a, b) => (a.severity === b.severity ? b.pairCount - a.pairCount : a.severity === 'danger' ? -1 : 1))
+
+  const topIssues: AiReplyTopIssue[] = categoryGroups.slice(0, 5).map((g, i) => ({
+    id: i + 1, name: g.name, pairCount: g.pairCount, plants: g.plants, locations: g.locations, impact: g.impact, suggestion: g.suggestion,
+  }))
+  const otherIssuesCount = Math.max(0, categoryGroups.length - 5)
+
+  const priorityP1 = dedupeStrings(dangerIssues.map(i => capText(i.suggestion, 40))).slice(0, 3)
+  const priorityP2 = dedupeStrings(cautionIssues.map(i => capText(i.suggestion, 40))).slice(0, 3)
+  const priorityP3 = pendingSourceCount > 0
+    ? pendingSourceGroups.slice(0, 3).map(g => capText(`${UNKNOWN_SOURCE_TYPE_LABEL[g.unknownSourceType]}：${g.unknownReason}`, 40))
+    : []
+
+  const adviceCategories = dedupeStrings(topIssues.slice(0, 2).map(t => t.name))
+  const adviceLead = activeIssues.length > 0 ? `建議先完成${adviceCategories.join('與')}相關調整` : '目前配置無需立即調整'
+  const finalAdvice = `${adviceLead}${pendingSourceCount > 0 ? '，再確認未知圖層或待覆核項目' : ''}。完成上述項目後，可重新執行 AI 審查以更新評分與結果。`
+
+  return {
+    compatLevel: zone.compatLevel || '—', recommendAction,
+    confirmedIssueCount: activeIssues.length,
+    pendingSourceCount, pendingPairCount,
+    oneLinerSummary, topIssues, otherIssuesCount,
+    priorityP1, priorityP2, priorityP3,
+    unknownSourceGroups: pendingSourceGroups,
+    finalAdvice,
+  }
+}
+
 // ── ZoneAwareResultPanel ──────────────────────────────────────────────────────
 // DXF 分區導向連續性：常駐頂層分頁（全案總覽｜A區｜B區｜...｜AI 配植助理）＋
 // 每個分區固定 7 個第二層分頁（區域總結／問題分析／問題明細／衝突植栽／替代植栽／
@@ -797,7 +1035,7 @@ const ZONE_SUB_TABS: Array<{ id: ZoneSubTab; label: string }> = [
 function ZoneAwareResultPanel({
   storedZones, activeZoneId, setActiveZoneId, viewMode, setViewMode, result, selectedPlantsCount,
   allPlants, zonePlantingTable, advisorPrefill, setAdvisorPrefill, onTabChange,
-  adoptedSubstitutes, onAdoptSubstitute,
+  adoptedSubstitutes, onAdoptSubstitute, layerOverrides, onApplyLayerOverride,
 }: {
   storedZones: StoredZone[]
   activeZoneId: string | null
@@ -813,6 +1051,8 @@ function ZoneAwareResultPanel({
   onTabChange?: (tab: 'pdf' | 'landscape' | 'dxf' | 'advisor') => void
   adoptedSubstitutes: Record<string, Record<string, string>>
   onAdoptSubstitute: (zoneName: string, originalName: string, altName: string) => void
+  layerOverrides?: Map<string, LayerOverrideAction>
+  onApplyLayerOverride?: (key: string, action: LayerOverrideAction) => void
 }) {
   const [subTab, setSubTab] = useState<ZoneSubTab>('summary')
 
@@ -824,6 +1064,7 @@ function ZoneAwareResultPanel({
   const dangerCount = result.issues.filter(i => i.level === 'danger').length
   const activeIssues = result.issues.filter(i => i.level !== 'ok')
   const zoneAdopted = activeZone ? (adoptedSubstitutes[activeZone.zoneName] ?? {}) : {}
+  const aiReply = activeZone ? buildAiReplySummary(activeZone, layerOverrides) : null
 
   return (
     <div className="space-y-4">
@@ -875,7 +1116,7 @@ function ZoneAwareResultPanel({
 
       {/* ── 全案總覽：只放整體彙總，不放任何單一分區細節 ── */}
       {viewMode === 'overview' && !activeZone && (() => {
-        const ovScoreClr = result.score >= 80 ? '#15803d' : result.score >= 60 ? '#d97706' : '#dc2626'
+        const ovScoreClr = result.score >= 80 ? '#15803d' : result.score >= 60 ? '#2563eb' : '#dc2626'
         const priorityOrder = [...storedZones].sort((a, b) =>
           b.dangerCount - a.dangerCount || (a.score ?? 100) - (b.score ?? 100))
         return (
@@ -892,7 +1133,7 @@ function ZoneAwareResultPanel({
               <div className="flex-1 grid grid-cols-3 gap-3">
                 {[
                   { label: '主要問題', value: activeIssues.length, unit: '項', clr: activeIssues.length > 0 ? '#d97706' : '#78716c' },
-                  { label: '高風險問題', value: dangerCount, unit: '項', clr: dangerCount > 0 ? '#dc2626' : '#78716c' },
+                  { label: '嚴重問題', value: dangerCount, unit: '項', clr: dangerCount > 0 ? '#dc2626' : '#78716c' },
                   { label: '已選植物', value: selectedPlantsCount, unit: '種', clr: '#1a4731' },
                 ].map(k => (
                   <div key={k.label} className="bg-[#f7faf5] border border-stone-100 rounded-xl px-4 py-3">
@@ -907,10 +1148,10 @@ function ZoneAwareResultPanel({
             <p className="text-[21px] font-bold text-stone-800 leading-tight pt-1">各區分數比較</p>
             <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${Math.min(storedZones.length, 4)}, 1fr)` }}>
               {storedZones.map(z => {
-                const zRiskLabel = z.dangerCount > 0 ? '高風險' : z.issueCount > 0 ? '中風險' : z.score !== undefined ? '低風險' : '待審查'
-                const zScoreClr = !z.score ? '#9ca3af' : z.score >= 80 ? '#15803d' : z.score >= 60 ? '#d97706' : '#dc2626'
-                const zRiskClr  = z.dangerCount > 0 ? '#dc2626' : z.issueCount > 0 ? '#d97706' : '#15803d'
-                const zBorder   = z.dangerCount > 0 ? 'border-red-300' : z.issueCount > 0 ? 'border-amber-300' : 'border-emerald-200'
+                const zRiskLabel = z.dangerCount > 0 ? '嚴重' : z.issueCount > 0 ? '提醒' : z.score !== undefined ? '通過' : '待審查'
+                const zScoreClr = !z.score ? '#9ca3af' : z.score >= 80 ? '#15803d' : z.score >= 60 ? '#2563eb' : '#dc2626'
+                const zRiskClr  = z.dangerCount > 0 ? '#dc2626' : z.issueCount > 0 ? '#2563eb' : '#15803d'
+                const zBorder   = z.dangerCount > 0 ? 'border-red-300' : z.issueCount > 0 ? 'border-blue-300' : 'border-emerald-200'
                 return (
                   <button key={z.zoneName} onClick={() => selectZone(z.zoneName)}
                     className={`text-left rounded-xl border-2 px-5 py-4 bg-white ${zBorder} hover:shadow-sm hover:border-[#2d6a4f] transition-all`}>
@@ -919,7 +1160,7 @@ function ZoneAwareResultPanel({
                       {z.score ?? '—'}<span className="text-[14px] font-normal text-stone-400"> /100</span>
                     </p>
                     <p className="text-[16px] font-bold mb-2" style={{ color: zRiskClr }}>{zRiskLabel}</p>
-                    <p className="text-[15px] leading-snug text-stone-600">問題 {z.issueCount} 項｜高風險 {z.dangerCount} 項</p>
+                    <p className="text-[15px] leading-snug text-stone-600">問題 {z.issueCount} 項｜嚴重 {z.dangerCount} 項</p>
                   </button>
                 )
               })}
@@ -934,7 +1175,7 @@ function ZoneAwareResultPanel({
                       className="w-full flex items-center gap-3 px-5 py-3 text-left hover:bg-stone-50 transition-colors">
                       <span className="w-6 h-6 rounded-full bg-stone-100 flex items-center justify-center text-[13px] font-bold text-stone-500 flex-shrink-0">{i + 1}</span>
                       <span className="text-[16px] font-bold text-stone-800">{z.zoneName}</span>
-                      <span className="text-[14px] text-stone-500">{z.dangerCount > 0 ? `高風險 ${z.dangerCount} 項` : z.issueCount > 0 ? `需注意 ${z.issueCount} 項` : '無問題'}</span>
+                      <span className="text-[14px] text-stone-500">{z.dangerCount > 0 ? `嚴重 ${z.dangerCount} 項` : z.issueCount > 0 ? `提醒 ${z.issueCount} 項` : '無問題'}</span>
                       <ArrowRight size={14} className="text-stone-300 ml-auto flex-shrink-0" />
                     </button>
                   ))}
@@ -958,7 +1199,7 @@ function ZoneAwareResultPanel({
           <div className="flex items-center gap-3 px-4 py-2.5 bg-green-50 border border-green-200 rounded-xl flex-wrap">
             <span className="text-sm font-bold text-green-800">目前查看：{activeZone.zoneName}</span>
             {activeZone.score !== undefined && (
-              <span className={`text-sm font-bold ${activeZone.score >= 80 ? 'text-emerald-700' : activeZone.score >= 60 ? 'text-amber-700' : 'text-red-700'}`}>
+              <span className={`text-sm font-bold ${activeZone.score >= 80 ? 'text-emerald-700' : activeZone.score >= 60 ? 'text-blue-700' : 'text-red-700'}`}>
                 {activeZone.score}/100
               </span>
             )}
@@ -995,7 +1236,7 @@ function ZoneAwareResultPanel({
                     {[
                       { label: '審查狀態', value: activeZone.status },
                       { label: '植栽數量', value: `${activeZone.plantCount} 個` },
-                      { label: '問題／高風險', value: `${activeZone.issueCount} ／ ${activeZone.dangerCount}` },
+                      { label: '問題／嚴重', value: `${activeZone.issueCount} ／ ${activeZone.dangerCount}` },
                     ].map(k => (
                       <div key={k.label} className="bg-[#f7faf5] border border-stone-100 rounded-xl px-3 py-2.5">
                         <p className="text-[12px] text-stone-400 font-semibold mb-1">{k.label}</p>
@@ -1158,16 +1399,163 @@ function ZoneAwareResultPanel({
             </div>
           )}
 
-          {/* AI審查回覆 */}
-          {subTab === 'aiReply' && (
-            <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
-              <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
-                <p className="text-sm font-semibold text-stone-800 tracking-wide">審查回覆文字</p>
-              </div>
-              <div className="p-5">
-                <div className="bg-stone-50 rounded-xl p-4 border border-stone-100 max-h-64 overflow-y-auto">
-                  <p className="text-[16px] text-stone-700 leading-[1.9] whitespace-pre-line">{activeZone.reviewText || '（無審查回覆）'}</p>
+          {/* AI審查回覆：給主管／設計人員 5 秒讀懂的審查總結，不是問題明細的第二份拷貝 */}
+          {subTab === 'aiReply' && aiReply && (
+            <div className="space-y-4">
+              {/* 1. 審查結論 */}
+              <div className={`rounded-2xl border p-5 ${
+                aiReply.recommendAction === '建議調整' ? 'bg-red-50 border-red-200'
+                : aiReply.recommendAction === '建議局部調整' ? 'bg-blue-50 border-blue-200'
+                : 'bg-green-50 border-green-200'
+              }`}>
+                <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+                  <p className="text-base font-bold text-stone-800">審查結論</p>
+                  <span className={`text-xs font-bold px-3 py-1 rounded-full ${
+                    aiReply.recommendAction === '建議調整' ? 'bg-red-100 text-red-700'
+                    : aiReply.recommendAction === '建議局部調整' ? 'bg-blue-100 text-blue-700'
+                    : 'bg-green-100 text-green-700'
+                  }`}>{aiReply.recommendAction}</span>
                 </div>
+                <div className="grid grid-cols-3 gap-3 mb-3">
+                  <div className="bg-white/70 rounded-xl px-3 py-2 text-center">
+                    <p className="text-[11px] text-stone-500">綜合評估</p>
+                    <p className="text-sm font-bold text-stone-800 mt-0.5 truncate">{aiReply.compatLevel}</p>
+                  </div>
+                  <div className="bg-white/70 rounded-xl px-3 py-2 text-center">
+                    <p className="text-[11px] text-stone-500">已確認問題數</p>
+                    <p className="text-lg font-bold text-stone-800 mt-0.5">{aiReply.confirmedIssueCount}</p>
+                  </div>
+                  <div className="bg-white/70 rounded-xl px-3 py-2 text-center">
+                    <p className="text-[11px] text-stone-500">待確認來源</p>
+                    <p className="text-lg font-bold text-stone-800 mt-0.5">{aiReply.pendingSourceCount}</p>
+                    {aiReply.pendingPairCount > 0 && (
+                      <p className="text-[10px] text-stone-400 mt-0.5">影響 {aiReply.pendingPairCount} 組配對</p>
+                    )}
+                  </div>
+                </div>
+                <p className="text-[15px] text-stone-700 leading-relaxed">{aiReply.oneLinerSummary}</p>
+              </div>
+
+              {/* 2. 主要問題（依問題類型合併，同類問題只出一張卡，最多 4-5 類；標題固定
+                  6-10 字短句，植物/位置收進 details 摺疊，讓每張卡高度一致、不塞技術文字） */}
+              <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+                <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
+                  <p className="text-sm font-semibold text-stone-800 tracking-wide">主要問題</p>
+                </div>
+                <div className="p-5 space-y-3">
+                  {aiReply.topIssues.length > 0 ? aiReply.topIssues.map(t => (
+                    <div key={t.id} className="p-3 bg-stone-50 rounded-xl border border-stone-100">
+                      <div className="flex items-start gap-3">
+                        <div className="w-7 h-7 rounded-full bg-[#2d6a4f]/10 flex items-center justify-center flex-shrink-0">
+                          <span className="text-xs font-bold text-[#2d6a4f]">{String(t.id).padStart(2, '0')}</span>
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-bold text-stone-800">{t.name}｜{t.pairCount} 組配對</p>
+                          <p className="text-[13px] text-stone-600 mt-1">{t.impact}</p>
+                          <p className="text-[13px] text-stone-600">建議：{t.suggestion}</p>
+                          <details className="mt-1.5">
+                            <summary className="text-[11px] text-stone-400 cursor-pointer select-none hover:text-stone-600">
+                              涉及植物／位置
+                            </summary>
+                            <p className="text-[11px] text-stone-400 mt-1">植物：{t.plants}</p>
+                            <p className="text-[11px] text-stone-400">位置：{t.locations}</p>
+                          </details>
+                        </div>
+                      </div>
+                    </div>
+                  )) : <p className="text-sm text-green-700">✅ 未發現需優先關注之問題。</p>}
+                  {aiReply.otherIssuesCount > 0 && (
+                    <button onClick={() => setSubTab('issues')}
+                      className="text-xs text-stone-400 hover:text-[#2d6a4f] underline underline-offset-2">
+                      另有 {aiReply.otherIssuesCount} 項請查看問題明細
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* 3. 優先修正建議（P1/P2/P3） */}
+              <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+                <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100">
+                  <p className="text-sm font-semibold text-stone-800 tracking-wide">優先修正建議</p>
+                </div>
+                <div className="p-5 space-y-3">
+                  {aiReply.priorityP1.length > 0 && (
+                    <div className="bg-red-50 border border-red-200 rounded-xl p-3">
+                      <p className="text-xs font-bold text-red-700 mb-1.5">P1｜優先處理</p>
+                      <ul className="space-y-1">{aiReply.priorityP1.map((s, i) => <li key={i} className="text-[13px] text-red-800">• {s}</li>)}</ul>
+                    </div>
+                  )}
+                  {aiReply.priorityP2.length > 0 && (
+                    <div className="bg-blue-50 border border-blue-200 rounded-xl p-3">
+                      <p className="text-xs font-bold text-blue-700 mb-1.5">P2｜建議改善</p>
+                      <ul className="space-y-1">{aiReply.priorityP2.map((s, i) => <li key={i} className="text-[13px] text-blue-800">• {s}</li>)}</ul>
+                    </div>
+                  )}
+                  {aiReply.priorityP3.length > 0 && (
+                    <div className="bg-stone-100 border border-stone-200 rounded-xl p-3">
+                      <p className="text-xs font-bold text-stone-600 mb-1.5">P3｜人工覆核</p>
+                      <ul className="space-y-1">{aiReply.priorityP3.map((s, i) => <li key={i} className="text-[13px] text-stone-700">• {s}</li>)}</ul>
+                    </div>
+                  )}
+                  {aiReply.priorityP1.length === 0 && aiReply.priorityP2.length === 0 && aiReply.priorityP3.length === 0 && (
+                    <p className="text-sm text-green-700">✅ 目前無需優先修正之項目。</p>
+                  )}
+                </div>
+              </div>
+
+              {/* 4. 人工確認摘要——以「來源」為單位（不是配對數），每個來源一張卡；
+                  只有「單一未知圖層」的來源能安全批次分類，其餘（上下層配置／同類型
+                  套疊／範圍重疊／名稱未比對）只顯示摘要，沒有可重新分類的單一圖層。
+                  信心度模型目前不存在，尚無法做「>85% 自動分類」，這裡誠實列出全部
+                  待確認來源，不假造信心度數字。 */}
+              {aiReply.pendingSourceCount > 0 && (
+                <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden shadow-sm">
+                  <div className="px-5 py-3 bg-[#f7f5f0] border-b border-stone-100 flex items-center justify-between gap-2 flex-wrap">
+                    <p className="text-sm font-semibold text-stone-800 tracking-wide">人工確認摘要</p>
+                    <button onClick={() => setSubTab('issues')} className="text-xs text-[#2d6a4f] font-semibold hover:underline">
+                      查看人工確認明細 →
+                    </button>
+                  </div>
+                  <div className="p-5 space-y-3">
+                    <p className="text-sm text-stone-700">
+                      待確認來源：<strong>{aiReply.pendingSourceCount}</strong> 個，影響技術配對：<strong>{aiReply.pendingPairCount}</strong> 組
+                    </p>
+                    {aiReply.unknownSourceGroups.map(g => (
+                      <div key={g.key} className="p-3 bg-amber-50/60 rounded-xl border border-amber-100">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <p className="text-[13px] font-semibold text-amber-800">
+                            {UNKNOWN_SOURCE_TYPE_LABEL[g.unknownSourceType]}
+                            {g.unknownSourceType === 'unknown-hatch' && `：${g.layerName}`}
+                          </p>
+                          <span className="text-[11px] text-amber-600">影響 {g.pairCount} 組配對</span>
+                        </div>
+                        <p className="text-[11px] text-stone-500 mt-0.5">{g.unknownReason}</p>
+                        {g.singleLayer && activeZone && onApplyLayerOverride ? (
+                          <div className="flex flex-wrap gap-1.5 mt-2">
+                            {([
+                              ['shrub', '灌木'], ['groundcover', '地被'], ['lawn', '草皮'],
+                              ['exclude', '鋪面'], ['exclude', '非植栽／排除'], ['exclude', '暫時忽略'],
+                            ] as Array<[LayerOverrideAction, string]>).map(([action, label], i) => (
+                              <button key={`${action}-${i}`}
+                                onClick={() => onApplyLayerOverride(layerOverrideKey(activeZone.zoneName, g.layerName), action)}
+                                className="text-[11px] px-2.5 py-1 rounded-full bg-white border border-amber-200 text-amber-700 hover:bg-amber-100">
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-[11px] text-stone-400 mt-1.5">此類型無單一圖層可批次分類，請至問題明細逐筆確認</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 5. 最終建議 */}
+              <div className="bg-green-50 border border-green-200 rounded-2xl p-5">
+                <p className="text-sm font-bold text-green-800 mb-1.5">最終建議</p>
+                <p className="text-[15px] text-green-800 leading-relaxed">{aiReply.finalAdvice}</p>
               </div>
             </div>
           )}
@@ -3460,6 +3848,9 @@ export default function LandscapeAdvisorPage({
   zonePlantingTable = [],
   pdfParsed = false,
   zoneReviewResults = [],
+  layerOverrides,
+  onApplyLayerOverride,
+  zoneReviewsVersion = 0,
 }: {
   activeTab?: 'pdf' | 'landscape' | 'dxf' | 'advisor'
   onTabChange?: (tab: 'pdf' | 'landscape' | 'dxf' | 'advisor') => void
@@ -3475,6 +3866,11 @@ export default function LandscapeAdvisorPage({
     issues: Array<{ type: string; description: string; suggestion: string }>
     summary: string
   }>
+  // 人工確認來源批次分類：狀態由 App.tsx 持有，這裡只讀取（顯示已分類/未分類）
+  // 與寫入（按下批次按鈕時呼叫 onApplyLayerOverride）。
+  layerOverrides?: Map<string, LayerOverrideAction>
+  onApplyLayerOverride?: (key: string, action: LayerOverrideAction) => void
+  zoneReviewsVersion?: number
 } = {}) {
   const { profile, signOut } = useAuth()
   const canReviewPdf = hasPermission(profile?.role, 'canReviewPdf')
@@ -3535,7 +3931,7 @@ export default function LandscapeAdvisorPage({
     } else {
       setStoredZones([])
     }
-  }, [activeTab, dxfZonesLinked])
+  }, [activeTab, dxfZonesLinked, zoneReviewsVersion])
   const [activeZoneId, setActiveZoneId] = useState<string | null>(null)
   const [zoneViewMode, setZoneViewMode] = useState<'overview' | 'assistant'>('overview')
   const activeZone = storedZones.find(z => z.zoneName === activeZoneId) ?? null
@@ -3770,7 +4166,7 @@ export default function LandscapeAdvisorPage({
       '',
       '【審查問題明細】',
       ...result.issues.map(i =>
-        `▌ ${i.category}（${i.level === 'danger' ? '高風險' : '需注意'}）\n  問題原因：${i.cause}\n  實務影響：${i.impact}\n  修正建議：${i.suggestion}`),
+        `▌ ${i.category}（${i.level === 'danger' ? '嚴重' : '提醒'}）\n  問題原因：${i.cause}\n  實務影響：${i.impact}\n  修正建議：${i.suggestion}`),
       ...altSection,
       '',
       '【AI 配置修正建議】', result.aiSuggestion,
@@ -3806,8 +4202,8 @@ export default function LandscapeAdvisorPage({
       // 自己組 24 小時制字串，不用 toLocaleString——那會依瀏覽器 locale 塞「上午/下午」，
       // 而 jsPDF 內建字型（下面頁首頁尾改走 canvas 繪製後不再用到，但這裡統一先算好）
       const genTime = `${now.getFullYear()}/${pad(now.getMonth() + 1)}/${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`
-      const scoreClr = result.score >= 80 ? '#15803d' : result.score >= 60 ? '#d97706' : '#dc2626'
-      const riskLabel = result.score >= 80 ? '低風險' : result.score >= 60 ? '中風險' : '高風險'
+      const scoreClr = result.score >= 80 ? '#15803d' : result.score >= 60 ? '#2563eb' : '#dc2626'
+      const riskLabel = result.score >= 80 ? '通過' : result.score >= 60 ? '提醒' : '嚴重'
       const dangerCount = result.issues.filter(i => i.level === 'danger').length
       const activeIssues = result.issues.filter(i => i.level !== 'ok')
       const esc = (s: string) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
@@ -3815,8 +4211,8 @@ export default function LandscapeAdvisorPage({
       // 沒有分區資料（手動加植物、非 DXF 流程）維持原本的全案扁平報告，兩條路徑互不影響。
       const zoneAware = storedZones.length > 0
       const projectLabel = zoneAware ? `DXF 分區審查（共 ${storedZones.length} 區）` : '景觀 AI 配植評估'
-      const riskLevelLabel = (lv: string) => lv === 'high' ? '高風險' : lv === 'medium' ? '警示' : lv === 'low' ? '通過' : '未辨識'
-      const riskLevelClr   = (lv: string) => lv === 'high' ? '#dc2626' : lv === 'medium' ? '#d97706' : lv === 'low' ? '#15803d' : '#78716c'
+      const riskLevelLabel = (lv: string) => lv === 'high' ? '嚴重' : lv === 'medium' ? '提醒' : lv === 'low' ? '通過' : '未辨識'
+      const riskLevelClr   = (lv: string) => lv === 'high' ? '#dc2626' : lv === 'medium' ? '#2563eb' : lv === 'low' ? '#15803d' : '#78716c'
       const proximityLabel = (c: PlantConflictResult) =>
         c.proximity === 'overlap' ? '範圍重疊' : c.proximity === 'touching' ? '邊界相接'
         : c.nearBand === 'adjacent' ? '鄰近－直接相鄰' : '鄰近－可能影響'
@@ -3858,13 +4254,13 @@ export default function LandscapeAdvisorPage({
   <div class="sec-hdr page-break">${esc(z.zoneName)}　問題明細${issues.length > 0 ? `（${issues.length} 項）` : ''}</div>
   <div class="sec-body">
     <div class="no-break" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px;font-size:15px;color:#44403c">
-      <div>分數：<strong style="color:${z.score === undefined ? '#78716c' : z.score >= 80 ? '#15803d' : z.score >= 60 ? '#d97706' : '#dc2626'}">${z.score ?? '—'}${z.score !== undefined ? '/100' : ''}</strong></div>
+      <div>分數：<strong style="color:${z.score === undefined ? '#78716c' : z.score >= 80 ? '#15803d' : z.score >= 60 ? '#2563eb' : '#dc2626'}">${z.score ?? '—'}${z.score !== undefined ? '/100' : ''}</strong></div>
       <div>狀態：<strong>${esc(z.status)}</strong></div>
     </div>
     ${issues.length > 0 ? issues.map(issue => `
     <div class="issue no-break ${issue.level}">
       <div class="i-title">［${esc(z.zoneName)}］${esc(issue.category)}</div>
-      <span class="badge ${issue.level === 'danger' ? 'b-d' : 'b-c'}">${issue.level === 'danger' ? '高風險' : '需注意'}</span>
+      <span class="badge ${issue.level === 'danger' ? 'b-d' : 'b-c'}">${issue.level === 'danger' ? '嚴重' : '提醒'}</span>
       <div class="i-lbl">問題原因</div><div class="i-txt">${esc(issue.cause)}</div>
       <div class="i-lbl">實務影響</div><div class="i-txt">${esc(issue.impact)}</div>
       <div class="i-lbl">修正建議</div><div class="i-txt">${esc(issue.suggestion)}</div>
@@ -3888,10 +4284,10 @@ export default function LandscapeAdvisorPage({
   <div class="sec-hdr page-break">分區總覽</div>
   <div class="sec-body">
     <table>
-      <thead><tr><th>分區</th><th>分數</th><th>風險等級</th><th>問題數</th><th>高風險數</th></tr></thead>
+      <thead><tr><th>分區</th><th>分數</th><th>風險等級</th><th>問題數</th><th>嚴重數</th></tr></thead>
       <tbody>${storedZones.map(z => {
-        const riskTxt = z.dangerCount > 0 ? '高風險' : z.issueCount > 0 ? '中風險' : z.score !== undefined ? '低風險' : '待審查'
-        const riskClr = z.dangerCount > 0 ? '#dc2626' : z.issueCount > 0 ? '#d97706' : '#15803d'
+        const riskTxt = z.dangerCount > 0 ? '嚴重' : z.issueCount > 0 ? '提醒' : z.score !== undefined ? '通過' : '待審查'
+        const riskClr = z.dangerCount > 0 ? '#dc2626' : z.issueCount > 0 ? '#2563eb' : '#15803d'
         return `<tr><td><strong>${esc(z.zoneName)}</strong></td><td>${z.score ?? '—'}</td>
         <td style="color:${riskClr};font-weight:700">${riskTxt}</td><td>${z.issueCount}</td><td>${z.dangerCount}</td></tr>`
       }).join('')}</tbody>
@@ -3906,7 +4302,7 @@ export default function LandscapeAdvisorPage({
     ${activeIssues.map(issue => `
     <div class="issue no-break ${issue.level}">
       <div class="i-title">${esc(issue.category)}</div>
-      <span class="badge ${issue.level === 'danger' ? 'b-d' : 'b-c'}">${issue.level === 'danger' ? '高風險' : '需注意'}</span>
+      <span class="badge ${issue.level === 'danger' ? 'b-d' : 'b-c'}">${issue.level === 'danger' ? '嚴重' : '提醒'}</span>
       <div class="i-lbl">問題原因</div><div class="i-txt">${esc(issue.cause)}</div>
       <div class="i-lbl">實務影響</div><div class="i-txt">${esc(issue.impact)}</div>
       <div class="i-lbl">修正建議</div><div class="i-txt">${esc(issue.suggestion)}</div>
@@ -3942,10 +4338,10 @@ body{font-family:'Microsoft JhengHei','微軟正黑體','Noto Sans TC',Arial,san
 .sec-body{border:1px solid #d4e8d4;border-top:none;border-radius:0 0 6px 6px;padding:18px}
 .issue{border:1px solid #e7e5e4;border-radius:8px;padding:16px;margin-bottom:12px}
 .issue.danger{border-left:4px solid #dc2626}
-.issue.caution{border-left:4px solid #d97706}
+.issue.caution{border-left:4px solid #2563eb}
 .i-title{font-size:22px;font-weight:700;margin-bottom:8px}
 .badge{display:inline-block;padding:2px 10px;border-radius:99px;font-size:12px;font-weight:700;margin-bottom:10px}
-.b-d{background:#fef2f2;color:#dc2626}.b-c{background:#fffbeb;color:#d97706}
+.b-d{background:#fef2f2;color:#dc2626}.b-c{background:#eff6ff;color:#2563eb}
 .i-lbl{font-size:16px;color:#374151;font-weight:700;margin-top:8px;margin-bottom:4px}
 .i-txt{font-size:15px;color:#44403c;line-height:1.5}
 table{width:100%;border-collapse:collapse;font-size:13px;margin-bottom:8px}
@@ -3998,8 +4394,8 @@ tr:nth-child(even) td{background:#f7faf5}
 
   <div class="kpi-grid no-break">
     <div class="kpi"><div class="kpi-v" style="color:${scoreClr}">${result.score}</div><div class="kpi-l">配置相容性總分</div></div>
-    <div class="kpi"><div class="kpi-v" style="color:${activeIssues.length>0?'#d97706':'#57534e'}">${activeIssues.length}</div><div class="kpi-l">主要問題</div></div>
-    <div class="kpi"><div class="kpi-v" style="color:${dangerCount>0?'#dc2626':'#57534e'}">${dangerCount}</div><div class="kpi-l">高風險問題</div></div>
+    <div class="kpi"><div class="kpi-v" style="color:${activeIssues.length>0?'#2563eb':'#57534e'}">${activeIssues.length}</div><div class="kpi-l">主要問題</div></div>
+    <div class="kpi"><div class="kpi-v" style="color:${dangerCount>0?'#dc2626':'#57534e'}">${dangerCount}</div><div class="kpi-l">嚴重問題</div></div>
     <div class="kpi"><div class="kpi-v" style="color:#1a4731">${selectedPlants.length}</div><div class="kpi-l">審查植栽種數</div></div>
   </div>
 
@@ -4498,6 +4894,8 @@ tr:nth-child(even) td{background:#f7faf5}
               onTabChange={onTabChange}
               adoptedSubstitutes={adoptedSubstitutes}
               onAdoptSubstitute={handleAdoptSubstitute}
+              layerOverrides={layerOverrides}
+              onApplyLayerOverride={onApplyLayerOverride}
             />
           ) : (
             /* Result tabs（無 DXF 分區資料時的既有扁平流程，原封不動）*/
@@ -4529,7 +4927,7 @@ tr:nth-child(even) td{background:#f7faf5}
 
                   {/* ── 總覽 Dashboard ── */}
                   {activeReviewTab === 'overview' && (() => {
-                    const ovScoreClr = result.score >= 80 ? '#15803d' : result.score >= 60 ? '#d97706' : '#dc2626'
+                    const ovScoreClr = result.score >= 80 ? '#15803d' : result.score >= 60 ? '#2563eb' : '#dc2626'
                     return (
                     <div className="space-y-4">
 
@@ -4548,7 +4946,7 @@ tr:nth-child(even) td{background:#f7faf5}
                                   <div className="flex items-center gap-2">
                                     <span className={`text-xs px-2 py-0.5 rounded-full font-semibold ${
                                       r.riskLevel === '低' ? 'bg-green-100 text-green-800' :
-                                      r.riskLevel === '中' ? 'bg-amber-100 text-amber-800' :
+                                      r.riskLevel === '中' ? 'bg-blue-100 text-blue-800' :
                                       'bg-red-100 text-red-800'
                                     }`}>風險：{r.riskLevel}</span>
                                     <span className="text-sm font-bold text-stone-700">{r.score} 分</span>
@@ -4605,7 +5003,7 @@ tr:nth-child(even) td{background:#f7faf5}
                         <div className="flex-1 grid grid-cols-3 gap-3">
                           {[
                             { label: '主要問題', value: activeIssues.length, unit: '項', clr: activeIssues.length > 0 ? '#d97706' : '#78716c' },
-                            { label: '高風險問題', value: dangerCount, unit: '項', clr: dangerCount > 0 ? '#dc2626' : '#78716c' },
+                            { label: '嚴重問題', value: dangerCount, unit: '項', clr: dangerCount > 0 ? '#dc2626' : '#78716c' },
                             { label: '已選植物', value: selectedPlants.length, unit: '種', clr: '#1a4731' },
                           ].map(k => (
                             <div key={k.label} className="bg-[#f7faf5] border border-stone-100 rounded-xl px-4 py-3">
@@ -4624,10 +5022,10 @@ tr:nth-child(even) td{background:#f7faf5}
                           <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${Math.min(storedZones.length, 4)}, 1fr)` }}>
                             {storedZones.map(z => {
                               const isAct = activeZoneId === z.zoneName
-                              const zRiskLabel = z.dangerCount > 0 ? '高風險' : z.issueCount > 0 ? '中風險' : z.score !== undefined ? '低風險' : '待審查'
-                              const zScoreClr = !z.score ? '#9ca3af' : z.score >= 80 ? '#15803d' : z.score >= 60 ? '#d97706' : '#dc2626'
-                              const zRiskClr  = z.dangerCount > 0 ? '#dc2626' : z.issueCount > 0 ? '#d97706' : '#15803d'
-                              const zBorder   = z.dangerCount > 0 ? 'border-red-300' : z.issueCount > 0 ? 'border-amber-300' : 'border-emerald-200'
+                              const zRiskLabel = z.dangerCount > 0 ? '嚴重' : z.issueCount > 0 ? '提醒' : z.score !== undefined ? '通過' : '待審查'
+                              const zScoreClr = !z.score ? '#9ca3af' : z.score >= 80 ? '#15803d' : z.score >= 60 ? '#2563eb' : '#dc2626'
+                              const zRiskClr  = z.dangerCount > 0 ? '#dc2626' : z.issueCount > 0 ? '#2563eb' : '#15803d'
+                              const zBorder   = z.dangerCount > 0 ? 'border-red-300' : z.issueCount > 0 ? 'border-blue-300' : 'border-emerald-200'
                               return (
                                 <button key={z.zoneName}
                                   onClick={() => { setActiveZoneId(isAct ? null : z.zoneName); setActiveReviewTab('overview') }}
@@ -4641,7 +5039,7 @@ tr:nth-child(even) td{background:#f7faf5}
                                   </p>
                                   <p className="text-[16px] font-bold mb-2" style={{ color: isAct ? (z.dangerCount > 0 ? '#fca5a5' : '#86efac') : zRiskClr }}>{zRiskLabel}</p>
                                   <p className={`text-[15px] leading-snug mb-1 ${isAct ? 'text-green-100' : 'text-stone-600'}`}>
-                                    問題 {z.issueCount} 項｜高風險 {z.dangerCount} 項
+                                    問題 {z.issueCount} 項｜嚴重 {z.dangerCount} 項
                                   </p>
                                   {z.mainIssues.length > 0 && (
                                     <p className={`text-[14px] leading-snug ${isAct ? 'text-green-200' : 'text-stone-400'}`}>
@@ -4697,7 +5095,7 @@ tr:nth-child(even) td{background:#f7faf5}
                       <span className="text-stone-300">|</span>
                       <span className="text-sm font-bold text-green-800">目前查看：{activeZone.zoneName}</span>
                       {activeZone.score !== undefined && (
-                        <span className={`text-sm font-bold ml-auto ${activeZone.score >= 80 ? 'text-emerald-700' : activeZone.score >= 60 ? 'text-amber-700' : 'text-red-700'}`}>
+                        <span className={`text-sm font-bold ml-auto ${activeZone.score >= 80 ? 'text-emerald-700' : activeZone.score >= 60 ? 'text-blue-700' : 'text-red-700'}`}>
                           {activeZone.score}/100
                         </span>
                       )}

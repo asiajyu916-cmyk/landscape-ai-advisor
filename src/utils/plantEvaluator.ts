@@ -4,6 +4,11 @@
 import { waterScore, sunConflictLevel, drainageConflictLevel } from '@/utils/csvParser'
 import type { CsvPlantRecord, SelectedCsvPlant } from '@/types/csvPlant'
 import type { RiskLevel } from '@/types/dxf'
+import {
+  gapSeverity, levelsGapSeverity, sunLevelOf, waterLevelOf, maintenanceLevelOf,
+  type GapSeverity,
+} from '@/utils/compatibilityLevels'
+import { detectSiteDrainageEvidence, type SiteDrainageEvidence } from '@/utils/siteDrainageContext'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -92,81 +97,102 @@ function categoriesFromIssues(issues: IssueDetail[]): CatSummary[] {
   })
 }
 
-export function evaluate(plants: SelectedCsvPlant[], allPlants: CsvPlantRecord[]): EvalResult {
+export function evaluate(
+  plants: SelectedCsvPlant[],
+  allPlants: CsvPlantRecord[],
+  siteDrainageEvidence: SiteDrainageEvidence = 'ground-natural',
+): EvalResult {
   const issues: IssueDetail[] = []
   const problemIds = new Set<string>()
   let deductions = 0
 
-  const waterScores = plants.map(p => waterScore(p.waterRequirement))
-  const maxW = Math.max(...waterScores)
-  const minW = Math.min(...waterScores)
-  const waterGap = maxW - minW
+  // ── 程度差距判定（日照／澆水／排水／養護強度）──────────────────────────────
+  // 統一規則（見 compatibilityLevels.ts）：差距 0～2 級＝通過，不列入問題、不扣分；
+  // 差距 3 級＝提醒，輕微扣分；差距 4 級以上＝嚴重，列入主要問題與高風險。取代
+  // 過去 waterScore/sunConflictLevel/drainageConflictLevel 各自的門檻，避免「條件
+  // 只是不同，不是真的衝突」也被列為警示。
 
-  // 1. 澆水衝突
-  if (waterGap >= 2) {
+  // 1. 澆水
+  const waterLevels = plants.map(p => waterLevelOf(p.waterRequirement))
+  const { severity: waterSeverity, gap: waterGap } = levelsGapSeverity(waterLevels)
+  if (waterSeverity === 'danger') {
     deductions += 20
-    plants.filter(p => waterScore(p.waterRequirement) === minW || waterScore(p.waterRequirement) === maxW)
+    const validW = waterLevels.filter((v): v is number => v !== undefined)
+    const maxW = Math.max(...validW), minW = Math.min(...validW)
+    plants.filter(p => { const lv = waterLevelOf(p.waterRequirement); return lv === minW || lv === maxW })
       .forEach(p => problemIds.add(p.instanceId))
     issues.push(makeIssue('澆水衝突', 'danger',
-      `本區植栽水分需求差異大（${[...new Set(plants.map(p => p.waterRequirement))].join('、')}），若以同一灌溉管理，高需水植物可能缺水，低需水植物可能積水爛根。`,
+      `本區植栽水分需求差距達 ${waterGap} 級（${[...new Set(plants.map(p => p.waterRequirement))].join('、')}），若以同一灌溉管理，高需水植物可能缺水，低需水植物可能積水爛根。`,
       '澆水管理無法同時兼顧所有植物需求，長期將導致部分植物衰退，增加後續養護難度。',
       '建議依水分需求高低設置獨立灌溉迴路，或替換為水分需求相近的植栽組合。'))
-  } else if (waterGap >= 1) {
-    deductions += 9
+  } else if (waterSeverity === 'caution') {
+    deductions += 6
     issues.push(makeIssue('澆水衝突', 'caution',
-      `本區植栽水分需求略有差異（${[...new Set(plants.map(p => p.waterRequirement))].join('、')}），需注意澆灌頻率管理。`,
+      `本區植栽水分需求差距 ${waterGap} 級（${[...new Set(plants.map(p => p.waterRequirement))].join('、')}），建議留意澆灌頻率管理。`,
       '若統一澆水頻率，部分植物可能受到輕微水分壓力，影響生長勢。',
       '建議於養護計畫中標示各植栽的適當給水量，並考慮分組澆灌。'))
   }
 
-  // 2. 土壤 / 排水衝突
-  const wets = plants.map(p => p.wetTolerance)
-  const drainLevel = drainageConflictLevel(wets)
-  const hasNotTolerant = wets.includes('不耐積水')
-  if (drainLevel === 'caution') {
-    deductions += 13
-    if (hasNotTolerant) plants.filter(p => p.wetTolerance === '不耐積水').forEach(p => problemIds.add(p.instanceId))
-    const wetTolerantPlants = plants.filter(p => p.wetTolerance === '耐濕' || p.wetTolerance === '稍耐濕')
-    wetTolerantPlants.forEach(p => problemIds.add(p.instanceId))
+  // 2. 排水／耐濕
+  // 舊邏輯只比較兩株植物耐濕等級的差距，沒有「這個場地是否真的會積水」這個前提，
+  // 導致一樓自然土種植的台北草（耐濕）＋桂花（不耐積水）這種常見庭園配置被判定
+  // 為嚴重排水衝突。新規則：耐濕等級不同本身不成立衝突，衝突必須同時存在「場地
+  // 積水證據」（siteDrainageEvidence，見 siteDrainageContext.ts，由既有分區／圖層
+  // 名稱關鍵字掃描取得，不寫死特定植物名稱）——沒有證據時，即使種了不耐積水植物
+  // 也維持通過，不列入 issues、不扣分。
+  const dryPlants = plants.filter(p => p.wetTolerance === '不耐積水')
+  const wetPlants = plants.filter(p => p.wetTolerance === '耐濕')
+  const hasNotTolerant = dryPlants.length > 0
+  const drainSeverity: GapSeverity = !hasNotTolerant ? 'pass'
+    : siteDrainageEvidence === 'impervious-evidence' ? 'danger'
+    : siteDrainageEvidence === 'unknown-structure' ? 'caution'
+    : 'pass'   // siteDrainageEvidence === 'ground-natural'：預設一樓自然土層，不成立排水衝突
+
+  if (drainSeverity === 'danger') {
+    deductions += 15
+    dryPlants.forEach(p => problemIds.add(p.instanceId))
+    wetPlants.forEach(p => problemIds.add(p.instanceId))
+    issues.push(makeIssue('排水衝突', 'danger',
+      `本場地偵測到低窪、集水區、不透水底板或排水不良等積水證據，種植不耐積水植物（${dryPlants.map(p => p.name).join('、')}）風險較高${wetPlants.length > 0 ? `，且與耐濕植物（${wetPlants.map(p => p.name).join('、')}）混植，排水需求差異明顯` : ''}。`,
+      '場地已有積水證據時，不耐積水植物易發生爛根，長期影響存活率與景觀品質。',
+      '建議優先改善排水設計（如加高花台、增設排水層或明溝）、視情況移動植物位置，若無法改善排水，最後再考慮更換為耐積水植物。'))
+  } else if (drainSeverity === 'caution') {
+    deductions += 6
     issues.push(makeIssue('排水衝突', 'caution',
-      `本區同時包含不耐積水（${plants.filter(p => p.wetTolerance === '不耐積水').map(p => p.name).join('、')}）與耐濕（${wetTolerantPlants.map(p => p.name).join('、')}）的植物組合，排水條件需求相反。`,
-      '若採統一排水設計，不耐積水植物易發生爛根，耐濕植物則可能因過度排水而受影響。',
-      '建議分區配置並設置差異化排水層，或選用排水需求相近的替代植栽。'))
-  } else if (hasNotTolerant && plants.length > 1) {
-    deductions += 5
-    issues.push(makeIssue('排水衝突', 'caution',
-      `本區含不耐積水植物（${plants.filter(p => p.wetTolerance === '不耐積水').map(p => p.name).join('、')}），需確保排水設計符合需求。`,
-      '若排水層設計不足，不耐積水植物易在雨季受積水影響。',
-      '建議補充礫石排水層（10cm 以上），並確認種植基盤排水坡度。'))
+      `本區種植不耐積水植物（${dryPlants.map(p => p.name).join('、')}），但圖面無法確認地下是否為自然土層（可能為地下室頂板、人工花台或屋頂綠化），建議先確認排水構造再判斷是否需要調整。`,
+      '若地下實際為不透水構造且排水設計不足，不耐積水植物易受積水影響；若確認為自然土層則通常無需特別處理。',
+      '建議確認地下構造與排水設施是否符合植栽需求，必要時安排現場或圖面覆核。'))
   }
 
-  // 3. 日照問題
-  const suns = plants.map(p => p.sunRequirement)
-  const sunLevel = sunConflictLevel(suns)
-  if (sunLevel === 'severe') {
+  // 3. 日照
+  const sunLevels = plants.map(p => sunLevelOf(p.sunRequirement))
+  const { severity: sunSeverity, gap: sunGap } = levelsGapSeverity(sunLevels)
+  if (sunSeverity === 'danger') {
     deductions += 16
-    plants.filter(p => p.sunRequirement === '半日照至遮陰').forEach(p => problemIds.add(p.instanceId))
+    const validSun = sunLevels.filter((v): v is number => v !== undefined)
+    const maxSun = Math.max(...validSun), minSun = Math.min(...validSun)
+    plants.filter(p => { const lv = sunLevelOf(p.sunRequirement); return lv === minSun || lv === maxSun })
+      .forEach(p => problemIds.add(p.instanceId))
     issues.push(makeIssue('日照問題', 'danger',
-      `本區同時包含全日照植物（${plants.filter(p => p.sunRequirement === '全日照').map(p => p.name).join('、')}）與半日照至遮陰植物（${plants.filter(p => p.sunRequirement === '半日照至遮陰').map(p => p.name).join('、')}），日照需求完全相反。`,
+      `本區植栽日照需求差距達 ${sunGap} 級（${[...new Set(plants.map(p => p.sunRequirement))].join('、')}），日照需求完全相反。`,
       '全日照環境下耐陰植物容易葉燒，遮蔭環境下全日照植物生長勢衰退，兩者無法共存於同一光照條件。',
       '建議將全日照與耐陰植物分區配置，或將耐陰植物換為全日照至半日照之替代植栽。'))
-  } else if (sunLevel === 'mild') {
+  } else if (sunSeverity === 'caution') {
     deductions += 7
     issues.push(makeIssue('日照問題', 'caution',
-      `本區植栽日照需求略有差異（${[...new Set(suns.filter(s => s !== '待查'))].join('、')}），需確認配置位置對應日照條件。`,
+      `本區植栽日照需求差距 ${sunGap} 級（${[...new Set(plants.map(p => p.sunRequirement).filter(s => s !== '待查'))].join('、')}），建議確認配置位置對應日照條件。`,
       '日照需求不一的植物若未依位置配置，可能造成部分植物生長差異，影響景觀均一性。',
       '建議確認場域各位置實際日照時數，將日照需求相近的植物集中配置。'))
   }
 
-  // 4. 維護風險
-  const mLevels = plants.map(p => p.maintenanceLevel)
-  const hasHighM = mLevels.includes('高')
-  const hasLowM  = mLevels.includes('低')
-  if (hasHighM && hasLowM) {
-    deductions += 8
-    plants.filter(p => p.maintenanceLevel === '高').forEach(p => problemIds.add(p.instanceId))
-    issues.push(makeIssue('維護風險', 'caution',
-      `本區植栽維護頻率差異大，包含高維護植物（${plants.filter(p => p.maintenanceLevel === '高').map(p => p.name).join('、')}）與低維護植物。`,
+  // 4. 養護強度
+  const mLevels = plants.map(p => maintenanceLevelOf(p.maintenanceLevel))
+  const { severity: maintSeverity, gap: maintGap } = levelsGapSeverity(mLevels)
+  if (maintSeverity === 'danger' || maintSeverity === 'caution') {
+    deductions += maintSeverity === 'danger' ? 10 : 5
+    if (maintSeverity === 'danger') plants.filter(p => p.maintenanceLevel === '高').forEach(p => problemIds.add(p.instanceId))
+    issues.push(makeIssue('維護風險', maintSeverity,
+      `本區植栽維護強度差距 ${maintGap} 級，包含高維護植物（${plants.filter(p => p.maintenanceLevel === '高').map(p => p.name).join('、')}）與低維護植物。`,
       '若未建立差異化養護頻率計畫，高維護植物易疏於管理，影響整體景觀品質。',
       '建議於養護計畫中分別標示各植栽的修剪頻率、施肥需求，並與管理單位確認執行能力。'))
   }
@@ -200,19 +226,20 @@ export function evaluate(plants: SelectedCsvPlant[], allPlants: CsvPlantRecord[]
   if (plantsWithPh.length >= 2) {
     const phValues = plantsWithPh.map(p => phOrder[p.soilPh])
     const phGap = Math.max(...phValues) - Math.min(...phValues)
-    if (phGap >= 3) {
+    const phSeverity = gapSeverity(phGap)   // pH 本身已是 1~5 級，直接套用統一門檻，不再自己訂一套
+    if (phSeverity === 'danger') {
       deductions += 15
       const acidPlants  = plantsWithPh.filter(p => phOrder[p.soilPh] <= 2).map(p => `${p.name}（${p.soilPh}）`)
       const alkaliPlants = plantsWithPh.filter(p => phOrder[p.soilPh] >= 4).map(p => `${p.name}（${p.soilPh}）`)
       issues.push(makeIssue('土壤酸鹼衝突', 'danger',
-        `本區植栽土壤 pH 需求差異懸殊：酸性偏好植物（${acidPlants.join('、')}）與鹼性偏好植物（${alkaliPlants.join('、')}）無法共存於同一土壤環境。`,
+        `本區植栽土壤 pH 需求差距達 ${phGap} 級：酸性偏好植物（${acidPlants.join('、')}）與鹼性偏好植物（${alkaliPlants.join('、')}）無法共存於同一土壤環境。`,
         '統一土壤 pH 將造成部分植物出現缺素症（如酸性土壤中鹼性植物缺鐵、缺錳）或生長停滯，長期影響植物存活率。',
         '建議依 pH 需求進行分區種植，各區土壤分別調整至適合 pH 範圍，或替換為相近 pH 需求的替代植栽。'))
-    } else if (phGap >= 2) {
-      deductions += 8
+    } else if (phSeverity === 'caution') {
+      deductions += 6
       const phList = [...new Set(plantsWithPh.map(p => `${p.name}（${p.soilPh}）`))]
       issues.push(makeIssue('土壤酸鹼衝突', 'caution',
-        `本區植栽土壤 pH 需求略有差異（${phList.join('、')}），需確認土壤酸鹼性可兼容各植栽需求。`,
+        `本區植栽土壤 pH 需求差距 ${phGap} 級（${phList.join('、')}），建議確認土壤酸鹼性可兼容各植栽需求。`,
         '不同 pH 偏好的植物在同一土壤中可能出現生長差異，影響景觀均一性。',
         '建議於施工前進行土壤 pH 檢測，必要時以硫磺粉（降 pH）或石灰（升 pH）調整，並於後續養護中定期監測。'))
     }
@@ -373,16 +400,16 @@ export function evaluate(plants: SelectedCsvPlant[], allPlants: CsvPlantRecord[]
   }
 
   const adjustmentPlan: string[] = []
-  if (waterGap >= 2) adjustmentPlan.push('設置獨立分區灌溉迴路，依水分需求高低分組管理')
-  else if (waterGap >= 1) adjustmentPlan.push('調整澆灌頻率，於養護計畫中標示各植栽的適當給水量')
-  if (drainLevel === 'caution') adjustmentPlan.push('分區配置不耐積水與耐濕植物，並設置差異化排水層設計')
-  else if (hasNotTolerant) adjustmentPlan.push('補充礫石排水層（建議 10cm 以上），確認種植基盤排水坡度')
-  if (sunLevel === 'severe') adjustmentPlan.push('將全日照與耐陰植物分配至場域日照充足區與遮蔭區')
-  else if (sunLevel === 'mild') adjustmentPlan.push('確認場域各區塊實際日照時數，依日照需求分組配置')
-  if (hasHighM && hasLowM) adjustmentPlan.push('建立分植物養護時間表，標示各植栽修剪頻率與施肥計畫')
+  if (waterSeverity === 'danger') adjustmentPlan.push('設置獨立分區灌溉迴路，依水分需求高低分組管理')
+  else if (waterSeverity === 'caution') adjustmentPlan.push('調整澆灌頻率，於養護計畫中標示各植栽的適當給水量')
+  if (drainSeverity === 'danger') adjustmentPlan.push('改善排水設計（加高花台、增設排水層或明溝），並視情況調整不耐積水植物的位置')
+  else if (drainSeverity === 'caution') adjustmentPlan.push('確認地下構造與排水設施是否符合植栽需求（是否為地下室頂板、人工花台或屋頂綠化）')
+  if (sunSeverity === 'danger') adjustmentPlan.push('將全日照與耐陰植物分配至場域日照充足區與遮蔭區')
+  else if (sunSeverity === 'caution') adjustmentPlan.push('確認場域各區塊實際日照時數，依日照需求分組配置')
+  if (maintSeverity === 'danger' || maintSeverity === 'caution') adjustmentPlan.push('建立分植物養護時間表，標示各植栽修剪頻率與施肥計畫')
   if (tallTrees.length > 0 && groundcovers.length > 0) adjustmentPlan.push('規劃喬木與地被之種植間距，選用耐陰地被配置於冠幅範圍內')
   if (incompleteData.length > 0) adjustmentPlan.push(`補查 ${incompleteData.map(p => p.name).join('、')} 的官方日照水分資料`)
-  if (plantsWithPh.length >= 2 && (Math.max(...plantsWithPh.map(p => phOrder[p.soilPh])) - Math.min(...plantsWithPh.map(p => phOrder[p.soilPh]))) >= 2)
+  if (plantsWithPh.length >= 2 && gapSeverity(Math.max(...plantsWithPh.map(p => phOrder[p.soilPh])) - Math.min(...plantsWithPh.map(p => phOrder[p.soilPh]))) !== 'pass')
     adjustmentPlan.push('施工前進行土壤 pH 檢測，依各植栽需求調整酸鹼度，並分區管理')
   if (plantsNeedAmend.length > 0) adjustmentPlan.push('於景觀施工說明書中列明客土改良規格，竣工前確認執行')
   if (adjustmentPlan.length === 0) adjustmentPlan.push('維持現有配置，施工前確認種植間距與覆土深度符合各植栽需求')
@@ -421,8 +448,11 @@ function toSelectedPlant(p: CsvPlantRecord, instanceId: string): SelectedCsvPlan
   return { ...p, instanceId, status: '可用' }
 }
 
-export function evaluatePlantPair(a: CsvPlantRecord, b: CsvPlantRecord, allPlants: CsvPlantRecord[]): EvalResult {
-  return evaluate([toSelectedPlant(a, 'pair-a'), toSelectedPlant(b, 'pair-b')], allPlants)
+export function evaluatePlantPair(
+  a: CsvPlantRecord, b: CsvPlantRecord, allPlants: CsvPlantRecord[],
+  siteDrainageEvidence?: SiteDrainageEvidence,
+): EvalResult {
+  return evaluate([toSelectedPlant(a, 'pair-a'), toSelectedPlant(b, 'pair-b')], allPlants, siteDrainageEvidence)
 }
 
 /**

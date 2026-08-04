@@ -26,19 +26,20 @@ export function zonePrefix(zoneName: string): string {
 }
 
 export function scoreColor(score?: number): string {
-  return score === undefined ? '#78716c' : score >= 80 ? '#15803d' : score >= 60 ? '#d97706' : '#dc2626'
+  return score === undefined ? '#78716c' : score >= 80 ? '#15803d' : score >= 60 ? '#2563eb' : '#dc2626'
 }
 
 export type ZoneReviewStatusLike = '可審查' | '植物待確認' | '無法審查'
 export function statusColor(status: ZoneReviewStatusLike): string {
-  return status === '可審查' ? '#15803d' : status === '植物待確認' ? '#d97706' : '#dc2626'
+  return status === '可審查' ? '#15803d' : status === '植物待確認' ? '#2563eb' : '#dc2626'
 }
 
+// 嚴重＝紅、提醒＝藍、通過＝綠（見 src/utils/compatibilityLevels.ts）
 export function riskLevelLabel(lv: string): string {
-  return lv === 'high' ? '高風險' : lv === 'medium' ? '警示' : lv === 'low' ? '通過' : '未辨識'
+  return lv === 'high' ? '嚴重' : lv === 'medium' ? '提醒' : lv === 'low' ? '通過' : '未辨識'
 }
 export function riskLevelColor(lv: string): string {
-  return lv === 'high' ? '#dc2626' : lv === 'medium' ? '#d97706' : lv === 'low' ? '#15803d' : '#78716c'
+  return lv === 'high' ? '#dc2626' : lv === 'medium' ? '#2563eb' : lv === 'low' ? '#15803d' : '#78716c'
 }
 
 export function proximityLabel(c: PlantConflictResult): string {
@@ -106,7 +107,9 @@ const CATEGORY_TO_BUCKET: Record<string, IssueBucketKey> = {
 // 需要獨立一輪調查，不能跟這次的報告呈現層重構混在一起做。
 export interface OverlapNote { label: string; certain: boolean }
 
-function classifyOverlap(aKind: SpatialInstanceKind, bKind: SpatialInstanceKind, proximity: ProximityLevel): OverlapNote {
+/** 供其他頁面（如 LandscapeAdvisorPage.tsx 的「AI 審查回覆」摘要）重用同一套
+ *  「0cm／重疊語意」判斷，避免兩個地方各自維護一份不一致的分類規則。 */
+export function classifyOverlap(aKind: SpatialInstanceKind, bKind: SpatialInstanceKind, proximity: ProximityLevel): OverlapNote {
   if (proximity === 'touching') return { label: '邊界接觸', certain: true }
   if (proximity !== 'overlap') return { label: '鄰近', certain: true }
   if (aKind === 'unknown-hatch' || bKind === 'unknown-hatch')
@@ -476,7 +479,7 @@ export function computeReportScore(dangerCount: number, cautionCount: number, ne
   const score = Math.max(0, Math.min(100, 100 - dangerCount * 12 - cautionCount * 5))
   const tier: ReportScore['tier'] = score >= 80 ? '良好' : score >= 65 ? '可接受' : score >= 50 ? '需修正' : '高風險'
   const tierNote = tier === '良好' ? '配置相容性良好' : tier === '可接受' ? '建議局部改善' : tier === '需修正' ? '建議修正後再提送審查' : '建議重新配置'
-  const reasonLine = `主要原因：${dangerCount} 項高風險、${cautionCount} 項一般改善`
+  const reasonLine = `主要原因：${dangerCount} 項嚴重、${cautionCount} 項提醒`
     + (needsReviewCount > 0 ? `（另有 ${needsReviewCount} 項需人工確認，不列入評分）` : '')
   return { score, tier, tierNote, reasonLine }
 }
@@ -496,14 +499,14 @@ export const SPATIAL_KIND_LEGEND: Array<{ kind: string; label: string; color: st
   { kind: 'lawn-hatch', label: '草皮', color: SPATIAL_KIND_COLOR['lawn-hatch'] },
 ]
 
-type Bounds = { minX: number; maxX: number; minY: number; maxY: number }
+export type Bounds = { minX: number; maxX: number; minY: number; maxY: number }
 
-function polyBounds(vertices: Array<{ x: number; y: number }>): Bounds {
+export function polyBounds(vertices: Array<{ x: number; y: number }>): Bounds {
   const xs = vertices.map(v => v.x), ys = vertices.map(v => v.y)
   return { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) }
 }
 
-function polyCentroid(vertices: Array<{ x: number; y: number }>): { x: number; y: number } {
+export function polyCentroid(vertices: Array<{ x: number; y: number }>): { x: number; y: number } {
   const n = vertices.length || 1
   return { x: vertices.reduce((s, v) => s + v.x, 0) / n, y: vertices.reduce((s, v) => s + v.y, 0) / n }
 }
@@ -513,21 +516,21 @@ function polyCentroid(vertices: Array<{ x: number; y: number }>): { x: number; y
 // SVG polygon points 屬性會讓報告 HTML 字串暴增到幾十萬字元（實測單一分區地圖曾達
 // 80 萬字元），拖慢 html2canvas 截圖甚至讓分頁量測失真。均勻抽樣壓到有限點數，形狀
 // 精確度對這張示意圖的用途來說綽綽有餘。
-function simplifyRing(points: Array<{ x: number; y: number }>, maxPoints = 120): Array<{ x: number; y: number }> {
+export function simplifyRing(points: Array<{ x: number; y: number }>, maxPoints = 120): Array<{ x: number; y: number }> {
   if (points.length <= maxPoints) return points
   const step = points.length / maxPoints
   const out: Array<{ x: number; y: number }> = []
   for (let i = 0; i < maxPoints; i++) out.push(points[Math.floor(i * step)])
   return out
 }
-function ringToPoints(points: Array<{ x: number; y: number }>): string {
+export function ringToPoints(points: Array<{ x: number; y: number }>): string {
   return simplifyRing(points).map(v => `${v.x},${v.y}`).join(' ')
 }
 
 // reportHtml 是用 innerHTML= 塞進 detached <div>（不是 React），<svg> 一定要給明確的
 // width/height 像素屬性——只給 viewBox 在這個情境下可能量到 0 高度，讓分頁引擎的
 // offsetHeight 量測（pdfCanvasExport.ts）把地圖壓成一條線。
-function fitDims(aspect: number, maxW: number, maxH: number): { w: number; h: number } {
+export function fitDims(aspect: number, maxW: number, maxH: number): { w: number; h: number } {
   let w = maxW
   let h = w / Math.max(aspect, 0.01)
   if (h > maxH) { h = maxH; w = h * aspect }
@@ -537,10 +540,10 @@ function fitDims(aspect: number, maxW: number, maxH: number): { w: number; h: nu
 export interface ZoneMapSummary { zoneName: string; score?: number; dangerCount: number; cautionCount: number; needsReviewCount: number }
 
 function severityColor(sev: EventSeverity): string {
-  return sev === 'danger' ? '#dc2626' : sev === 'caution' ? '#d97706' : '#ca8a04'
+  return sev === 'danger' ? '#dc2626' : sev === 'caution' ? '#2563eb' : '#ca8a04'
 }
 export function severityLabel(sev: EventSeverity): string {
-  return sev === 'danger' ? '高風險' : sev === 'caution' ? '一般改善' : '需人工確認'
+  return sev === 'danger' ? '嚴重' : sev === 'caution' ? '提醒' : '需人工確認'
 }
 
 /** 全案分區總覽：所有分區邊界依調色盤上色，dangerCount>0 的分區改用醒目紅色粗框線。
@@ -814,7 +817,7 @@ export function buildShortZoneConclusion(zoneName: string, stats: ZoneEventStats
     return `${zoneName}整體配置相容性良好${scoreNote}，未發現需優先調整之問題項目，建議維持現有配置並依常規養護計畫執行。`
   }
   if (stats.dangerCount > 0) {
-    return `${zoneName}評估發現 ${stats.dangerCount} 項高風險問題、${stats.cautionCount} 項一般改善、${stats.needsReviewCount} 項需人工確認${scoreNote}，建議優先處理標號較前之高風險項目後再提送審查，以降低審查往返次數。`
+    return `${zoneName}評估發現 ${stats.dangerCount} 項嚴重問題、${stats.cautionCount} 項提醒、${stats.needsReviewCount} 項需人工確認${scoreNote}，建議優先處理標號較前之嚴重項目後再提送審查，以降低審查往返次數。`
   }
   return `${zoneName}整體配置可行${scoreNote}，惟有 ${stats.cautionCount} 項事項需補充說明、${stats.needsReviewCount} 項需人工確認，建議於施工說明書中補充對應之養護／設計調整方案。`
 }

@@ -19,7 +19,7 @@ import {
 } from '@/utils/dxfReportBuilder'
 import { aggregatePairConflictsToEvalResult, evaluate } from '@/utils/plantEvaluator'
 import type { EvalResult } from '@/utils/plantEvaluator'
-import { computeZonePlantConflicts } from '@/utils/plantProximity'
+import { computeZonePlantConflicts, DEFAULT_PROXIMITY_CONFIG } from '@/utils/plantProximity'
 import { loadPlantsFromStorage, savePlantsToStorage, loadPlantsWithCsvMerge } from '@/data/plantStore'
 import { searchPlantAllTiers, searchResultToDraft } from '@/utils/plantSearchClient'
 import { existsExactInLocalDatabase, normalizeLayerToken, buildLayerPlantKeywordMap, findPlantsByLayerName, normalizeScientificName } from '@/utils/plantNameMatch'
@@ -28,15 +28,20 @@ import type { PlantSearchResult, DraftPlantRecord } from '@/types/plantSearch'
 import { PLANT_DATA_SOURCE_LABELS } from '@/types/plantSearch'
 import PlantAutoAddModal from '@/components/modals/PlantAutoAddModal'
 import ProximityConflictCard from '@/components/dxf/ProximityConflictCard'
-import { classifyCategory, CATEGORY_GROUP_META, CATEGORY_GROUP_ORDER, buildCategoryResults, type IssueCategoryGroup } from '@/utils/issueCategoryMeta'
+import { classifyCategory, CATEGORY_GROUP_META, CATEGORY_GROUP_ORDER, buildCategoryResults, pickPrimaryCategory, type IssueCategoryGroup } from '@/utils/issueCategoryMeta'
 import DrawingLocatorModal from '@/components/dxf/DrawingLocatorModal'
+import AIReviewSummary from '@/components/dxf/AIReviewSummary'
+import AIFixPlanModal from '@/components/dxf/AIFixPlanModal'
+import { generateReviewSummary, generateFixPlans, recommendFixPlan, generateMapInsight, generateZoneOneLiner } from '@/utils/aiReviewNarrative'
+import ZoneOverviewMap, { type ZoneMapEntry, type ZoneMapIssuePoint, type FocusPoint } from '@/components/dxf/ZoneOverviewMap'
+import ZoneQuickPanel, { type QuickPanelIssue } from '@/components/dxf/ZoneQuickPanel'
 import AiAdvisorDrawer from '@/components/dxf/AiAdvisorDrawer'
 import {
   loadDxfRules, upsertDxfRule, deleteDxfRule, clearAllDxfRules,
   loadSessionRules, upsertSessionRule,
   isNonPlant, readDxfWithEncoding,
 } from '@/data/dxfMappingStore'
-import type { DxfParseResult, DxfInsert, DxfText, MappedItem, MatchStatus, MultiLayerResult, MultiLayerJudgment, PlantSchedule, PlantScheduleEntry, ZoneType, DetectedZone, ZonePlantList, DrawingUnit, ZoneStatisticsResult, BlockExtent, PlantConflictResult, SpatialPlantInstance, TreeInventoryItem, RiskLevel } from '@/types/dxf'
+import type { DxfParseResult, DxfInsert, DxfText, MappedItem, MatchStatus, MultiLayerResult, MultiLayerJudgment, PlantSchedule, PlantScheduleEntry, ZoneType, DetectedZone, ZonePlantList, DrawingUnit, ZoneStatisticsResult, BlockExtent, PlantConflictResult, SpatialPlantInstance, TreeInventoryItem, RiskLevel, LayerOverrideAction } from '@/types/dxf'
 import type { CsvPlantRecord, SelectedCsvPlant } from '@/types/csvPlant'
 import type { DxfBlockRule } from '@/data/dxfMappingStore'
 
@@ -485,7 +490,7 @@ function RiskFilterBar({ filter, onChange, stats }: {
   const options: Array<{ key: RiskFilterKey; label: string }> = [
     { key: 'all', label: '全部' },
     { key: 'severe', label: '嚴重' },
-    { key: 'warning', label: '警示' },
+    { key: 'warning', label: '提醒' },
     { key: 'passed', label: '通過' },
   ]
   return (
@@ -505,7 +510,7 @@ function RiskFilterBar({ filter, onChange, stats }: {
         ))}
       </div>
       <p className="text-sm text-stone-500">
-        有效相鄰配對 {stats.total} 組　嚴重 {stats.severe}｜警示 {stats.warning}｜通過 {stats.passed}
+        有效相鄰配對 {stats.total} 組　嚴重 {stats.severe}｜提醒 {stats.warning}｜通過 {stats.passed}
       </p>
     </div>
   )
@@ -657,8 +662,8 @@ function ZoneSummaryBar({ zoneName, stats, riskLevel, compatLevel, severeCnt, wa
         ))}
       </div>
       <div className="flex gap-2.5 flex-wrap">
-        <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-50 text-red-700 font-bold text-base">🔴 高風險 {severeCnt}</span>
-        <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-50 text-amber-700 font-bold text-base">🟡 警示 {warningCnt}</span>
+        <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-50 text-red-700 font-bold text-base">🔴 嚴重 {severeCnt}</span>
+        <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-50 text-blue-700 font-bold text-base">🔵 提醒 {warningCnt}</span>
         <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 font-bold text-base">🟢 通過 {passedCnt}</span>
       </div>
     </div>
@@ -929,6 +934,7 @@ function buildZoneReviews(
   blockExtents: Record<string, BlockExtent> = {},
   unit: DrawingUnit = 'cm',
   scope?: AnalysisScope,
+  layerOverrides?: Map<string, LayerOverrideAction>,
 ): ZoneReviewResult[] {
   // ── 圖層名稱 → 植物 對照表（優先於 HATCH pattern，防止同 HATCH 圖樣誤判）───
   const layerPlantKeywordMap = buildLayerPlantKeywordMap(schedule, plantDB)
@@ -1372,6 +1378,8 @@ function buildZoneReviews(
     layerPlantKeywordMap,
     scope,
     unit,
+    DEFAULT_PROXIMITY_CONFIG,
+    layerOverrides,
   )
 
   return zonePlantLists.map(zpl => {
@@ -2287,10 +2295,19 @@ export default function DxfReviewPage({
   activeTab = 'dxf',
   onTabChange,
   onImport,
+  layerOverrides,
+  onZoneReviewsUpdated,
 }: {
   activeTab?: 'pdf' | 'landscape' | 'dxf' | 'advisor'
   onTabChange?: (tab: 'pdf' | 'landscape' | 'dxf' | 'advisor') => void
   onImport?: (plantNames: string[]) => void
+  // 「AI 審查回覆」批次確認人工確認來源（灌木/地被/草皮/排除）後，套用到這裡立即
+  // 重跑整個分區分析——不是各頁各自維護一份判斷，兩邊共用同一份 override 狀態
+  // （由 App.tsx 持有，見 layerOverrideKey()）。
+  layerOverrides?: Map<string, LayerOverrideAction>
+  // 每次重新分析完成（不論是使用者上傳/切單位，或套用 layerOverrides）都呼叫一次，
+  // 讓 LandscapeAdvisorPage 知道要重新讀取 sessionStorage 的 dxf-zone-review-full。
+  onZoneReviewsUpdated?: () => void
 } = {}) {
   const [parseResult, setParseResult]     = useState<DxfParseResult | null>(null)
   const [mappings, setMappings]           = useState<MappedItem[]>([])
@@ -2395,6 +2412,7 @@ export default function DxfReviewPage({
       localStorage.removeItem('dxf-zone-review-full')
       localStorage.removeItem('dxf-zone-review-summary')
     } catch (err) { console.warn('saveZoneReviews: sessionStorage 寫入失敗（可能超過容量）', err) }
+    onZoneReviewsUpdated?.()
   }
   const [zoneDebug, setZoneDebug] = useState<ZoneAssignDebug | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
@@ -2442,11 +2460,11 @@ export default function DxfReviewPage({
     saveZoneReviews(
       buildZoneReviews(
         zonePlantLists, plants, plantSchedule.entries, parseResult?.texts ?? [], drawingRadius, parseResult?.polygons ?? [], parseResult?.layerColors ?? {},
-        mappings, parseResult?.inserts ?? [], parseResult?.blockExtents ?? {}, drawingUnit, scope,
+        mappings, parseResult?.inserts ?? [], parseResult?.blockExtents ?? {}, drawingUnit, scope, layerOverrides,
       ),
       `useEffect [polygons=${parseResult?.polygons?.length ?? 0} texts=${parseResult?.texts?.length ?? 0}]`
     )
-  }, [plants, zonePlantLists, plantSchedule.entries])
+  }, [plants, zonePlantLists, plantSchedule.entries, layerOverrides])
 
   const multiLayerResults = useMemo<MultiLayerResult[]>(() => {
     if (!parseResult || mappings.length === 0) return []
@@ -2606,7 +2624,7 @@ export default function DxfReviewPage({
     setUnitAnomaly(detectUnitAnomaly(newStats))
     if (zonePlantLists.length > 0) {
       saveZoneReviews(
-        buildZoneReviews(zonePlantLists, plants, plantSchedule.entries, parseResult.texts, drawingRadius, parseResult.polygons, parseResult.layerColors ?? {}, mappings, parseResult.inserts, parseResult.blockExtents, unit, scope),
+        buildZoneReviews(zonePlantLists, plants, plantSchedule.entries, parseResult.texts, drawingRadius, parseResult.polygons, parseResult.layerColors ?? {}, mappings, parseResult.inserts, parseResult.blockExtents, unit, scope, layerOverrides),
         'pickDrawingUnit [unit=' + unit + ']'
       )
     }
@@ -2765,15 +2783,15 @@ export default function DxfReviewPage({
   </div>
   <div class="kpi-grid no-break">
     <div class="kpi"><div class="kpi-v" style="color:#1a4731">${zoneReviews.length}</div><div class="kpi-l">分區數量</div></div>
-    <div class="kpi"><div class="kpi-v" style="color:${overallDanger > 0 ? '#dc2626' : '#57534e'}">${overallDanger}</div><div class="kpi-l">高風險問題數</div></div>
-    <div class="kpi"><div class="kpi-v" style="color:${overallCaution > 0 ? '#d97706' : '#57534e'}">${overallCaution}</div><div class="kpi-l">一般改善問題數</div></div>
+    <div class="kpi"><div class="kpi-v" style="color:${overallDanger > 0 ? '#dc2626' : '#57534e'}">${overallDanger}</div><div class="kpi-l">嚴重問題數</div></div>
+    <div class="kpi"><div class="kpi-v" style="color:${overallCaution > 0 ? '#2563eb' : '#57534e'}">${overallCaution}</div><div class="kpi-l">提醒問題數</div></div>
     <div class="kpi"><div class="kpi-v" style="color:${overallNeedsReview > 0 ? '#b45309' : '#57534e'}">${overallNeedsReview}</div><div class="kpi-l">需人工確認數</div></div>
   </div>
   <div class="priority-box no-break">
     <div class="priority-title">最優先修正事項</div>
     ${top3.length > 0
       ? top3.map((e, i) => `<div class="priority-line">${i + 1}. 【${esc(e.zoneName)}${esc(e.id)}】${esc(e.title)}</div>`).join('')
-      : `<p style="color:#15803d;font-size:13px">✅ 全案未發現需優先修正之高風險項目。</p>`}
+      : `<p style="color:#15803d;font-size:13px">✅ 全案未發現需優先修正之嚴重項目。</p>`}
   </div>
   <p class="ai-disclaimer">AI 判讀結果仍建議由專業人員（景觀設計師／審查委員）現場或圖面覆核，本報告不取代專業判斷。</p>
 </div>`
@@ -2789,14 +2807,14 @@ export default function DxfReviewPage({
   <div class="sec-body no-break">
     ${overviewSvg ? `<div style="text-align:center">${overviewSvg}</div>` : `<p style="color:#78716c;font-size:13px;margin-bottom:10px">本圖面未偵測到可繪製之分區邊界，僅列出統計數據。</p>`}
     <table style="margin-top:14px">
-      <thead><tr><th></th><th>分區</th><th>分數</th><th>高風險</th><th>一般改善</th><th>需人工確認</th><th>審查狀態</th></tr></thead>
+      <thead><tr><th></th><th>分區</th><th>分數</th><th>嚴重</th><th>提醒</th><th>需人工確認</th><th>審查狀態</th></tr></thead>
       <tbody>${zoneReviews.map((r, i) => {
         const s = zoneSummaries[i]
         return `<tr><td><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${getZoneColor(i)}"></span></td>
         <td><strong>${esc(r.zoneName)}</strong></td>
         <td style="color:${scoreColor(s.score)};font-weight:700">${s.score}</td>
         <td style="color:${s.dangerCount > 0 ? '#dc2626' : '#78716c'}">${s.dangerCount}</td>
-        <td style="color:${s.cautionCount > 0 ? '#d97706' : '#78716c'}">${s.cautionCount}</td>
+        <td style="color:${s.cautionCount > 0 ? '#2563eb' : '#78716c'}">${s.cautionCount}</td>
         <td style="color:${s.needsReviewCount > 0 ? '#b45309' : '#78716c'}">${s.needsReviewCount}</td>
         <td style="color:${statusColor(r.status)}">${esc(r.status)}</td></tr>`
       }).join('')}</tbody>
@@ -2833,7 +2851,7 @@ export default function DxfReviewPage({
         <td>面積</td><td>${areaStats ? areaStats.zoneAreaM2.toFixed(1) + ' m²' : '—'}</td></tr>
         <tr><td>喬木數</td><td>${areaStats?.treeTotalCount ?? r.spatialInstances.filter(i => i.kind === 'tree').length}</td>
         <td>灌木／地被面積</td><td>${areaStats ? (areaStats.shrubAreaM2 + areaStats.groundLawnAreaM2).toFixed(1) + ' m²' : '—'}</td></tr>
-        <tr><td>高風險／一般改善／需人工確認</td><td colspan="3">${groupDangerCount} ／ ${groupCautionCount} ／ ${nr.count}</td></tr>
+        <tr><td>嚴重／提醒／需人工確認</td><td colspan="3">${groupDangerCount} ／ ${groupCautionCount} ／ ${nr.count}</td></tr>
       </tbody>
     </table>
     <div style="margin-top:12px">
@@ -2850,7 +2868,7 @@ export default function DxfReviewPage({
         const groupCardsHtml = groups.length > 0 ? groups.map(g => `
     <div class="issue no-break ${g.maxSeverity}">
       <div class="i-title">${esc(g.id)}｜${esc(g.title)}</div>
-      <span class="badge ${g.maxSeverity === 'danger' ? 'b-d' : 'b-c'}">${g.maxSeverity === 'danger' ? '高風險' : '一般改善'}</span>
+      <span class="badge ${g.maxSeverity === 'danger' ? 'b-d' : 'b-c'}">${g.maxSeverity === 'danger' ? '嚴重' : '提醒'}</span>
       <div class="i-lbl">涉及植物</div><div class="i-txt">${esc(g.plantNames.join('、'))}</div>
       <div class="i-lbl">圖面位置</div><div class="i-txt" style="font-family:monospace">${esc(g.locationCodes.join('／'))}</div>
       <div class="i-lbl">問題類型</div><div class="i-txt">${esc(BUCKET_LABEL[g.primaryBucket])}${g.secondaryBuckets.length > 0 ? `（同時涉及：${esc(g.secondaryBuckets.map(b => BUCKET_LABEL[b]).join('、'))}）` : ''}</div>
@@ -2863,7 +2881,7 @@ export default function DxfReviewPage({
         const needsReviewHtml = nr.count > 0 ? `
     <div class="no-break" style="margin-top:16px;padding:12px;background:#fffbeb;border-radius:6px">
       <div style="font-weight:700;color:#b45309;margin-bottom:6px">需人工確認（共 ${nr.count} 筆）</div>
-      <div style="font-size:13px;color:#44403c;margin-bottom:8px">${esc(nr.reasonSummary)}，皆因資料不足無法確認是否為實際衝突，不列入高風險或扣分計算。</div>
+      <div style="font-size:13px;color:#44403c;margin-bottom:8px">${esc(nr.reasonSummary)}，皆因資料不足無法確認是否為實際衝突，不列入嚴重項目或扣分計算。</div>
       <div style="font-size:12px;color:#78716c;margin-bottom:4px">代表案例：</div>
       <ul style="padding-left:18px;font-size:12px;color:#44403c;line-height:1.6">${nr.representatives.map(e => `<li>${esc(e.plantAName)}×${esc(e.plantBName)}（${esc(e.overlapLabel)}）</li>`).join('')}</ul>
       <p style="font-size:12px;color:#78716c;margin-top:4px">完整清單（共 ${nr.count} 筆）詳見技術附錄。</p>
@@ -2895,7 +2913,7 @@ export default function DxfReviewPage({
   <div class="sec-body">
     <p class="no-break" style="font-size:13px;color:#44403c;line-height:1.8">
       ${esc(overallScore.reasonLine)}。本次共分析 ${zoneReviews.length} 個分區，全案綜合評估為「${esc(overallScore.tier)}」（${esc(overallScore.tierNote)}）。
-      ${overallDanger > 0 ? '建議優先處理高風險項目後再提送審查，需人工確認事項請於施工前完成現場或圖面覆核。' : '整體配置相容性良好，建議依常規養護計畫執行並持續留意一般改善事項。'}
+      ${overallDanger > 0 ? '建議優先處理嚴重項目後再提送審查，需人工確認事項請於施工前完成現場或圖面覆核。' : '整體配置相容性良好，建議依常規養護計畫執行並持續留意提醒事項。'}
     </p>
     ${finalPriority.length > 0 ? `
     <div class="no-break" style="margin-top:14px">
@@ -2951,11 +2969,11 @@ body{font-family:'Microsoft JhengHei','微軟正黑體','Noto Sans TC',Arial,san
 .sec-body{border:1px solid #d4e8d4;border-top:none;border-radius:0 0 6px 6px;padding:18px}
 .issue{border:1px solid #e7e5e4;border-radius:8px;padding:16px;margin-bottom:12px;margin-top:14px}
 .issue.danger{border-left:4px solid #dc2626}
-.issue.caution{border-left:4px solid #d97706}
+.issue.caution{border-left:4px solid #2563eb}
 .issue.needs-review{border-left:4px solid #ca8a04}
 .i-title{font-size:20px;font-weight:700;margin-bottom:8px}
 .badge{display:inline-block;padding:2px 10px;border-radius:99px;font-size:12px;font-weight:700;margin-bottom:10px}
-.b-d{background:#fef2f2;color:#dc2626}.b-c{background:#fffbeb;color:#d97706}.b-r{background:#fefce8;color:#b45309}
+.b-d{background:#fef2f2;color:#dc2626}.b-c{background:#eff6ff;color:#2563eb}.b-r{background:#fefce8;color:#b45309}
 .i-lbl{font-size:15px;color:#374151;font-weight:700;margin-top:8px;margin-bottom:4px}
 .i-txt{font-size:14px;color:#44403c;line-height:1.5}
 .review-note{margin-top:10px;padding:8px 10px;background:#fffbeb;border-radius:6px;font-size:12.5px;color:#92400e}
@@ -3165,6 +3183,7 @@ ${appendixHtml}`
           <ZoneReviewTab
             reviews={zoneReviews}
             zoneStatistics={zoneStatistics}
+            detectedZones={detectedZones}
             onAskAI={q => setAiDrawerQuestion(q)} />
         )}
 
@@ -3889,17 +3908,19 @@ function ExcludedTab({ excluded, onRestore }: { excluded: MappedItem[]; onRestor
 
 // ── Zone Review tab ───────────────────────────────────────────────────────────
 
+// 嚴重＝紅、提醒＝藍、通過＝綠；需調整配置／高風險不建議都屬於嚴重層級，同色不同深淺
 const COMPAT_CLS: Record<string, string> = {
   '配置良好':       'bg-emerald-50 border-emerald-300 text-emerald-800',
-  '可行但需補充說明': 'bg-amber-50 border-amber-300 text-amber-800',
-  '需調整配置':     'bg-orange-50 border-orange-300 text-orange-800',
-  '高風險不建議':   'bg-red-50 border-red-300 text-red-800',
+  '可行但需補充說明': 'bg-blue-50 border-blue-300 text-blue-800',
+  '需調整配置':     'bg-red-50 border-red-300 text-red-800',
+  '高風險不建議':   'bg-red-100 border-red-400 text-red-900',
 }
 
-function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
+function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones }: {
   reviews: ZoneReviewResult[]
   onAskAI?: (q: string) => void
   zoneStatistics: ZoneStatisticsResult[]
+  detectedZones: DetectedZone[]
 }) {
   const [activeTab, setActiveTab] = useState<string>('overview')
   const [zoneSubTab, setZoneSubTab] = useState<'overview' | 'issues' | 'pending'>('overview')
@@ -3907,6 +3928,10 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
   const [riskFilter, setRiskFilter] = useState<'all' | 'severe' | 'warning' | 'passed'>('all')
   const [categoryFilter, setCategoryFilter] = useState<'all' | IssueCategoryGroup>('all')
   const [locatorTarget, setLocatorTarget] = useState<PlantConflictResult | null>(null)
+  const [quickPanelZone, setQuickPanelZone] = useState<string | null>(null)
+  const [quickPanelIssueId, setQuickPanelIssueId] = useState<string | null>(null)
+  const [focusedIssueId, setFocusedIssueId] = useState<string | null>(null)
+  const [fixPlanZone, setFixPlanZone] = useState<ZoneReviewResult | null>(null)
 
   if (reviews.length === 0) return (
     <div className="flex flex-col items-center justify-center py-20 text-stone-400 gap-3">
@@ -3928,18 +3953,78 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
   const riskBadgeCls = (r: ZoneReviewResult) => {
     const level = r.evalResult?.overallRiskLevel
     if (level === '高') return 'bg-red-100 text-red-700 border-red-300'
-    if (level === '中') return 'bg-amber-100 text-amber-700 border-amber-300'
+    if (level === '中') return 'bg-blue-100 text-blue-700 border-blue-300'
     if (level === '低') return 'bg-emerald-100 text-emerald-700 border-emerald-300'
     return 'bg-stone-100 text-stone-500 border-stone-200'
   }
   const riskLabel = (r: ZoneReviewResult) => {
     const level = r.evalResult?.overallRiskLevel
-    if (level === '高') return '高風險'
-    if (level === '中') return '中風險'
-    if (level === '低') return '低風險'
+    if (level === '高') return '嚴重'
+    if (level === '中') return '提醒'
+    if (level === '低') return '通過'
     return r.status === '植物待確認' ? '待確認' : '無資料'
   }
   const plantCount = (r: ZoneReviewResult) => r.blockEntries.reduce((s, b) => s + b.count, 0)
+
+  // AI 審查結論／修正方案：全部從 reviews（既有 evalResult／proximityConflicts）
+  // 動態算出，見 aiReviewNarrative.ts 檔頭說明——不寫死示範內容。
+  const reviewSummary = generateReviewSummary(reviews)
+  const fixPlanTargetName = fixPlanZone?.zoneName
+  const fixPlans = fixPlanZone ? generateFixPlans(fixPlanZone) : null
+  const fixPlanRecommend = fixPlans
+    ? recommendFixPlan(fixPlans, fixPlanZone!.evalResult?.issues.filter(i => i.level === 'danger').length ?? 0)
+    : null
+  const topPriorityZoneName = reviewSummary.priorityZones[0]?.zoneName
+
+  // ── 分區總覽圖資料組裝：座標／面積／植栽統計全部直接讀既有資料，不新增偵測 ──
+  const buildIssuePoints = (r: ZoneReviewResult): ZoneMapIssuePoint[] => r.proximityConflicts
+    .filter(c => c.riskLevel === 'high' || c.riskLevel === 'medium')
+    .map(c => {
+      const a = r.spatialInstances?.find(s => s.id === c.plantA.instanceId)
+      const b = r.spatialInstances?.find(s => s.id === c.plantB.instanceId)
+      if (!a || !b) return null
+      const severity: 'danger' | 'caution' = c.riskLevel === 'high' ? 'danger' : 'caution'
+      return { id: c.id, x: (a.center.x + b.center.x) / 2, y: (a.center.y + b.center.y) / 2, severity }
+    })
+    .filter((p): p is ZoneMapIssuePoint => !!p)
+
+  const buildQuickPanelIssues = (r: ZoneReviewResult): QuickPanelIssue[] => r.proximityConflicts
+    .map(c => {
+      const level: QuickPanelIssue['level'] = c.riskLevel === 'high' ? 'danger' : c.riskLevel === 'medium' ? 'caution' : 'passed'
+      if (c.riskLevel === 'unmatched') {
+        return { id: c.id, title: '植物名稱未能比對到資料庫', level, reason: c.locationLabel }
+      }
+      const categoryResults = buildCategoryResults(c.issues)
+      const fallbackCategory = classifyCategory(c.issues[0]?.category)
+      const displayCategory = pickPrimaryCategory(categoryResults, fallbackCategory)
+      const primaryResult = categoryResults.find(cr => cr.category === displayCategory)
+      return { id: c.id, title: primaryResult?.title ?? c.locationLabel, level, reason: primaryResult?.summary ?? c.locationLabel }
+    })
+    .sort((a, b) => ({ danger: 0, caution: 1, passed: 2 }[a.level]) - ({ danger: 0, caution: 1, passed: 2 }[b.level]))
+
+  const buildMapEntries = (): ZoneMapEntry[] => reviews.map((r, i) => {
+    const stats = zoneStatistics.find(s => s.zoneId === r.zoneName)
+    return {
+      zoneName: r.zoneName,
+      boundary: detectedZones.find(z => z.name === r.zoneName)?.boundary,
+      labelPosition: detectedZones.find(z => z.name === r.zoneName)?.labelPosition,
+      areaM2: stats?.zoneAreaM2 ?? r.boundaryArea,
+      plantSummary: stats ? `喬木 ${stats.treeTotalCount} 株・灌木地被 ${stats.plantingAreaM2.toFixed(1)} ㎡` : undefined,
+      dangerCount: r.evalResult?.issues.filter(i2 => i2.level === 'danger').length ?? 0,
+      cautionCount: r.evalResult?.issues.filter(i2 => i2.level === 'caution').length ?? 0,
+      passedCount: r.proximityConflicts.filter(c => c.riskLevel === 'low' || c.riskLevel === 'unmatched').length,
+      colorIndex: i,
+      issuePoints: buildIssuePoints(r),
+    }
+  })
+  const focusPointsForZone = (zoneName: string): FocusPoint[] | undefined => {
+    if (!locatorTarget || locatorTarget.zoneName !== zoneName) return undefined
+    const r = reviews.find(rr => rr.zoneName === zoneName)
+    const a = r?.spatialInstances?.find(s => s.id === locatorTarget.plantA.instanceId)
+    const b = r?.spatialInstances?.find(s => s.id === locatorTarget.plantB.instanceId)
+    const severity = locatorTarget.riskLevel === 'high' ? 'danger' as const : 'caution' as const
+    return [a, b].filter((p): p is SpatialPlantInstance => !!p).map(p => ({ x: p.center.x, y: p.center.y, severity }))
+  }
 
   return (
     <div className="space-y-4">
@@ -3956,33 +4041,37 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
             }`}>
             總覽
           </button>
-          {/* 各分區 tab */}
-          {reviews.map(r => {
-            const itemCnt = r.proximityConflicts.length
-            const riskLevel = r.evalResult?.overallRiskLevel
-            const isActive = activeTab === r.zoneName
-            return (
-              <button key={r.zoneName}
-                onClick={() => setActiveTab(r.zoneName)}
-                className={`flex-shrink-0 flex items-center gap-2 px-5 py-3 text-base font-semibold border-b-2 transition-colors whitespace-nowrap ${
-                  isActive
-                    ? 'border-green-600 text-green-700 bg-green-50'
-                    : 'border-transparent text-stone-500 hover:text-stone-700 hover:bg-stone-50'
-                }`}>
-                {r.zoneName}
-                {itemCnt > 0 && <span className="text-sm font-normal text-stone-400">{itemCnt} 項</span>}
-                {riskLevel === '高' && (
-                  <span className="inline-block w-2.5 h-2.5 rounded-full bg-red-500" title="高風險" />
-                )}
-                {riskLevel === '中' && (
-                  <span className="inline-block w-2.5 h-2.5 rounded-full bg-amber-400" title="中風險" />
-                )}
-                {riskLevel === '低' && (
-                  <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-500" title="低風險" />
-                )}
-              </button>
-            )
-          })}
+          {/* 各分區 tab：高風險分區排前面，並直接標出嚴重／提醒數量，不用只靠顏色圓點猜 */}
+          {[...reviews]
+            .map(r => ({
+              r,
+              dangerCnt: r.evalResult?.issues.filter(i2 => i2.level === 'danger').length ?? 0,
+              cautionCnt: r.evalResult?.issues.filter(i2 => i2.level === 'caution').length ?? 0,
+            }))
+            .sort((a, b) => (b.dangerCnt - a.dangerCnt) || (b.cautionCnt - a.cautionCnt))
+            .map(({ r, dangerCnt, cautionCnt }) => {
+              const isActive = activeTab === r.zoneName
+              return (
+                <button key={r.zoneName}
+                  onClick={() => setActiveTab(r.zoneName)}
+                  className={`flex-shrink-0 flex items-center gap-1.5 px-5 py-3 text-base font-semibold border-b-2 transition-colors whitespace-nowrap ${
+                    isActive
+                      ? 'border-green-600 text-green-700 bg-green-50'
+                      : dangerCnt > 0 ? 'border-transparent text-stone-700 hover:bg-stone-50' : 'border-transparent text-stone-500 hover:text-stone-700 hover:bg-stone-50'
+                  }`}>
+                  {r.zoneName}
+                  {dangerCnt > 0 && (
+                    <span className="text-xs font-bold px-1.5 py-0.5 rounded-full bg-red-100 text-red-700">嚴重{dangerCnt}</span>
+                  )}
+                  {cautionCnt > 0 && (
+                    <span className="text-xs font-bold px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700">提醒{cautionCnt}</span>
+                  )}
+                  {dangerCnt === 0 && cautionCnt === 0 && (
+                    <span className="text-xs font-medium px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700">通過</span>
+                  )}
+                </button>
+              )
+            })}
         </div>
 
         {/* ── 總覽內容 ── */}
@@ -4003,7 +4092,65 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
               )}
             </div>
 
-            {/* 各區卡片（點擊跳至對應 tab）*/}
+            {/* AI 審查結論（統計標籤與問題列表之間）*/}
+            {reviewSummary.stats.zoneCount > 0 && (
+              <AIReviewSummary
+                summary={reviewSummary}
+                onSelectZone={setActiveTab}
+                onGenerateFixPlan={topPriorityZoneName ? () => setFixPlanZone(reviews.find(r => r.zoneName === topPriorityZoneName) ?? null) : undefined}
+              />
+            )}
+
+            {/* 植栽分區配置總覽：先看整體空間關係，再看局部問題 */}
+            {(() => {
+              const mapZones = buildMapEntries()
+              const hasAnyBoundary = mapZones.some(z => z.boundary && z.boundary.vertices.length >= 3)
+              if (!hasAnyBoundary) return null
+              return (
+                <div className="bg-white rounded-2xl border border-stone-200 p-4 space-y-3">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <h3 className="text-base font-bold text-stone-800">植栽分區配置總覽</h3>
+                    <p className="text-sm text-stone-500">點選分區可篩選該區問題；滑鼠移入可查看面積與植栽概況</p>
+                  </div>
+                  <div className="flex justify-center">
+                    <ZoneOverviewMap
+                      zones={mapZones}
+                      activeZoneName={quickPanelZone}
+                      onSelectZone={zn => { setQuickPanelZone(zn); setQuickPanelIssueId(null) }}
+                      onReset={() => { setQuickPanelZone(null); setQuickPanelIssueId(null) }}
+                      selectedIssueId={quickPanelIssueId}
+                      onSelectIssuePoint={(zn, id) => { setQuickPanelZone(zn); setQuickPanelIssueId(id) }}
+                    />
+                  </div>
+                  <p className="text-sm text-green-700 bg-green-50 border border-green-100 rounded-lg px-3 py-2">
+                    {generateMapInsight(reviewSummary)}
+                  </p>
+
+                  {/* 分區快覽面板：點選分區後不離開總覽頁就能看到完整摘要與問題列表 */}
+                  {quickPanelZone && (() => {
+                    const qr = reviews.find(rr => rr.zoneName === quickPanelZone)
+                    if (!qr) return null
+                    return (
+                      <ZoneQuickPanel
+                        zoneName={qr.zoneName}
+                        riskLabel={riskLabel(qr)}
+                        dangerCount={qr.evalResult?.issues.filter(i2 => i2.level === 'danger').length ?? 0}
+                        cautionCount={qr.evalResult?.issues.filter(i2 => i2.level === 'caution').length ?? 0}
+                        passedCount={qr.proximityConflicts.filter(c => c.riskLevel === 'low' || c.riskLevel === 'unmatched').length}
+                        aiOneLiner={generateZoneOneLiner(qr)}
+                        issues={buildQuickPanelIssues(qr)}
+                        selectedIssueId={quickPanelIssueId}
+                        onSelectIssue={id => setQuickPanelIssueId(id)}
+                        onViewFull={() => { setActiveTab(qr.zoneName); setQuickPanelZone(null) }}
+                        onClose={() => { setQuickPanelZone(null); setQuickPanelIssueId(null) }}
+                      />
+                    )
+                  })()}
+                </div>
+              )
+            })()}
+
+            {/* 各區卡片（點擊開啟快覽面板）*/}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {reviews.map(r => {
                 const dangerCnt  = r.evalResult?.issues.filter(i => i.level === 'danger').length ?? 0
@@ -4011,7 +4158,7 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
                 const cnt = plantCount(r)
                 return (
                   <button key={r.zoneName}
-                    onClick={() => setActiveTab(r.zoneName)}
+                    onClick={() => { setQuickPanelZone(r.zoneName); setQuickPanelIssueId(null) }}
                     className="text-left p-4 rounded-xl border border-stone-200 hover:border-green-300 hover:bg-green-50/30 transition-colors group">
                     <div className="flex items-center justify-between mb-2">
                       <span className="text-lg font-bold text-stone-800 group-hover:text-green-800">{r.zoneName}</span>
@@ -4032,13 +4179,13 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
                       )}
                       {dangerCnt > 0 && (
                         <div className="flex justify-between text-red-600">
-                          <span>高風險問題</span>
+                          <span>嚴重問題</span>
                           <span className="font-semibold">{dangerCnt} 項</span>
                         </div>
                       )}
                       {cautionCnt > 0 && (
-                        <div className="flex justify-between text-amber-600">
-                          <span>注意事項</span>
+                        <div className="flex justify-between text-blue-600">
+                          <span>提醒事項</span>
                           <span className="font-semibold">{cautionCnt} 項</span>
                         </div>
                       )}
@@ -4073,7 +4220,7 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
                         <th className="px-4 py-2.5 text-center text-stone-600 font-semibold border-b border-stone-200">健康度</th>
                         <th className="px-4 py-2.5 text-center text-stone-600 font-semibold border-b border-stone-200">風險等級</th>
                         <th className="px-4 py-2.5 text-center text-stone-600 font-semibold border-b border-stone-200">問題數</th>
-                        <th className="px-4 py-2.5 text-center text-stone-600 font-semibold border-b border-stone-200">高風險</th>
+                        <th className="px-4 py-2.5 text-center text-stone-600 font-semibold border-b border-stone-200">嚴重</th>
                         <th className="px-4 py-2.5 text-left text-stone-600 font-semibold border-b border-stone-200">主要問題</th>
                       </tr>
                     </thead>
@@ -4207,6 +4354,36 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
                 )}
               </div>
 
+              {/* 分區總覽圖（本區高亮，其餘淡化）：點其他分區可直接跳頁查看，
+                  問題卡片開啟定位時（locatorTarget）疊加該問題的實際座標點 */}
+              {(() => {
+                const mapZones = buildMapEntries()
+                const hasAnyBoundary = mapZones.some(z => z.boundary && z.boundary.vertices.length >= 3)
+                if (!hasAnyBoundary) return null
+                return (
+                  <div className="flex justify-center">
+                    <ZoneOverviewMap
+                      zones={mapZones}
+                      activeZoneName={r.zoneName}
+                      onSelectZone={setActiveTab}
+                      onReset={() => setActiveTab('overview')}
+                      focusPoints={focusPointsForZone(r.zoneName)}
+                      selectedIssueId={focusedIssueId}
+                      onSelectIssuePoint={(_zn, issueId) => {
+                        setFocusedIssueId(issueId)
+                        setZoneSubTab('issues')
+                        setRiskFilter('all')
+                        setCategoryFilter('all')
+                        setShowAllIssues(true)
+                        requestAnimationFrame(() => {
+                          document.getElementById(`issue-card-${issueId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                        })
+                      }}
+                      widthPx={520} maxHeightPx={280} />
+                  </div>
+                )
+              })()}
+
               <ZoneSummaryBar
                 zoneName={r.zoneName}
                 stats={stats}
@@ -4219,9 +4396,18 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
 
               {/* AI 審查建議（置頂，三個子頁籤都看得到）*/}
               {r.evalResult && (
-                <div className="p-4 bg-stone-50 border border-stone-200 rounded-xl">
-                  <p className="text-base font-bold text-stone-600 mb-1.5">AI 審查建議</p>
-                  <p className="text-base text-stone-700 leading-relaxed">{r.evalResult.aiSuggestion}</p>
+                <div className="p-4 bg-stone-50 border border-stone-200 rounded-xl flex items-start justify-between gap-3 flex-wrap">
+                  <div className="min-w-0">
+                    <p className="text-base font-bold text-stone-600 mb-1.5">AI 審查建議</p>
+                    <p className="text-base text-stone-700 leading-relaxed">{r.evalResult.aiSuggestion}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setFixPlanZone(r)}
+                    className="flex-shrink-0 px-3.5 py-2 rounded-xl bg-[#1a4731] text-white text-sm font-semibold hover:bg-[#2d6a4f] transition-colors whitespace-nowrap"
+                  >
+                    讓 AI 產生修正方案
+                  </button>
                 </div>
               )}
 
@@ -4389,7 +4575,9 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
                         <p className="text-sm font-bold text-red-600">🔴 嚴重（{severeCards.length}）</p>
                         <div className="grid grid-cols-1 gap-3">
                           {severeCards.map(c => (
-                            <ProximityConflictCard key={c.id} conflict={c} onLocate={setLocatorTarget} defaultExpanded emphasizeCategory={emphasizeCategory} />
+                            <div key={c.id} id={`issue-card-${c.id}`} className={focusedIssueId === c.id ? 'ring-2 ring-green-500 rounded-2xl' : ''}>
+                              <ProximityConflictCard conflict={c} onLocate={setLocatorTarget} defaultExpanded emphasizeCategory={emphasizeCategory} alternatives={r.evalResult?.alternatives} />
+                            </div>
                           ))}
                         </div>
                       </div>
@@ -4397,10 +4585,12 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
 
                     {(riskFilter === 'all' || riskFilter === 'warning') && warningCards.length > 0 && (
                       <div className="space-y-2">
-                        <p className="text-sm font-bold text-amber-600">🟡 警示（{warningCards.length}）</p>
+                        <p className="text-sm font-bold text-blue-600">🔵 提醒（{warningCards.length}）</p>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                           {visibleWarningCards.map(c => (
-                            <ProximityConflictCard key={c.id} conflict={c} onLocate={setLocatorTarget} emphasizeCategory={emphasizeCategory} />
+                            <div key={c.id} id={`issue-card-${c.id}`} className={focusedIssueId === c.id ? 'ring-2 ring-green-500 rounded-2xl' : ''}>
+                              <ProximityConflictCard conflict={c} onLocate={setLocatorTarget} emphasizeCategory={emphasizeCategory} alternatives={r.evalResult?.alternatives} />
+                            </div>
                           ))}
                         </div>
                         {hiddenWarningCount > 0 && (
@@ -4426,7 +4616,9 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
                       riskFilter === 'passed' ? (
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                           {passedCards.map(c => (
-                            <ProximityConflictCard key={c.id} conflict={c} onLocate={setLocatorTarget} emphasizeCategory={emphasizeCategory} />
+                            <div key={c.id} id={`issue-card-${c.id}`} className={focusedIssueId === c.id ? 'ring-2 ring-green-500 rounded-2xl' : ''}>
+                              <ProximityConflictCard conflict={c} onLocate={setLocatorTarget} emphasizeCategory={emphasizeCategory} alternatives={r.evalResult?.alternatives} />
+                            </div>
                           ))}
                         </div>
                       ) : (
@@ -4436,7 +4628,9 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
                           </summary>
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2">
                             {passedCards.map(c => (
-                              <ProximityConflictCard key={c.id} conflict={c} onLocate={setLocatorTarget} />
+                              <div key={c.id} id={`issue-card-${c.id}`} className={focusedIssueId === c.id ? 'ring-2 ring-green-500 rounded-2xl' : ''}>
+                                <ProximityConflictCard conflict={c} onLocate={setLocatorTarget} alternatives={r.evalResult?.alternatives} />
+                              </div>
                             ))}
                           </div>
                         </details>
@@ -4447,7 +4641,7 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
                       <p className="text-sm text-stone-400 py-4 text-center">此分區沒有嚴重項目。</p>
                     )}
                     {riskFilter === 'warning' && warningCards.length === 0 && (
-                      <p className="text-sm text-stone-400 py-4 text-center">此分區沒有警示項目。</p>
+                      <p className="text-sm text-stone-400 py-4 text-center">此分區沒有提醒項目。</p>
                     )}
                     {riskFilter === 'passed' && passedCards.length === 0 && (
                       <p className="text-sm text-stone-400 py-4 text-center">此分區沒有已通過項目。</p>
@@ -4713,6 +4907,16 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics }: {
           )
         })()}
       </div>
+
+      {fixPlanZone && fixPlans && fixPlanRecommend && (
+        <AIFixPlanModal
+          zoneName={fixPlanTargetName ?? fixPlanZone.zoneName}
+          plans={fixPlans}
+          recommendedId={fixPlanRecommend.id}
+          recommendReason={fixPlanRecommend.reason}
+          onClose={() => setFixPlanZone(null)}
+        />
+      )}
     </div>
   )
 }
