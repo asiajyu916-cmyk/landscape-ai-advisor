@@ -2,12 +2,13 @@ import { useState, useRef, useCallback, useMemo, useEffect, Fragment } from 'rea
 import { createPortal } from 'react-dom'
 import {
   Upload, FileText, AlertTriangle, CheckCircle, HelpCircle,
-  ChevronDown, X, ArrowRight, Layers, Trash2, BookOpen, Table2, FileOutput, Sparkles,
+  ChevronDown, X, ArrowRight, Layers, Trash2, BookOpen, Table2, FileOutput,
 } from 'lucide-react'
 import { parseDxf, detectPlantSchedule, findNearbyTexts } from '@/utils/dxfParser'
 import { analyzeMultiLayer, zoneLabel, detectZonesFromText, buildZonePlantList, buildZoneAssignDebug, polygonBBox, polygonArea, pointInPolygon, detectAnalysisScope, SCHEDULE_KEYWORD_RE } from '@/utils/spatialAnalysis'
 import type { ZoneAssignDebug, AnalysisScope } from '@/utils/spatialAnalysis'
 import { buildZoneStatistics, unitFromInsUnits } from '@/utils/zoneStatistics'
+import { detectAndAlignDuplicatePlans, mergeAlignedInsertsIntoParseResult } from '@/utils/planClusters'
 import { exportHtmlAsPaginatedPdf } from '@/utils/pdfCanvasExport'
 import {
   escHtml, scoreColor, statusColor, getZoneColor, SPATIAL_KIND_LEGEND,
@@ -2490,7 +2491,33 @@ export default function DxfReviewPage({
     try {
       const { text, encoding } = await readDxfWithEncoding(file)
       setDetectedEnc(encoding)
-      const result = parseDxf(text)
+      const rawResult = parseDxf(text)
+
+      // ── 同基地多圖偵測與對位（見 planClusters.ts 檔頭說明）：部分 DXF 在同一
+      // 座標系內並排放置兩張同基地圖面（例如左側喬木配置圖／右側灌木地被配置
+      // 圖），既有分區偵測只認得第一份出現的分區文字與邊界，另一側圖面的喬木
+      // INSERT 因此找不到分區邊界可比對而遺失。這裡先用「原始」texts/polygons
+      // 算出 canonical 分區（不受此步驟影響），再偵測是否有重複分區標籤＋一致
+      // 位移量，把對位後落入分區邊界的喬木併回 inserts，才進入後續 mapping／
+      // 分區統計流程——同一份 result 全流程共用，不是只在單一畫面加數字。
+      const scope = detectAnalysisScope(rawResult.texts, rawResult.polygons)
+      const zones = detectZonesFromText(rawResult.texts, rawResult.polygons, scope)
+      const { extraInserts, debug: planAlignDebug } = detectAndAlignDuplicatePlans(rawResult, zones)
+      const result = mergeAlignedInsertsIntoParseResult(rawResult, extraInserts)
+
+      console.group('🗺️ 同基地多圖偵測與對位（planClusters）')
+      console.debug(`偵測到重複分區標籤：${planAlignDebug.duplicateZoneLabelsFound ? '是' : '否'}　一致位移的分區名稱數：${planAlignDebug.matchedZoneNameCount}`)
+      console.debug(`判定為同基地多圖：${planAlignDebug.isSameSitePlan ? '是' : '否'}　圖群數：${planAlignDebug.clusterCount}`)
+      if (planAlignDebug.translation) {
+        console.debug(`對位位移向量：dx=${planAlignDebug.translation.dx.toFixed(2)}　dy=${planAlignDebug.translation.dy.toFixed(2)}（純平移）`)
+      }
+      if (planAlignDebug.canonicalCluster) console.debug('Canonical 圖群 bbox／內容類型：', planAlignDebug.canonicalCluster.bbox, planAlignDebug.canonicalCluster.contentType)
+      if (planAlignDebug.secondaryCluster) console.debug('Secondary 圖群 bbox／內容類型：', planAlignDebug.secondaryCluster.bbox, planAlignDebug.secondaryCluster.contentType)
+      console.debug(`對位前候選喬木 INSERT 數：${planAlignDebug.candidateTreeInsertCount}　對位後成功併入分區數：${planAlignDebug.alignedTreeInsertCount}`)
+      console.debug(`去重略過（與既有喬木位置重複）：${planAlignDebug.dedupedSkippedCount}　對位後仍未歸區：${planAlignDebug.unassignedAfterAlignCount}`)
+      if (Object.keys(planAlignDebug.perZoneAddedCount).length > 0) console.table(planAlignDebug.perZoneAddedCount)
+      console.groupEnd()
+
       setParseResult(result)
       const dbRes = await loadPlantsWithCsvMerge()
       const loaded = dbRes.plants
@@ -2520,9 +2547,8 @@ export default function DxfReviewPage({
       setMappings(active)
       setExcluded(exc)
 
-      // 分區空間識別（固定流程：評估範圍 → 排除索引表區 → 分區 polyline → 區內 entity）
-      const scope = detectAnalysisScope(result.texts, result.polygons)
-      const zones = detectZonesFromText(result.texts, result.polygons, scope)
+      // 分區空間識別（scope／zones 已在同基地多圖對位前算好，此處直接沿用，
+      // 避免重算——result.polygons 本身未受對位影響，重算也會得到相同結果）
       setDetectedZones(zones)
       const zpl = buildZonePlantList(zones, active, result.polygons, result.inserts, result.blockExtents, scope)
       setZonePlantLists(zpl)
@@ -4203,7 +4229,6 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones, drawin
                 const cautionCnt = r.evalResult?.issues.filter(i => i.level === 'caution').length ?? 0
                 const cnt = plantCount(r)
                 const boundary = detectedZones.find(z => z.name === r.zoneName)?.boundary
-                const confidence = zoneMatchConfidence(r)
                 const issuePointCount = dangerCnt + cautionCnt
                 const colorIndex = reviews.findIndex(rr => rr.zoneName === r.zoneName)
                 return (
@@ -4212,9 +4237,6 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones, drawin
                     className="text-left rounded-2xl border border-stone-200 bg-white hover:border-emerald-300 hover:shadow-md transition-all group overflow-hidden">
                     <div className="relative">
                       <ZoneMiniPreview boundary={boundary} colorIndex={colorIndex} riskColor={riskColorHex(r)} issuePointCount={issuePointCount} heightPx={132} />
-                      <span className="absolute top-2 left-2 inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full bg-white/90 backdrop-blur-sm border border-stone-200 text-stone-600">
-                        <Sparkles size={11} className="text-emerald-500" />AI 已分析
-                      </span>
                     </div>
                     <div className="p-4">
                       <div className="flex items-center justify-between mb-2">
@@ -4232,12 +4254,6 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones, drawin
                           <div className="flex justify-between">
                             <span>配置健康度</span>
                             <span className="font-semibold text-stone-700">{r.evalResult.score}/100</span>
-                          </div>
-                        )}
-                        {typeof confidence === 'number' && (
-                          <div className="flex justify-between">
-                            <span>辨識信心值</span>
-                            <span className="font-semibold text-emerald-700">Confidence {confidence}%</span>
                           </div>
                         )}
                         {issuePointCount > 0 && (

@@ -42,8 +42,8 @@ export interface ZoneMapEntry {
   passedCount: number
   colorIndex: number
   issuePoints?: ZoneMapIssuePoint[]
-  /** 植物辨識信心度（0~100，已比對到資料庫的圖塊／HATCH 占全部的比例）——真實
-   *  算出來的辨識成功率，不是假造的 AI 分數。未提供時該區不顯示信心值。 */
+  /** 植物辨識信心度（0~100）：僅供內部判斷（例如排序、debug）使用，產品規則已
+   *  確認前台一律不顯示信心值／百分比，不得在任何 UI 呈現這個欄位。 */
   matchConfidencePercent?: number
 }
 
@@ -347,16 +347,17 @@ export default function ZoneOverviewMap({
               const isHovered = hoverZone === z.zoneName
               const riskColor = z.dangerCount > 0 ? RISK_COLOR.danger : z.cautionCount > 0 ? RISK_COLOR.caution : RISK_COLOR.passed
               const statusLabel = z.dangerCount > 0 ? `嚴重 ${z.dangerCount}` : z.cautionCount > 0 ? `提醒 ${z.cautionCount}` : '通過'
-              const showAiTag = viewMode === 'ai' || isActive || isHovered
+              const showStatusTag = viewMode === 'ai' || isActive || isHovered
 
               const fillOpacity = isDimmed ? 0.05 : (isActive || isHovered) ? 0.32 : 0.17
               const strokeWidth = isActive ? view.scaleUnit * 0.0075 : isHovered ? view.scaleUnit * 0.005 : view.scaleUnit * 0.003
               const points = ringToPoints(vs)
 
-              // AI tag 寬度用字元數概算（中文字約 1 個字寬，數字/符號約 0.55 個字寬）
-              const tagText = `${z.zoneName}｜${statusLabel}`
-              const tagW = tagText.length * fontSize * 0.62 + fontSize * 1.1
-              const tagH = fontSize * 1.5
+              // 小型懸浮標籤，不做壓在圖形上的大色塊：字元數概算寬度（中文字約 1 個字寬）
+              const tagText = `${z.zoneName}　${statusLabel}`
+              const tagFontSize = fontSize * 0.62
+              const tagW = tagText.length * tagFontSize * 0.66 + tagFontSize * 1.4
+              const tagH = tagFontSize * 1.9
 
               return (
                 <g key={z.zoneName}>
@@ -380,15 +381,16 @@ export default function ZoneOverviewMap({
                     )}
                     {needsLeader && <circle cx={anchor.x} cy={anchor.y} r={view.scaleUnit * 0.004} fill="#57534e" />}
 
-                    {/* AI tag 風格標籤：C區｜已分析 / F區｜提醒2 / A區｜通過 */}
+                    {/* 小型懸浮標籤：只放區名／狀態／問題數量，不做壓在圖形上的裝飾色塊 */}
                     <g transform={`translate(${labelPos.x},${labelPos.y}) scale(1,-1)`}>
-                      {showAiTag ? (
+                      {showStatusTag ? (
                         <>
                           <rect x={-tagW / 2} y={-tagH / 2} width={tagW} height={tagH} rx={tagH / 2}
-                            fill={isDimmed ? '#f5f5f4' : '#1a4731'} opacity={isDimmed ? 0.7 : 0.94} />
-                          <text fontSize={fontSize * 0.82} fill="#ffffff" fontWeight={700} textAnchor="middle" dominantBaseline="central"
+                            fill={isDimmed ? '#f5f5f4' : '#ffffff'} fillOpacity={isDimmed ? 0.75 : 0.96}
+                            stroke={riskColor} strokeWidth={tagH * 0.045} />
+                          <text fontSize={tagFontSize} fill={isDimmed ? '#a8a29e' : '#292524'} fontWeight={700} textAnchor="middle" dominantBaseline="central"
                             fontFamily="'Microsoft JhengHei','Noto Sans TC',sans-serif">
-                            {z.zoneName}｜{viewMode === 'ai' && z.dangerCount === 0 && z.cautionCount === 0 ? '已分析' : statusLabel}
+                            {tagText}
                           </text>
                         </>
                       ) : (
@@ -397,14 +399,8 @@ export default function ZoneOverviewMap({
                           {z.zoneName}
                         </text>
                       )}
-                      {viewMode === 'ai' && z.matchConfidencePercent !== undefined && (
-                        <text y={tagH * 0.95} fontSize={fontSize * 0.56} fill={isDimmed ? '#a8a29e' : '#15803d'} fontWeight={600}
-                          textAnchor="middle" fontFamily="'Microsoft JhengHei','Noto Sans TC',sans-serif">
-                          Confidence {z.matchConfidencePercent}%
-                        </text>
-                      )}
                       {viewMode === 'planting' && z.plantSummary && (
-                        <text y={tagH * 0.95} fontSize={fontSize * 0.56} fill={isDimmed ? '#a8a29e' : '#44403c'} fontWeight={600}
+                        <text y={tagH * 1.15} fontSize={fontSize * 0.5} fill={isDimmed ? '#a8a29e' : '#44403c'} fontWeight={600}
                           textAnchor="middle" fontFamily="'Microsoft JhengHei','Noto Sans TC',sans-serif">
                           {z.plantSummary}
                         </text>
@@ -534,9 +530,6 @@ export default function ZoneOverviewMap({
             <div className="font-bold text-base">{hoveredEntry.zoneName}</div>
             {hoveredEntry.areaM2 !== undefined && <div>面積：{hoveredEntry.areaM2.toFixed(1)} ㎡</div>}
             {hoveredEntry.plantSummary && <div>{hoveredEntry.plantSummary}</div>}
-            {hoveredEntry.matchConfidencePercent !== undefined && (
-              <div className="text-emerald-300">辨識信心度：{hoveredEntry.matchConfidencePercent}%</div>
-            )}
             <div className="flex gap-2.5 pt-0.5">
               <span className="text-red-300">嚴重 {hoveredEntry.dangerCount}</span>
               <span className="text-blue-300">提醒 {hoveredEntry.cautionCount}</span>

@@ -105,7 +105,7 @@ export function zoneLabel(t: ZoneType): string {
 // ── Zone label detection ──────────────────────────────────────────────────────
 
 // 寬鬆版 zone 文字判斷（支援 "A區" / "A 區" / "A-區" / "A區域" / "A区"）
-function normalizeZoneName(raw: string): string | null {
+export function normalizeZoneName(raw: string): string | null {
   const t = raw.trim()
   // 含「區」字的常見格式：A區 / B 區 / 一區 / 甲區 / A-區 / A區域
   const m = t.match(/^([A-Z一二三四五六七八九十甲乙丙丁戊己庚辛壬癸]{1,3})\s*[-－]?\s*[區区]/)
