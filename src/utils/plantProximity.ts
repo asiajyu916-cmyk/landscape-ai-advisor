@@ -26,6 +26,7 @@ import {
 import { findPlantsByLayerName, normalizeLayerToken } from '@/utils/plantNameMatch'
 import { evaluatePlantPair } from '@/utils/plantEvaluator'
 import type { IssueDetail } from '@/utils/plantEvaluator'
+import { isExcludedFromPlantingEvaluation } from '@/utils/compatibilityLevels'
 import { detectSiteDrainageEvidence } from '@/utils/siteDrainageContext'
 
 /** 本模組只需要 DxfParseResult 的幾何三個欄位，呼叫端不必組出完整的 DxfParseResult */
@@ -448,6 +449,13 @@ export function computeZonePlantConflicts(
 
       const recA = plantDB.find(p => p.name === pair.a.plantName)
       const recB = plantDB.find(p => p.name === pair.b.plantName)
+
+      // 產品規則：喬木不納入配置評估。上面的 kind==='tree' 只排得掉「畫成獨立
+      // 喬木符號」的實體——喬木樹種如果是用 HATCH 面狀畫（例如密植的喬木綠籬/
+      // 遮蔽林帶），kind 會是 shrub-hatch 之類，逃過那道過濾。這裡改用比對到
+      // 的植物資料庫紀錄（正確反映「這是不是喬木」的植物分類，不受畫法影響）
+      // 再過濾一次，兩種訊號都要擋，缺一個都會讓喬木漏進衝突判定。
+      if (isExcludedFromPlantingEvaluation(recA) || isExcludedFromPlantingEvaluation(recB)) continue
 
       let judgment: PlantConflictResult['judgment']
       let issues: IssueDetail[]

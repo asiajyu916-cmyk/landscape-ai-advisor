@@ -10,19 +10,24 @@
 // 幾何運算沿用 dxfReportBuilder.ts 既有的 polyBounds／polyCentroid／ringToPoints／
 // fitDims，跟 PDF 匯出用同一套換算，不重新發明座標系統。
 //
-// 問題點（issuePoints）的可視性／可點擊性是這輪優化的重點：視覺尺寸與 hit-area
-// 都是「換算成螢幕像素」再回推資料座標（unitsPerPx），不是相對 viewBox 大小的
-// 比例值——否則地圖縮放時點位會忽大忽小，或在資料密集的大圖上小到點不到。
+// 這一輪重點：圖面本身要夠大——用 ResizeObserver 量測實際容器寬度（不是寫死
+// 一個小的預設像素值），SVG 才不會變成「看起來像縮圖」；問題點／字級／AI 標籤
+// 都改用「換算成螢幕像素」再回推資料座標（unitsPerPx），不是相對 viewBox 的
+// 比例值，縮放時大小才會符合直覺。AI 感（AI tag／極淡網格）刻意克制，不做黑底
+// 霓虹風，維持白底、可讀、專業。
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type WheelEventHandler, type PointerEventHandler } from 'react'
 import { polyBounds, ringToPoints, fitDims, getZoneColor } from '@/utils/dxfReportBuilder'
 import type { DxfPolygon } from '@/types/dxf'
+import { ZoomIn, ZoomOut, Maximize2, Minimize2, RotateCcw, LayoutGrid, AlertCircle, Sprout, Sparkles } from 'lucide-react'
 
 export interface ZoneMapIssuePoint {
   id: string
   x: number
   y: number
   severity: 'danger' | 'caution'
+  /** 問題編號短標籤（例如合併問題 id "A-01" 的 "01"），畫在半透明範圍標記中央 */
+  label?: string
 }
 
 export interface ZoneMapEntry {
@@ -37,6 +42,9 @@ export interface ZoneMapEntry {
   passedCount: number
   colorIndex: number
   issuePoints?: ZoneMapIssuePoint[]
+  /** 植物辨識信心度（0~100，已比對到資料庫的圖塊／HATCH 占全部的比例）——真實
+   *  算出來的辨識成功率，不是假造的 AI 分數。未提供時該區不顯示信心值。 */
+  matchConfidencePercent?: number
 }
 
 export interface FocusPoint {
@@ -44,6 +52,8 @@ export interface FocusPoint {
   y: number
   severity: 'danger' | 'caution'
 }
+
+type ViewMode = 'zones' | 'issues' | 'planting' | 'ai'
 
 interface Props {
   zones: ZoneMapEntry[]
@@ -56,8 +66,13 @@ interface Props {
   /** 目前選取的單一問題點（issuePoints 的 id），點選後放大＋加外圈標示 */
   selectedIssueId?: string | null
   onSelectIssuePoint?: (zoneName: string, issueId: string) => void
+  /** 目標高度（px）；寬度改由容器實際寬度自動決定，這兩個 prop 只當作找不到
+   *  容器寬度時的保守預設值。 */
   widthPx?: number
   maxHeightPx?: number
+  /** 圖面卡片本身的最小高度（CSS px），預設 520——「圖面高度至少 500px」的要求
+   *  直接反映在容器高度上，不是只放大 SVG 內容、外框還是小卡片。 */
+  minHeightPx?: number
 }
 
 function pointInPolygon(pt: { x: number; y: number }, vs: Array<{ x: number; y: number }>): boolean {
@@ -109,16 +124,45 @@ function clusterIssuePoints(zoneName: string, points: ZoneMapIssuePoint[], merge
 }
 
 const RISK_COLOR = { danger: '#dc2626', caution: '#2563eb', passed: '#059669' }
+const ZOOM_MIN = 1, ZOOM_MAX = 8, ZOOM_STEP = 1.4
+
+const VIEW_MODE_OPTIONS: Array<{ key: ViewMode; label: string; icon: typeof LayoutGrid }> = [
+  { key: 'zones', label: '分區', icon: LayoutGrid },
+  { key: 'issues', label: '問題', icon: AlertCircle },
+  { key: 'planting', label: '植栽', icon: Sprout },
+  { key: 'ai', label: 'AI 分析', icon: Sparkles },
+]
 
 export default function ZoneOverviewMap({
   zones, activeZoneName, onSelectZone, onReset, focusPoints,
-  selectedIssueId, onSelectIssuePoint, widthPx = 640, maxHeightPx = 420,
+  selectedIssueId, onSelectIssuePoint, widthPx = 640, maxHeightPx = 420, minHeightPx = 520,
 }: Props) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [containerWidth, setContainerWidth] = useState(widthPx)
   const [hoverZone, setHoverZone] = useState<string | null>(null)
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null)
-  const [viewMode, setViewMode] = useState<'zones' | 'zones-issues'>('zones')
+  const [viewMode, setViewMode] = useState<ViewMode>('zones')
   const [expandedCluster, setExpandedCluster] = useState<string | null>(null)
   const [hoverPointId, setHoverPointId] = useState<string | null>(null)
+  const [isFullscreen, setIsFullscreen] = useState(false)
+  const [zoomLevel, setZoomLevel] = useState(1)
+  const [pan, setPan] = useState({ x: 0, y: 0 })
+  const dragState = useRef<{ startX: number; startY: number; panX: number; panY: number } | null>(null)
+
+  // 容器實際寬度決定圖面大小——不是寫死一個小的預設像素值，圖面才不會變成縮圖。
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect.width
+      if (w && w > 100) setContainerWidth(Math.floor(w))
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  const effectiveMaxHeight = isFullscreen ? window.innerHeight - 180 : Math.max(maxHeightPx, minHeightPx)
+  const effectiveWidth = isFullscreen ? window.innerWidth - 80 : containerWidth
 
   const withBoundary = useMemo(() => zones.filter(z => z.boundary && z.boundary.vertices.length >= 3), [zones])
   const hasIssuePoints = withBoundary.some(z => (z.issuePoints?.length ?? 0) > 0)
@@ -129,10 +173,10 @@ export default function ZoneOverviewMap({
     const b = polyBounds(allVerts)
     const spanX = Math.max(b.maxX - b.minX, 1)
     const spanY = Math.max(b.maxY - b.minY, 1)
-    const pad = Math.max(spanX, spanY) * 0.08 // 5%~10% padding，真實比例不扭曲
+    const pad = Math.max(spanX, spanY) * 0.24 // 留足夠邊界空間給 AI tag／信心值文字＋角落分區的引線位移，避免邊界分區的標籤被裁切
     const viewMinX = b.minX - pad, viewMinY = b.minY - pad
     const viewW = spanX + pad * 2, viewH = spanY + pad * 2
-    const { w: pxW, h: pxH } = fitDims(viewW / viewH, widthPx, maxHeightPx)
+    const { w: pxW, h: pxH } = fitDims(viewW / viewH, effectiveWidth, effectiveMaxHeight)
     return {
       viewMinX, viewMinY, viewW, viewH, pxW, pxH,
       scaleUnit: Math.max(viewW, viewH, 1),
@@ -140,7 +184,7 @@ export default function ZoneOverviewMap({
       centerX: viewMinX + viewW / 2, centerY: viewMinY + viewH / 2,
       totalArea: viewW * viewH,
     }
-  }, [withBoundary, widthPx, maxHeightPx])
+  }, [withBoundary, effectiveWidth, effectiveMaxHeight])
 
   const zoneLayout = useMemo(() => {
     if (!view) return []
@@ -176,206 +220,337 @@ export default function ZoneOverviewMap({
     })
   }, [withBoundary, view])
 
-  if (!view) {
-    return <p className="text-sm text-stone-400 py-6 text-center">本圖面未偵測到可辨識之植栽分區邊界，無法顯示總覽圖。</p>
+  // ── 縮放／平移：改變「有效 viewBox」大小與位置，圖形與標記一起放大，符合直覺 ──
+  const effView = useMemo(() => {
+    if (!view) return null
+    const w = view.viewW / zoomLevel
+    const h = view.viewH / zoomLevel
+    const minX = view.viewMinX + (view.viewW - w) / 2 + pan.x
+    const minY = view.viewMinY + (view.viewH - h) / 2 + pan.y
+    return { minX, minY, w, h }
+  }, [view, zoomLevel, pan])
+
+  const clampPan = (nextZoom: number, nextPan: { x: number; y: number }) => {
+    if (!view) return nextPan
+    const w = view.viewW / nextZoom, h = view.viewH / nextZoom
+    const maxOffX = (view.viewW - w) / 2, maxOffY = (view.viewH - h) / 2
+    return {
+      x: Math.max(-maxOffX, Math.min(maxOffX, nextPan.x)),
+      y: Math.max(-maxOffY, Math.min(maxOffY, nextPan.y)),
+    }
   }
 
-  const fontSize = view.scaleUnit * 0.03
-  const hoveredEntry = hoverZone ? zoneLayout.find(zl => zl.entry.zoneName === hoverZone)?.entry : null
-  const px = (n: number) => n * view.unitsPerPx // 螢幕像素 → 資料座標單位
+  const zoomBy = (factor: number) => {
+    setZoomLevel(z => {
+      const next = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z * factor))
+      setPan(p => clampPan(next, p))
+      return next
+    })
+  }
+  const resetView = () => { setZoomLevel(1); setPan({ x: 0, y: 0 }) }
 
-  return (
-    <div className="relative inline-block">
-      {/* 檢視切換 + 回到全區 */}
-      <div className="flex items-center justify-between mb-2 gap-2 flex-wrap">
-        {hasIssuePoints ? (
-          <div className="inline-flex rounded-lg border border-stone-200 overflow-hidden text-xs">
-            <button
-              onClick={() => setViewMode('zones')}
-              className={`px-2.5 py-1 font-medium ${viewMode === 'zones' ? 'bg-green-600 text-white' : 'bg-white text-stone-500 hover:bg-stone-50'}`}
-            >純分區</button>
-            <button
-              onClick={() => setViewMode('zones-issues')}
-              className={`px-2.5 py-1 font-medium ${viewMode === 'zones-issues' ? 'bg-green-600 text-white' : 'bg-white text-stone-500 hover:bg-stone-50'}`}
-            >分區＋問題點</button>
+  const handleWheel: WheelEventHandler<SVGSVGElement> = e => {
+    if (!view) return
+    e.preventDefault()
+    zoomBy(e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP)
+  }
+  const handlePointerDown: PointerEventHandler<SVGSVGElement> = e => {
+    if (zoomLevel <= 1) return
+    dragState.current = { startX: e.clientX, startY: e.clientY, panX: pan.x, panY: pan.y }
+    ;(e.target as Element).setPointerCapture?.(e.pointerId)
+  }
+  const handlePointerMove: PointerEventHandler<SVGSVGElement> = e => {
+    if (!dragState.current || !view) return
+    const dxPx = e.clientX - dragState.current.startX
+    const dyPx = e.clientY - dragState.current.startY
+    const unitsPerPxNow = (view.viewW / zoomLevel) / view.pxW
+    // SVG 內容整體做了一次 Y 翻轉（DXF 座標系 Y 向上），拖曳方向要跟著反過來對應。
+    const next = { x: dragState.current.panX - dxPx * unitsPerPxNow, y: dragState.current.panY + dyPx * unitsPerPxNow }
+    setPan(clampPan(zoomLevel, next))
+  }
+  const handlePointerUp: PointerEventHandler<SVGSVGElement> = () => { dragState.current = null }
+
+  if (!view || !effView) {
+    return <p className="text-base text-stone-400 py-6 text-center">本圖面未偵測到可辨識之植栽分區邊界，無法顯示總覽圖。</p>
+  }
+
+  const fontSize = view.scaleUnit * 0.034
+  const hoveredEntry = hoverZone ? zoneLayout.find(zl => zl.entry.zoneName === hoverZone)?.entry : null
+  const px = (n: number) => n * view.unitsPerPx / zoomLevel // 螢幕像素 → 資料座標單位（考慮目前縮放）
+
+  const mapCard = (
+    <div className={isFullscreen ? 'fixed inset-0 z-[100] bg-white flex flex-col p-4 md:p-6' : ''}>
+      {/* 工具列：檢視模式切換 + 縮放／平移／重設／全螢幕 */}
+      <div className="flex items-center justify-between mb-2.5 gap-2 flex-wrap">
+        <div className="inline-flex rounded-xl border border-stone-200 overflow-hidden text-sm shadow-sm">
+          {VIEW_MODE_OPTIONS.filter(o => o.key !== 'issues' || hasIssuePoints).map(opt => {
+            const Icon = opt.icon
+            const active = viewMode === opt.key
+            return (
+              <button
+                key={opt.key}
+                onClick={() => setViewMode(opt.key)}
+                className={`px-3 py-2 font-semibold flex items-center gap-1.5 transition-colors ${
+                  active ? 'bg-[#1a4731] text-white' : 'bg-white text-stone-600 hover:bg-stone-50'
+                }`}
+              >
+                <Icon size={15} />{opt.label}
+              </button>
+            )
+          })}
+        </div>
+        <div className="flex items-center gap-1.5">
+          {activeZoneName && onReset && (
+            <button onClick={onReset} className="px-3 py-2 rounded-lg text-sm font-semibold border border-stone-200 bg-white text-stone-600 hover:bg-stone-50">
+              ↺ 回到全區
+            </button>
+          )}
+          <div className="inline-flex rounded-lg border border-stone-200 overflow-hidden shadow-sm">
+            <button onClick={() => zoomBy(1 / ZOOM_STEP)} title="縮小" className="p-2.5 bg-white hover:bg-stone-50 text-stone-600 border-r border-stone-200"><ZoomOut size={17} /></button>
+            <button onClick={() => zoomBy(ZOOM_STEP)} title="放大" className="p-2.5 bg-white hover:bg-stone-50 text-stone-600 border-r border-stone-200"><ZoomIn size={17} /></button>
+            <button onClick={resetView} title="重設視圖" className="p-2.5 bg-white hover:bg-stone-50 text-stone-600 border-r border-stone-200"><RotateCcw size={16} /></button>
+            <button onClick={() => setIsFullscreen(v => !v)} title={isFullscreen ? '離開全螢幕' : '全螢幕檢視'} className="p-2.5 bg-white hover:bg-stone-50 text-stone-600">
+              {isFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+            </button>
           </div>
-        ) : <span />}
-        {activeZoneName && onReset && (
-          <button onClick={onReset} className="px-2.5 py-1 rounded-lg text-xs font-medium border border-stone-200 bg-white text-stone-600 hover:bg-stone-50">
-            ↺ 回到全區
-          </button>
-        )}
+        </div>
       </div>
 
-      <svg
-        width={view.pxW} height={view.pxH}
-        viewBox={`${view.viewMinX} ${view.viewMinY} ${view.viewW} ${view.viewH}`}
-        className="bg-[#f7faf5] border border-stone-200 rounded-xl w-full h-auto"
-        style={{ maxWidth: view.pxW }}
-      >
-        <g transform={`translate(0, ${2 * view.viewMinY + view.viewH}) scale(1,-1)`}>
-          {zoneLayout.map(({ entry: z, vs, anchor, labelPos, needsLeader, clusters }) => {
-            const identityColor = getZoneColor(z.colorIndex)
-            const isActive = activeZoneName === z.zoneName
-            const isDimmed = !!activeZoneName && !isActive
-            const isHovered = hoverZone === z.zoneName
-            const riskColor = z.dangerCount > 0 ? RISK_COLOR.danger : z.cautionCount > 0 ? RISK_COLOR.caution : RISK_COLOR.passed
+      <div ref={containerRef} className="relative w-full" style={{ height: isFullscreen ? undefined : minHeightPx, flex: isFullscreen ? 1 : undefined }}>
+        <svg
+          width={view.pxW} height={view.pxH}
+          viewBox={`${effView.minX} ${effView.minY} ${effView.w} ${effView.h}`}
+          className="bg-[#f8faf7] border border-stone-200 rounded-2xl w-full h-full shadow-sm"
+          style={{ cursor: zoomLevel > 1 ? 'grab' : 'default', touchAction: 'none' }}
+          onWheel={handleWheel}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerLeave={handlePointerUp}
+        >
+          <defs>
+            {/* 極淡 AI 掃描網格：只在 AI 分析模式顯示，透明度刻意壓低，不影響閱讀 */}
+            <pattern id="ai-scan-grid" width={view.scaleUnit * 0.035} height={view.scaleUnit * 0.035} patternUnits="userSpaceOnUse">
+              <path d={`M ${view.scaleUnit * 0.035} 0 L 0 0 0 ${view.scaleUnit * 0.035}`} fill="none" stroke="#15803d" strokeWidth={view.scaleUnit * 0.0006} opacity={0.5} />
+            </pattern>
+          </defs>
 
-            const fillOpacity = isDimmed ? 0.05 : (isActive || isHovered) ? 0.30 : 0.16
-            const strokeWidth = isActive ? view.scaleUnit * 0.0075 : isHovered ? view.scaleUnit * 0.005 : view.scaleUnit * 0.0028
-            const points = ringToPoints(vs)
+          {viewMode === 'ai' && (
+            <rect x={view.viewMinX} y={view.viewMinY} width={view.viewW} height={view.viewH} fill="url(#ai-scan-grid)" opacity={0.35} />
+          )}
 
-            return (
-              <g key={z.zoneName}>
-                <g
-                  onClick={() => onSelectZone?.(z.zoneName)}
-                  onMouseEnter={() => setHoverZone(z.zoneName)}
-                  onMouseMove={e => setTooltipPos({ x: e.clientX, y: e.clientY })}
-                  onMouseLeave={() => { setHoverZone(null); setTooltipPos(null) }}
-                  style={{ cursor: onSelectZone ? 'pointer' : 'default', opacity: isDimmed ? 0.55 : 1 }}
-                >
-                  {/* 分區識別色（填色）＋風險色（外框） */}
-                  <polygon points={points} fill={identityColor} fillOpacity={fillOpacity} stroke={riskColor} strokeWidth={strokeWidth} />
+          <g transform={`translate(0, ${2 * view.viewMinY + view.viewH}) scale(1,-1)`}>
+            {zoneLayout.map(({ entry: z, vs, anchor, labelPos, needsLeader, clusters }) => {
+              const identityColor = getZoneColor(z.colorIndex)
+              const isActive = activeZoneName === z.zoneName
+              const isDimmed = !!activeZoneName && !isActive
+              const isHovered = hoverZone === z.zoneName
+              const riskColor = z.dangerCount > 0 ? RISK_COLOR.danger : z.cautionCount > 0 ? RISK_COLOR.caution : RISK_COLOR.passed
+              const statusLabel = z.dangerCount > 0 ? `嚴重 ${z.dangerCount}` : z.cautionCount > 0 ? `提醒 ${z.cautionCount}` : '通過'
+              const showAiTag = viewMode === 'ai' || isActive || isHovered
 
-                  {/* 狹長／小面積分區的引線 */}
-                  {needsLeader && (
-                    <line x1={anchor.x} y1={anchor.y} x2={labelPos.x} y2={labelPos.y}
-                      stroke="#78716c" strokeWidth={view.scaleUnit * 0.0012} strokeDasharray={`${view.scaleUnit * 0.003} ${view.scaleUnit * 0.003}`} />
-                  )}
-                  {needsLeader && <circle cx={anchor.x} cy={anchor.y} r={view.scaleUnit * 0.004} fill="#57534e" />}
+              const fillOpacity = isDimmed ? 0.05 : (isActive || isHovered) ? 0.32 : 0.17
+              const strokeWidth = isActive ? view.scaleUnit * 0.0075 : isHovered ? view.scaleUnit * 0.005 : view.scaleUnit * 0.003
+              const points = ringToPoints(vs)
 
-                  {/* 標籤：放在 visual center（或引線末端），文字反轉一次維持正立 */}
-                  <g transform={`translate(${labelPos.x},${labelPos.y}) scale(1,-1)`}>
-                    <text fontSize={fontSize} fill={isDimmed ? '#a8a29e' : '#292524'} fontWeight={700}
-                      textAnchor="middle" fontFamily="'Microsoft JhengHei','Noto Sans TC',sans-serif">
-                      {z.zoneName}
-                    </text>
+              // AI tag 寬度用字元數概算（中文字約 1 個字寬，數字/符號約 0.55 個字寬）
+              const tagText = `${z.zoneName}｜${statusLabel}`
+              const tagW = tagText.length * fontSize * 0.62 + fontSize * 1.1
+              const tagH = fontSize * 1.5
+
+              return (
+                <g key={z.zoneName}>
+                  <g
+                    onClick={() => onSelectZone?.(z.zoneName)}
+                    onMouseEnter={() => setHoverZone(z.zoneName)}
+                    onMouseMove={e => setTooltipPos({ x: e.clientX, y: e.clientY })}
+                    onMouseLeave={() => { setHoverZone(null); setTooltipPos(null) }}
+                    style={{ cursor: onSelectZone ? 'pointer' : 'default', opacity: isDimmed ? 0.55 : 1 }}
+                  >
+                    {/* 分區識別色（填色）＋風險色（外框，柔和光暈感：外層一圈淡色再疊實線） */}
                     {(isActive || isHovered) && (
-                      <text y={fontSize * 1.3} fontSize={fontSize * 0.65} fill="#44403c" textAnchor="middle"
-                        fontFamily="'Microsoft JhengHei','Noto Sans TC',sans-serif">
-                        {z.dangerCount > 0 ? `嚴重${z.dangerCount}` : z.cautionCount > 0 ? `提醒${z.cautionCount}` : '通過為主'}
-                      </text>
+                      <polygon points={points} fill="none" stroke={riskColor} strokeWidth={strokeWidth * 2.6} opacity={0.18} />
                     )}
+                    <polygon points={points} fill={identityColor} fillOpacity={fillOpacity} stroke={riskColor} strokeWidth={strokeWidth} />
+
+                    {/* 狹長／小面積分區的引線 */}
+                    {needsLeader && (
+                      <line x1={anchor.x} y1={anchor.y} x2={labelPos.x} y2={labelPos.y}
+                        stroke="#78716c" strokeWidth={view.scaleUnit * 0.0012} strokeDasharray={`${view.scaleUnit * 0.003} ${view.scaleUnit * 0.003}`} />
+                    )}
+                    {needsLeader && <circle cx={anchor.x} cy={anchor.y} r={view.scaleUnit * 0.004} fill="#57534e" />}
+
+                    {/* AI tag 風格標籤：C區｜已分析 / F區｜提醒2 / A區｜通過 */}
+                    <g transform={`translate(${labelPos.x},${labelPos.y}) scale(1,-1)`}>
+                      {showAiTag ? (
+                        <>
+                          <rect x={-tagW / 2} y={-tagH / 2} width={tagW} height={tagH} rx={tagH / 2}
+                            fill={isDimmed ? '#f5f5f4' : '#1a4731'} opacity={isDimmed ? 0.7 : 0.94} />
+                          <text fontSize={fontSize * 0.82} fill="#ffffff" fontWeight={700} textAnchor="middle" dominantBaseline="central"
+                            fontFamily="'Microsoft JhengHei','Noto Sans TC',sans-serif">
+                            {z.zoneName}｜{viewMode === 'ai' && z.dangerCount === 0 && z.cautionCount === 0 ? '已分析' : statusLabel}
+                          </text>
+                        </>
+                      ) : (
+                        <text fontSize={fontSize} fill={isDimmed ? '#a8a29e' : '#292524'} fontWeight={700}
+                          textAnchor="middle" fontFamily="'Microsoft JhengHei','Noto Sans TC',sans-serif">
+                          {z.zoneName}
+                        </text>
+                      )}
+                      {viewMode === 'ai' && z.matchConfidencePercent !== undefined && (
+                        <text y={tagH * 0.95} fontSize={fontSize * 0.56} fill={isDimmed ? '#a8a29e' : '#15803d'} fontWeight={600}
+                          textAnchor="middle" fontFamily="'Microsoft JhengHei','Noto Sans TC',sans-serif">
+                          Confidence {z.matchConfidencePercent}%
+                        </text>
+                      )}
+                      {viewMode === 'planting' && z.plantSummary && (
+                        <text y={tagH * 0.95} fontSize={fontSize * 0.56} fill={isDimmed ? '#a8a29e' : '#44403c'} fontWeight={600}
+                          textAnchor="middle" fontFamily="'Microsoft JhengHei','Noto Sans TC',sans-serif">
+                          {z.plantSummary}
+                        </text>
+                      )}
+                    </g>
                   </g>
-                </g>
 
-                {/* 分區＋問題點檢視：放大、可點擊、重疊時聚合成徽章 */}
-                {viewMode === 'zones-issues' && clusters.map(cluster => {
-                  if (cluster.points.length === 1 && expandedCluster !== cluster.key) {
-                    const p = cluster.points[0]
-                    const isSelected = selectedIssueId === p.id
-                    const isPtHovered = hoverPointId === p.id
-                    const big = isSelected || isPtHovered
-                    const baseDiameterPx = p.severity === 'danger' ? 14 : 11
-                    const activeDiameterPx = p.severity === 'danger' ? 20 : 16
-                    const r = px(big ? activeDiameterPx : baseDiameterPx) / 2
-                    const color = p.severity === 'danger' ? RISK_COLOR.danger : RISK_COLOR.caution
-                    return (
-                      <g key={p.id}
-                        onClick={e => { e.stopPropagation(); onSelectIssuePoint?.(z.zoneName, p.id) }}
-                        onMouseEnter={e => { e.stopPropagation(); setHoverPointId(p.id) }}
-                        onMouseLeave={e => { e.stopPropagation(); setHoverPointId(null) }}
-                        style={{ cursor: onSelectIssuePoint ? 'pointer' : 'default', opacity: isDimmed ? 0.35 : 1 }}
-                      >
-                        {/* 更大的透明命中區，避免小點難點擊 */}
-                        <circle cx={p.x} cy={p.y} r={r + px(6)} fill="transparent" />
-                        {isSelected && (
-                          <circle cx={p.x} cy={p.y} r={r + px(6)} fill="none" stroke={color} strokeWidth={px(2)} opacity={0.55} />
-                        )}
-                        <circle cx={p.x} cy={p.y} r={r} fill={color} stroke="#fff" strokeWidth={px(2)}
-                          style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,.45))' }} />
-                      </g>
-                    )
-                  }
-
-                  // Cluster 徽章：多個問題點聚合，顯示數量，點擊展開成個別點
-                  if (expandedCluster === cluster.key) {
-                    const n = cluster.points.length
-                    const spreadR = px(26)
-                    return (
-                      <g key={cluster.key}>
-                        {cluster.points.map((p, idx) => {
-                          const angle = (idx / n) * Math.PI * 2
-                          const ex = cluster.x + Math.cos(angle) * spreadR
-                          const ey = cluster.y + Math.sin(angle) * spreadR
-                          const isSelected = selectedIssueId === p.id
-                          const color = p.severity === 'danger' ? RISK_COLOR.danger : RISK_COLOR.caution
-                          const r = px(isSelected ? (p.severity === 'danger' ? 20 : 16) : (p.severity === 'danger' ? 14 : 11)) / 2
-                          return (
-                            <g key={p.id}
-                              onClick={e => { e.stopPropagation(); onSelectIssuePoint?.(z.zoneName, p.id) }}
-                              style={{ cursor: onSelectIssuePoint ? 'pointer' : 'default' }}
-                            >
-                              <line x1={cluster.x} y1={cluster.y} x2={ex} y2={ey} stroke="#78716c" strokeWidth={px(1)} opacity={0.5} />
-                              <circle cx={ex} cy={ey} r={r + px(6)} fill="transparent" />
-                              <circle cx={ex} cy={ey} r={r} fill={color} stroke="#fff" strokeWidth={px(2)}
-                                style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,.45))' }} />
-                            </g>
-                          )
-                        })}
-                        <g onClick={e => { e.stopPropagation(); setExpandedCluster(null) }} style={{ cursor: 'pointer' }}>
-                          <circle cx={cluster.x} cy={cluster.y} r={px(11)} fill="#57534e" stroke="#fff" strokeWidth={px(2)} />
-                          <g transform={`translate(${cluster.x},${cluster.y}) scale(1,-1)`}>
-                            <text fontSize={px(12)} fill="#fff" fontWeight={700} textAnchor="middle" dominantBaseline="central">×</text>
+                  {/* 分區＋問題點檢視：放大、可點擊、重疊時聚合成徽章 */}
+                  {viewMode === 'issues' && clusters.map(cluster => {
+                    if (cluster.points.length === 1 && expandedCluster !== cluster.key) {
+                      const p = cluster.points[0]
+                      const isSelected = selectedIssueId === p.id
+                      const isPtHovered = hoverPointId === p.id
+                      const big = isSelected || isPtHovered
+                      // 半透明範圍標記＋問題編號，不是很小的點——最小視覺尺寸約 20~24px，
+                      // hover/selected 放大到 28~32px，確保編號文字看得清楚也點得到。
+                      const baseDiameterPx = p.severity === 'danger' ? 24 : 20
+                      const activeDiameterPx = p.severity === 'danger' ? 32 : 28
+                      const r = px(big ? activeDiameterPx : baseDiameterPx) / 2
+                      const color = p.severity === 'danger' ? RISK_COLOR.danger : RISK_COLOR.caution
+                      return (
+                        <g key={p.id}
+                          onClick={e => { e.stopPropagation(); onSelectIssuePoint?.(z.zoneName, p.id) }}
+                          onMouseEnter={e => { e.stopPropagation(); setHoverPointId(p.id) }}
+                          onMouseLeave={e => { e.stopPropagation(); setHoverPointId(null) }}
+                          style={{ cursor: onSelectIssuePoint ? 'pointer' : 'default', opacity: isDimmed ? 0.35 : 1 }}
+                        >
+                          {/* 更大的透明命中區，避免小點難點擊 */}
+                          <circle cx={p.x} cy={p.y} r={r + px(8)} fill="transparent" />
+                          {isSelected && (
+                            <circle cx={p.x} cy={p.y} r={r + px(6)} fill="none" stroke={color} strokeWidth={px(2)} opacity={0.55} />
+                          )}
+                          <circle cx={p.x} cy={p.y} r={r} fill={color} fillOpacity={0.35} stroke={color} strokeWidth={px(2)}
+                            style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,.35))' }} />
+                          <g transform={`translate(${p.x},${p.y}) scale(1,-1)`}>
+                            <text fontSize={px(11)} fill={color} fontWeight={800} textAnchor="middle" dominantBaseline="central"
+                              fontFamily="'Microsoft JhengHei','Noto Sans TC',sans-serif">
+                              {p.label ?? ''}
+                            </text>
                           </g>
+                        </g>
+                      )
+                    }
+
+                    // Cluster 徽章：多個問題點聚合，顯示數量，點擊展開成個別半透明範圍標記
+                    if (expandedCluster === cluster.key) {
+                      const n = cluster.points.length
+                      const spreadR = px(34)
+                      return (
+                        <g key={cluster.key}>
+                          {cluster.points.map((p, idx) => {
+                            const angle = (idx / n) * Math.PI * 2
+                            const ex = cluster.x + Math.cos(angle) * spreadR
+                            const ey = cluster.y + Math.sin(angle) * spreadR
+                            const isSelected = selectedIssueId === p.id
+                            const color = p.severity === 'danger' ? RISK_COLOR.danger : RISK_COLOR.caution
+                            const r = px(isSelected ? (p.severity === 'danger' ? 32 : 28) : (p.severity === 'danger' ? 24 : 20)) / 2
+                            return (
+                              <g key={p.id}
+                                onClick={e => { e.stopPropagation(); onSelectIssuePoint?.(z.zoneName, p.id) }}
+                                style={{ cursor: onSelectIssuePoint ? 'pointer' : 'default' }}
+                              >
+                                <line x1={cluster.x} y1={cluster.y} x2={ex} y2={ey} stroke="#78716c" strokeWidth={px(1)} opacity={0.5} />
+                                <circle cx={ex} cy={ey} r={r + px(8)} fill="transparent" />
+                                <circle cx={ex} cy={ey} r={r} fill={color} fillOpacity={0.35} stroke={color} strokeWidth={px(2)}
+                                  style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,.35))' }} />
+                                <g transform={`translate(${ex},${ey}) scale(1,-1)`}>
+                                  <text fontSize={px(10)} fill={color} fontWeight={800} textAnchor="middle" dominantBaseline="central"
+                                    fontFamily="'Microsoft JhengHei','Noto Sans TC',sans-serif">
+                                    {p.label ?? ''}
+                                  </text>
+                                </g>
+                              </g>
+                            )
+                          })}
+                          <g onClick={e => { e.stopPropagation(); setExpandedCluster(null) }} style={{ cursor: 'pointer' }}>
+                            <circle cx={cluster.x} cy={cluster.y} r={px(11)} fill="#57534e" stroke="#fff" strokeWidth={px(2)} />
+                            <g transform={`translate(${cluster.x},${cluster.y}) scale(1,-1)`}>
+                              <text fontSize={px(12)} fill="#fff" fontWeight={700} textAnchor="middle" dominantBaseline="central">×</text>
+                            </g>
+                          </g>
+                        </g>
+                      )
+                    }
+
+                    const hasDanger = cluster.points.some(p => p.severity === 'danger')
+                    const badgeColor = hasDanger ? RISK_COLOR.danger : RISK_COLOR.caution
+                    const badgeR = px(Math.min(16 + cluster.points.length, 26))
+                    return (
+                      <g key={cluster.key}
+                        onClick={e => { e.stopPropagation(); setExpandedCluster(cluster.key) }}
+                        style={{ cursor: 'pointer', opacity: isDimmed ? 0.35 : 1 }}
+                      >
+                        <circle cx={cluster.x} cy={cluster.y} r={badgeR + px(6)} fill="transparent" />
+                        <circle cx={cluster.x} cy={cluster.y} r={badgeR} fill={badgeColor} fillOpacity={0.85} stroke="#fff" strokeWidth={px(2.5)}
+                          style={{ filter: 'drop-shadow(0 1px 3px rgba(0,0,0,.5))' }} />
+                        <g transform={`translate(${cluster.x},${cluster.y}) scale(1,-1)`}>
+                          <text fontSize={px(13)} fill="#fff" fontWeight={800} textAnchor="middle" dominantBaseline="central">
+                            {cluster.points.length}
+                          </text>
                         </g>
                       </g>
                     )
-                  }
+                  })}
+                </g>
+              )
+            })}
 
-                  const hasDanger = cluster.points.some(p => p.severity === 'danger')
-                  const badgeColor = hasDanger ? RISK_COLOR.danger : RISK_COLOR.caution
-                  const badgeR = px(Math.min(12 + cluster.points.length, 20))
-                  return (
-                    <g key={cluster.key}
-                      onClick={e => { e.stopPropagation(); setExpandedCluster(cluster.key) }}
-                      style={{ cursor: 'pointer', opacity: isDimmed ? 0.35 : 1 }}
-                    >
-                      <circle cx={cluster.x} cy={cluster.y} r={badgeR + px(6)} fill="transparent" />
-                      <circle cx={cluster.x} cy={cluster.y} r={badgeR} fill={badgeColor} stroke="#fff" strokeWidth={px(2.5)}
-                        style={{ filter: 'drop-shadow(0 1px 3px rgba(0,0,0,.5))' }} />
-                      <g transform={`translate(${cluster.x},${cluster.y}) scale(1,-1)`}>
-                        <text fontSize={px(12)} fill="#fff" fontWeight={800} textAnchor="middle" dominantBaseline="central">
-                          {cluster.points.length}
-                        </text>
-                      </g>
-                    </g>
-                  )
-                })}
+            {/* 目前選取問題卡片的實際座標點：先高亮分區（外層 activeZoneName 已處理），再標實際點 */}
+            {focusPoints?.map((p, idx) => (
+              <g key={idx}>
+                <circle cx={p.x} cy={p.y} r={view.scaleUnit * 0.011}
+                  fill="none" stroke={p.severity === 'danger' ? RISK_COLOR.danger : RISK_COLOR.caution}
+                  strokeWidth={view.scaleUnit * 0.0035} />
+                <circle cx={p.x} cy={p.y} r={view.scaleUnit * 0.005}
+                  fill={p.severity === 'danger' ? RISK_COLOR.danger : RISK_COLOR.caution} />
               </g>
-            )
-          })}
+            ))}
+          </g>
+        </svg>
 
-          {/* 目前選取問題卡片的實際座標點：先高亮分區（外層 activeZoneName 已處理），再標實際點 */}
-          {focusPoints?.map((p, idx) => (
-            <g key={idx}>
-              <circle cx={p.x} cy={p.y} r={view.scaleUnit * 0.011}
-                fill="none" stroke={p.severity === 'danger' ? RISK_COLOR.danger : RISK_COLOR.caution}
-                strokeWidth={view.scaleUnit * 0.0035} />
-              <circle cx={p.x} cy={p.y} r={view.scaleUnit * 0.005}
-                fill={p.severity === 'danger' ? RISK_COLOR.danger : RISK_COLOR.caution} />
-            </g>
-          ))}
-        </g>
-      </svg>
-
-      <p className="text-xs text-stone-400 mt-1.5">本圖依 DXF 可辨識植栽分區產生，不含建築底圖。</p>
-
-      {hoveredEntry && tooltipPos && (
-        <div
-          className="fixed z-50 pointer-events-none bg-stone-800 text-white text-xs rounded-lg px-3 py-2 shadow-lg space-y-0.5"
-          style={{ left: tooltipPos.x + 14, top: tooltipPos.y + 14 }}
-        >
-          <div className="font-bold text-sm">{hoveredEntry.zoneName}</div>
-          {hoveredEntry.areaM2 !== undefined && <div>面積：{hoveredEntry.areaM2.toFixed(1)} ㎡</div>}
-          {hoveredEntry.plantSummary && <div>{hoveredEntry.plantSummary}</div>}
-          <div className="flex gap-2 pt-0.5">
-            <span className="text-red-300">嚴重 {hoveredEntry.dangerCount}</span>
-            <span className="text-blue-300">提醒 {hoveredEntry.cautionCount}</span>
-            <span className="text-emerald-300">通過 {hoveredEntry.passedCount}</span>
+        {hoveredEntry && tooltipPos && (
+          <div
+            className="fixed z-50 pointer-events-none bg-stone-800 text-white text-sm rounded-xl px-4 py-3 shadow-lg space-y-1"
+            style={{ left: tooltipPos.x + 16, top: tooltipPos.y + 16 }}
+          >
+            <div className="font-bold text-base">{hoveredEntry.zoneName}</div>
+            {hoveredEntry.areaM2 !== undefined && <div>面積：{hoveredEntry.areaM2.toFixed(1)} ㎡</div>}
+            {hoveredEntry.plantSummary && <div>{hoveredEntry.plantSummary}</div>}
+            {hoveredEntry.matchConfidencePercent !== undefined && (
+              <div className="text-emerald-300">辨識信心度：{hoveredEntry.matchConfidencePercent}%</div>
+            )}
+            <div className="flex gap-2.5 pt-0.5">
+              <span className="text-red-300">嚴重 {hoveredEntry.dangerCount}</span>
+              <span className="text-blue-300">提醒 {hoveredEntry.cautionCount}</span>
+              <span className="text-emerald-300">通過 {hoveredEntry.passedCount}</span>
+            </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
+
+      <p className="text-sm text-stone-400 mt-2">
+        本圖依 DXF 可辨識植栽分區產生，不含建築底圖。{zoomLevel > 1 && '拖曳可平移，滾輪可縮放。'}
+      </p>
     </div>
   )
+
+  return mapCard
 }

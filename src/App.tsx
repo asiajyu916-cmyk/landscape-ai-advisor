@@ -109,6 +109,7 @@ function AuthenticatedApp() {
           onTabChange={setActiveTab}
           onImport={handleDxfImport}
           layerOverrides={layerOverrides}
+          onApplyLayerOverride={applyLayerOverride}
           onZoneReviewsUpdated={() => setZoneReviewsVersion(v => v + 1)}
         />
       ) : (activeTab === 'dxf' && <NoPermissionNotice featureName="DXF 審查" />)}

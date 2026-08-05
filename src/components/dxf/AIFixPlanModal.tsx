@@ -37,7 +37,7 @@ export default function AIFixPlanModal({ zoneName, plans, recommendedId, recomme
           </button>
         </div>
 
-        <div className="p-6 grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className={`p-6 grid grid-cols-1 gap-4 ${plans.length >= 3 ? 'lg:grid-cols-3' : plans.length === 2 ? 'lg:grid-cols-2' : 'lg:grid-cols-1 max-w-xl mx-auto'}`}>
           {plans.map(plan => {
             const accent = PLAN_ACCENT[plan.id]
             const isRecommended = plan.id === recommendedId
@@ -59,22 +59,31 @@ export default function AIFixPlanModal({ zoneName, plans, recommendedId, recomme
                 </div>
 
                 <div className="p-4 space-y-3 flex-1 text-sm">
+                  {/* 修改程度／涉及植物種類數／預估修改規模 */}
                   <div className="flex gap-3">
-                    <div className="flex-1 rounded-lg bg-red-50 px-2.5 py-1.5 text-center">
-                      <p className="text-[11px] text-red-500">處理嚴重</p>
-                      <p className="text-base font-bold text-red-700">{plan.expectedDangerAddressed}</p>
+                    <div className="flex-1 rounded-lg bg-stone-50 px-2.5 py-1.5 text-center">
+                      <p className="text-[11px] text-stone-400">修改程度</p>
+                      <p className="text-base font-bold text-stone-700">{plan.modificationLevel}</p>
                     </div>
-                    <div className="flex-1 rounded-lg bg-blue-50 px-2.5 py-1.5 text-center">
-                      <p className="text-[11px] text-blue-500">處理提醒</p>
-                      <p className="text-base font-bold text-blue-700">{plan.expectedCautionAddressed}</p>
+                    <div className="flex-1 rounded-lg bg-stone-50 px-2.5 py-1.5 text-center">
+                      <p className="text-[11px] text-stone-400">涉及植物</p>
+                      <p className="text-base font-bold text-stone-700">{plan.touchedSpeciesCount} 種</p>
                     </div>
                   </div>
 
-                  <p className="text-xs text-stone-500 leading-relaxed">{plan.estimateNote}</p>
+                  {/* 修改前後問題數 */}
+                  <div className="flex items-center justify-center gap-2 rounded-lg bg-blue-50 px-2.5 py-1.5">
+                    <span className="text-[11px] text-blue-500">問題數</span>
+                    <span className="text-base font-bold text-blue-700">{plan.beforeIssueCount}</span>
+                    <ArrowRight size={12} className="text-blue-400" />
+                    <span className="text-base font-bold text-emerald-700">{plan.afterIssueCount}</span>
+                  </div>
+
+                  <p className="text-xs text-stone-500 leading-relaxed">{plan.scopeNote}</p>
 
                   {plan.replacements.length > 0 && (
                     <div>
-                      <p className="text-xs font-bold text-stone-500 mb-1">建議替換</p>
+                      <p className="text-xs font-bold text-stone-500 mb-1">替換植物</p>
                       <ul className="space-y-1">
                         {plan.replacements.map((r, i) => (
                           <li key={i} className="text-xs text-stone-700 flex items-center gap-1.5 flex-wrap">
@@ -87,19 +96,24 @@ export default function AIFixPlanModal({ zoneName, plans, recommendedId, recomme
                     </div>
                   )}
 
+                  {plan.movedPlants.length > 0 && (
+                    <div>
+                      <p className="text-xs font-bold text-amber-600 mb-1">移動植物（建議調整位置／範圍，不換植栽）</p>
+                      <p className="text-xs text-stone-600">{plan.movedPlants.join('、')}</p>
+                    </div>
+                  )}
+
                   {plan.keepPlants.length > 0 && (
                     <div>
-                      <p className="text-xs font-bold text-stone-500 mb-1">建議保留</p>
+                      <p className="text-xs font-bold text-stone-500 mb-1">保留植物</p>
                       <p className="text-xs text-stone-600">{plan.keepPlants.join('、')}</p>
                     </div>
                   )}
 
-                  {plan.unresolvedPlants.length > 0 && (
-                    <div>
-                      <p className="text-xs font-bold text-amber-600 mb-1">找不到同類替代植物，需人工確認</p>
-                      <p className="text-xs text-stone-600">{plan.unresolvedPlants.join('、')}</p>
-                    </div>
-                  )}
+                  <div className="pt-1 border-t border-stone-100">
+                    <p className="text-xs font-bold text-stone-500 mb-1">適用情境</p>
+                    <p className="text-xs text-stone-600 leading-relaxed">{plan.applicableScenario}</p>
+                  </div>
 
                   <details className="pt-1">
                     <summary className="text-xs font-semibold text-stone-500 cursor-pointer select-none">修改原因與優缺點</summary>

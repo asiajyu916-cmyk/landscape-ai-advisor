@@ -9,11 +9,12 @@
 
 import type {
   DetectedZone, SpatialPlantInstance, PlantConflictResult, TreeInventoryItem, DxfPolygon,
-  SpatialInstanceKind, ProximityLevel, DrawingUnit,
+  SpatialInstanceKind, ProximityLevel, DrawingUnit, LayerOverrideAction,
 } from '@/types/dxf'
 import type { AltSuggestion, EvalResult } from '@/utils/plantEvaluator'
 import { deriveConclusion } from '@/utils/issueCategoryMeta'
 import { CM_PER_DRAWING_UNIT } from '@/utils/zoneStatistics'
+import { layerOverrideKey } from '@/utils/plantProximity'
 
 // ── 共用格式化 helper ──────────────────────────────────────────────────────
 
@@ -108,18 +109,33 @@ const CATEGORY_TO_BUCKET: Record<string, IssueBucketKey> = {
 export interface OverlapNote { label: string; certain: boolean }
 
 /** 供其他頁面（如 LandscapeAdvisorPage.tsx 的「AI 審查回覆」摘要）重用同一套
- *  「0cm／重疊語意」判斷，避免兩個地方各自維護一份不一致的分類規則。 */
+ *  「0cm／重疊語意」判斷，避免兩個地方各自維護一份不一致的分類規則。
+ *
+ *  產品規則（比前一輪更嚴格）：灌木／地被／草皮之間的 HATCH 或範圍重疊，一律
+ *  預設視為正常景觀配置——複層植栽、混植、群植、片植、自然式邊界都會讓圖面上
+ *  的種植範圍互相交錯或局部重疊，這是設計常態，不是異常。不管重疊面積、重疊
+ *  比例多高、邊界形狀多不規則，都不能單憑「幾何有重疊」這件事本身判定為問題
+ *  或人工確認——不設任何重疊比例門檻（3%、10%……都不設），因為「重疊比例」
+ *  這個訊號本身就無法分辨是刻意設計還是真的異常，設門檻只是把猜測包裝成數字。
+ *
+ *  喬木完全不會走到這裡——plantProximity.ts 在配對產生階段已經用畫法（kind）
+ *  與比對到的植物分類（normalizedCategory）雙重排除喬木，這個函式收到的
+ *  aKind/bKind 恆為 shrub-hatch／groundcover-hatch／lawn-hatch／unknown-hatch。
+ *
+ *  真正保留人工確認的只剩「圖層類型無法辨識」（unknown-hatch，見下方）—— 這是
+ *  資料辨識問題，不是幾何重疊問題。使用者要求保留的其他幾類真異常（HATCH 疑似
+ *  重複建立／同一 HATCH 被重複計入統計／植栽與硬鋪面車道建築設備禁止種植區
+ *  衝突／同一範圍標示互斥地表類別／HATCH 幾何破損或跨越錯誤分區／圖層類別與
+ *  植物資料矛盾）目前系統沒有對應的圖層辨識、硬鋪面資料或幾何驗證能力，誠實
+ *  不做假偵測——要做這些，需要先確認資料來源（例如圖面要有硬鋪面／車道／
+ *  設備專屬圖層，且要有幾何自我相交／面積異常的驗證邏輯），不是這裡能直接
+ *  生出來的判斷。 */
 export function classifyOverlap(aKind: SpatialInstanceKind, bKind: SpatialInstanceKind, proximity: ProximityLevel): OverlapNote {
   if (proximity === 'touching') return { label: '邊界接觸', certain: true }
   if (proximity !== 'overlap') return { label: '鄰近', certain: true }
   if (aKind === 'unknown-hatch' || bKind === 'unknown-hatch')
     return { label: '圖層類型無法辨識，需人工確認', certain: false }
-  const ground = (k: SpatialInstanceKind) => k === 'groundcover-hatch' || k === 'lawn-hatch'
-  if ((ground(aKind) && bKind === 'shrub-hatch') || (ground(bKind) && aKind === 'shrub-hatch'))
-    return { label: '上下層植栽配置（灌木／地被組合，常見設計手法）', certain: false }
-  if (aKind === bKind)
-    return { label: '同類型圖層套疊，可能為繪製重複或實際密植', certain: false }
-  return { label: '種植範圍重疊，建議現場或圖面覆核', certain: false }
+  return { label: '複層／混植配置，屬常見景觀設計手法', certain: true }
 }
 
 /** certain=false（無法從幾何本身確認是否為真衝突）時，嚴重度上限鎖在「一般改善」，
@@ -131,6 +147,111 @@ function finalizeSeverity(rawSeverity: 'danger' | 'caution', overlap: OverlapNot
 
 export function judgmentLabel(j: PlantConflictResult['judgment']): string {
   return j === 'ok' ? '符合' : j === 'caution' ? '注意' : j === 'conflict' ? '需改善' : '需人工確認'
+}
+
+// ── 人工確認來源分組（取代逐筆配對計數）─────────────────────────────────────────
+// 使用者原話：「23 筆配對若都來自同一個未知 HATCH 圖層，只應顯示 1 個未知圖層待
+// 確認，影響 23 組配對」。合併 key＝zone+unknownSourceType+layerName+blockName+
+// unknownReason（blockName 目前恆為「—」：HATCH 沒有 BLOCK，這裡誠實揭露資料
+// 本身的限制，不是漏做）。原本只在 LandscapeAdvisorPage.tsx 的「AI 審查回覆」用，
+// 這裡搬成共用函式，供 DxfReviewPage.tsx 的「人工確認」分頁直接重用同一套分組
+// 與批次分類邏輯，不重新發明一套判斷規則。
+//
+// 只剩 2 種允許出現「人工確認」的情況，直接對應底下的 unknownSourceType：
+//   unknown-hatch    → 圖層或圖塊歸屬不明（資料辨識問題，不是幾何重疊問題）
+//   unmatched-name   → 植物名稱無法辨識
+// 灌木／地被／草皮之間單純的 HATCH 或範圍重疊（不管是不是同類型、同物種）一律
+// 視為正常景觀配置，見 classifyOverlap()，不會再產生來源分組——上一輪還留著
+// 的 layered-planting／same-kind-overlap／generic-overlap 三種來源類型已完全
+// 移除（不是只在 UI 隱藏，是底層 classifyOverlap 根本不會再回傳 certain:false
+// 讓它們有機會被建立）。
+// 一般日照／耐旱／耐濕等級差距（gapSeverity 已判定為 caution/danger）不會進到這裡
+// ——它們有明確判斷依據，走「審查問題」分頁的正常問題卡，不是「無法判斷」。
+export type UnknownSourceType = 'unknown-hatch' | 'unmatched-name'
+
+export interface UnknownSourceGroup {
+  key: string
+  zoneName: string
+  unknownSourceType: UnknownSourceType
+  layerName: string
+  blockName: string
+  unknownReason: string
+  pairCount: number
+  // 只有「單一具體圖層」的 unknown-hatch 來源才能安全套用批次分類按鈕——
+  // unmatched-name 是「純粹名稱比對不到」，沒有單一圖層可以重新分類，批次
+  // 按鈕對它沒有意義，只顯示摘要。
+  singleLayer: boolean
+  overrideApplied?: LayerOverrideAction
+  /** 涉及分區與植物──供卡片直接顯示「涉及分區與植物」欄位，不用呼叫端另外算 */
+  plantNames: string[]
+  /** 代表性的圖面定位標籤（種植區塊代號），最多列前 5 個，供「圖面定位」欄位使用 */
+  locationLabels: string[]
+  /** 代表性的植物實例 id（第一筆配對的兩個實例），供「查看位置」按鈕直接定位 */
+  representativeInstanceIds: [string, string]
+}
+
+export const UNKNOWN_SOURCE_TYPE_LABEL: Record<UnknownSourceType, string> = {
+  'unknown-hatch': '未知圖層',
+  'unmatched-name': '名稱未比對',
+}
+
+/** 「需要確認的具體事項」──比 UNKNOWN_SOURCE_TYPE_LABEL 更完整的一句話，對應
+ *  使用者要求的允許出現人工確認的情況說明，只給 DxfReviewPage 的人工確認
+ *  分頁用（LandscapeAdvisorPage 既有「AI 審查回覆」維持原本的短標籤，不動）。*/
+export const UNKNOWN_SOURCE_WHY_LABEL: Record<UnknownSourceType, string> = {
+  'unknown-hatch': '圖層或圖塊歸屬不明：此 HATCH 圖層未能對應到植栽索引表，系統無法判斷屬於灌木、地被或草皮',
+  'unmatched-name': '植物名稱無法辨識：至少一方名稱未能比對到植栽資料庫，無法判斷相容性',
+}
+
+export function buildUnknownSourceGroups(
+  zoneName: string,
+  conflicts: PlantConflictResult[],
+  overrides?: Map<string, LayerOverrideAction>,
+): UnknownSourceGroup[] {
+  const groups = new Map<string, UnknownSourceGroup>()
+  for (const c of conflicts) {
+    let sourceType: UnknownSourceType
+    let layerName = '—'
+    let reason: string
+    if (c.riskLevel === 'unmatched') {
+      sourceType = 'unmatched-name'
+      reason = '植物名稱未能比對資料庫'
+    } else {
+      const note = classifyOverlap(c.plantA.kind, c.plantB.kind, c.proximity)
+      // certain:true＝灌木／地被／草皮之間的 HATCH 或範圍重疊，一律視為正常景觀
+      // 配置（複層／混植／群植／片植／自然式邊界，見 classifyOverlap 上方說明），
+      // 跳過不建立來源分組。走到這裡唯一還會是 certain:false 的情況只剩「圖層
+      // 類型無法辨識」（unknown-hatch），不再有幾何重疊本身觸發的人工確認。
+      if (note.certain) continue
+      reason = note.label
+      const aUnknown = c.plantA.kind === 'unknown-hatch'
+      const bUnknown = c.plantB.kind === 'unknown-hatch'
+      sourceType = 'unknown-hatch'
+      const layers = dedupe(
+        [aUnknown ? c.plantA.sourceLayer : undefined, bUnknown ? c.plantB.sourceLayer : undefined]
+          .filter((x): x is string => !!x),
+      )
+      layerName = layers.length > 0 ? layers.join('／') : '(無圖層名稱)'
+    }
+    const key = `${zoneName}::${sourceType}::${layerName}::—::${reason}`
+    const existing = groups.get(key)
+    if (existing) {
+      existing.pairCount++
+      if (existing.plantNames.length < 8) existing.plantNames = dedupe([...existing.plantNames, c.plantA.name, c.plantB.name])
+      if (existing.locationLabels.length < 5) existing.locationLabels = dedupe([...existing.locationLabels, c.plantA.label, c.plantB.label]).slice(0, 5)
+      continue
+    }
+    const singleLayer = sourceType === 'unknown-hatch' && layerName !== '(無圖層名稱)' && !layerName.includes('／')
+    groups.set(key, {
+      key, zoneName, unknownSourceType: sourceType, layerName, blockName: '—', unknownReason: reason,
+      pairCount: 1, singleLayer,
+      overrideApplied: singleLayer ? overrides?.get(layerOverrideKey(zoneName, layerName)) : undefined,
+      plantNames: dedupe([c.plantA.name, c.plantB.name]),
+      locationLabels: dedupe([c.plantA.label, c.plantB.label]),
+      representativeInstanceIds: [c.plantA.instanceId, c.plantB.instanceId],
+    })
+  }
+  return [...groups.values()].sort((a, b) => b.pairCount - a.pairCount)
 }
 
 // ── 事件卡：一組植物＋一個圖面位置＝一個問題事件 ────────────────────────────
@@ -153,9 +274,13 @@ export interface ZoneEvent {
   categories: IssueBucketKey[]     // 問題類型標籤（去重）
   primaryBucket: IssueBucketKey    // 取最嚴重 issue 的分類，作為 spatialCluster 分組的「同一根本原因」依據
   title: string
+  /** 截到 60 字，給 PDF 固定版面用。互動網頁改用下面的 *Full 版本（未截斷）。 */
   cause: string
   impact: string
   suggestion: string
+  causeFull: string
+  impactFull: string
+  suggestionFull: string
   distanceCm: number | null        // proximity==='overlap' 時給 null（不印容易誤導的 0cm 數字）
   needsReviewNote: string | null
   sourcePairId: string
@@ -181,6 +306,9 @@ export function buildZoneEvents(zoneName: string, conflicts: PlantConflictResult
         cause: `${conflict.plantA.name} 與 ${conflict.plantB.name} 空間${proximityLabel(conflict)}，惟至少一方植物名稱未能比對資料庫，無法判斷相容性。`,
         impact: '無法確認是否存在生長習性衝突，建議人工核實植物品種後再評估。',
         suggestion: '請設計者確認植物名稱與圖例對照，並於必要時補充至植栽資料庫。',
+        causeFull: `${conflict.plantA.name} 與 ${conflict.plantB.name} 空間${proximityLabel(conflict)}，惟至少一方植物名稱未能比對資料庫，無法判斷相容性。`,
+        impactFull: '無法確認是否存在生長習性衝突，建議人工核實植物品種後再評估。',
+        suggestionFull: '請設計者確認植物名稱與圖例對照，並於必要時補充至植栽資料庫。',
         needsReviewNote: '植物名稱無法比對資料庫',
       }
     }
@@ -189,12 +317,18 @@ export function buildZoneEvents(zoneName: string, conflicts: PlantConflictResult
     const severity = finalizeSeverity(rawSeverity, overlap)
     const worst = conflict.issues.find(i => i.level === 'danger') ?? conflict.issues[0]
     const primaryBucket = CATEGORY_TO_BUCKET[worst.category] ?? 'maintenance'
+    const causeJoined = dedupe(conflict.issues.map(i => i.cause)).join('；')
+    const impactJoined = dedupe(conflict.issues.map(i => i.impact)).join('；')
+    const suggestionJoined = dedupe(conflict.issues.map(i => i.suggestion)).join('；')
     return {
       ...base, severity, categories, primaryBucket,
       title: deriveConclusion(worst.cause),
-      cause: capText(dedupe(conflict.issues.map(i => i.cause)).join('；'), 60),
-      impact: capText(dedupe(conflict.issues.map(i => i.impact)).join('；'), 60),
-      suggestion: capText(dedupe(conflict.issues.map(i => i.suggestion)).join('；'), 60),
+      cause: capText(causeJoined, 60),
+      impact: capText(impactJoined, 60),
+      suggestion: capText(suggestionJoined, 60),
+      causeFull: causeJoined,
+      impactFull: impactJoined,
+      suggestionFull: suggestionJoined,
       needsReviewNote: severity === 'needs-review' ? overlap.label : null,
     }
   })
@@ -254,9 +388,15 @@ export interface EventGroup {
   locationCodes: string[]
   sourceConflictIds: string[]
   title: string
+  /** 截到 80 字，給 PDF 固定版面用（見 handleExportZonePdf）。互動網頁不受紙本
+   *  版面限制，不要用這幾個欄位——改用下面對應的 *Full 版本（未截斷）。 */
   cause: string
   impact: string
   suggestion: string
+  /** 未截斷的完整文字，給互動網頁的 MergedIssueCard 用。 */
+  causeFull: string
+  impactFull: string
+  suggestionFull: string
   diameterCm: number
   /** 這一群是「共用植物實例」合併出來的（不受距離門檻限制，跨度可能較大），
    *  還是「中心點在 300cm 門檻內」合併出來的，或本來就只有一組配對——供事後
@@ -410,6 +550,9 @@ export function clusterZoneEvents(
       cause: capText(dedupe(cluster.map(e => e.cause)).join('；'), 80),
       impact: capText(dedupe(cluster.map(e => e.impact)).join('；'), 80),
       suggestion: capText(dedupe(cluster.map(e => e.suggestion)).join('；'), 80),
+      causeFull: dedupe(cluster.map(e => e.causeFull)).join('；'),
+      impactFull: dedupe(cluster.map(e => e.impactFull)).join('；'),
+      suggestionFull: dedupe(cluster.map(e => e.suggestionFull)).join('；'),
       diameterCm: Math.round(clusterDiameterCm(cluster, instanceById, cmPerDU)),
       mergeReason, sharedInstanceIds,
     }

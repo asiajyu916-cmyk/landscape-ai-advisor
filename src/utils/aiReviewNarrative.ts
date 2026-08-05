@@ -243,6 +243,17 @@ export function generateIssueJudgement(conflict: PlantConflictResult): IssueJudg
 }
 
 // ── 三、修正方案（Plan A/B/C）───────────────────────────────────────────────
+// 三個方案是三種不同的「產生策略」，不是同一份資料換句話說：
+//   A（最小修改）：只挑問題最集中的 1～2 種植栽，嚴重配對才替換，其餘只標記
+//                  「建議調整位置」，不換植栽——修改範圍是三方案中最小的。
+//   B（配置優化）：找出本區出現次數最多的問題類型（例如日照），只處理落在這個
+//                  類型底下的植栽；其中有嚴重配對的才替換，其餘一樣標記調整
+//                  位置——處理範圍比 A 大，但不是全部問題都處理。
+//   C（整體替換）：所有標記為有問題的植栽全部替換，目標是盡量清空嚴重與提醒。
+// 三個方案畫面上顯示的「涉及植物種類數」「修改前後問題數」「修改程度」都是
+// 直接從各自的 touched 集合算出來的真實數字，不是各自配一組固定文案——資料量
+// 太小、三種策略殊途同歸時，下面會自動去重，避免顯示看起來不同、內容其實一樣
+// 的假選項。
 
 export interface FixPlanReplacement {
   originalName: string
@@ -254,27 +265,24 @@ export interface FixPlan {
   id: 'A' | 'B' | 'C'
   title: string
   subtitle: string
-  expectedDangerAddressed: number
-  expectedCautionAddressed: number
-  keepPlants: string[]
-  replacements: FixPlanReplacement[]
-  unresolvedPlants: string[]   // 有問題但找不到同類替代植物，只能保留或人工處理
+  keepPlants: string[]              // 1. 保留植物
+  movedPlants: string[]             // 2. 移動植物（建議調整位置／範圍／比例，不換植栽）
+  replacements: FixPlanReplacement[] // 3. 替換植物
+  touchedSpeciesCount: number        // 4. 涉及植物種類數（movedPlants + replacements）
+  scopeNote: string                  // 5. 預估修改面積或配置數量（用涉及配對數量代理）
+  beforeIssueCount: number           // 6. 修改前問題數
+  afterIssueCount: number            // 7. 修改後預估問題數
+  modificationLevel: '低' | '中' | '高'  // 8. 修改程度
+  applicableScenario: string         // 9. 適用情境
   reasoning: string
   pros: string[]
   cons: string[]
-  estimateNote: string
 }
 
 interface FixPlanZoneInput {
   zoneName: string
   evalResult?: EvalResult
   proximityConflicts: PlantConflictResult[]
-}
-
-function countAddressedConflicts(conflicts: PlantConflictResult[], replacedNames: Set<string>) {
-  const danger = conflicts.filter(c => c.riskLevel === 'high' && (replacedNames.has(c.plantA.name) || replacedNames.has(c.plantB.name))).length
-  const caution = conflicts.filter(c => c.riskLevel === 'medium' && (replacedNames.has(c.plantA.name) || replacedNames.has(c.plantB.name))).length
-  return { danger, caution }
 }
 
 /** 依偏好挑一個替代植物：優先套用 preferFn（找不到符合的再退回分數最高的第一筆） */
@@ -287,111 +295,186 @@ function pickAlternative(options: AltOption[], preferFn?: (o: AltOption) => bool
   return options[0]   // evaluate() 產生時已依分數排序，第一筆＝最佳適配
 }
 
-/**
- * 【未來可替換為真正 LLM API 的函式之一】三個方案完全從既有 evalResult.alternatives
- * （既有替代植栽建議，未重新計算相容性分數）與 proximityConflicts（既有配對風險）
- * 組出來：
- *   A（最小修改）：只處理牽涉「嚴重」配對的植物，其餘即使有提醒也保留原配置
- *   B（最佳適配）：所有有問題的植物都換成分數最高的替代植栽（沿用既有評分排序）
- *   C（低維護）：優先挑選 maintenanceLevel 為「低」的替代植栽，找不到才退回最佳適配
- * 不產生任何假造的改善分數／百分比；只回報「處理幾項嚴重／幾項提醒」這種可從既有
- * 資料直接算出的真實數字，資料不足以量化時改用文字描述（estimateNote）。
- */
+interface PlantProblemStat {
+  dangerConflictCount: number
+  totalConflictCount: number
+  categories: Set<IssueCategoryGroup>
+}
+
+function buildPlantProblemStats(conflicts: PlantConflictResult[]): Map<string, PlantProblemStat> {
+  const map = new Map<string, PlantProblemStat>()
+  const touch = (name: string): PlantProblemStat => {
+    let stat = map.get(name)
+    if (!stat) { stat = { dangerConflictCount: 0, totalConflictCount: 0, categories: new Set() }; map.set(name, stat) }
+    return stat
+  }
+  for (const c of conflicts) {
+    if (c.riskLevel === 'unmatched') continue
+    const isDanger = c.riskLevel === 'high'
+    for (const name of [c.plantA.name, c.plantB.name]) {
+      const stat = touch(name)
+      stat.totalConflictCount++
+      if (isDanger) stat.dangerConflictCount++
+      for (const issue of c.issues) stat.categories.add(classifyCategory(issue.category))
+    }
+  }
+  return map
+}
+
+/** 有實際判定結果（嚴重／提醒）的配對數——unmatched 是「無法判定」，不算問題。 */
+function countIssueConflicts(conflicts: PlantConflictResult[]): number {
+  return conflicts.filter(c => c.riskLevel === 'high' || c.riskLevel === 'medium' || c.riskLevel === 'low').length
+}
+
+function countAddressed(conflicts: PlantConflictResult[], touchedNames: Set<string>): number {
+  return conflicts.filter(c =>
+    (c.riskLevel === 'high' || c.riskLevel === 'medium' || c.riskLevel === 'low') &&
+    (touchedNames.has(c.plantA.name) || touchedNames.has(c.plantB.name)),
+  ).length
+}
+
+/** 【未來可替換為真正 LLM API 的函式之一】見檔案這一段最上方的策略說明。 */
 export function generateFixPlans(zone: FixPlanZoneInput): FixPlan[] {
   const alternatives = zone.evalResult?.alternatives ?? []
-  const dangerPlantNames = new Set(
-    zone.proximityConflicts.filter(c => c.riskLevel === 'high').flatMap(c => [c.plantA.name, c.plantB.name]),
-  )
+  const beforeIssueCount = countIssueConflicts(zone.proximityConflicts)
 
-  if (alternatives.length === 0) {
+  if (alternatives.length === 0 || beforeIssueCount === 0) {
     const note = '目前沒有標記為需要調整的植栽，建議維持原配置。'
-    return (['A', 'B', 'C'] as const).map(id => ({
-      id,
-      title: id === 'A' ? '方案 A｜最小修改' : id === 'B' ? '方案 B｜最佳適配' : '方案 C｜低維護方案',
-      subtitle: note,
-      expectedDangerAddressed: 0, expectedCautionAddressed: 0,
-      keepPlants: [], replacements: [], unresolvedPlants: [],
+    return [{
+      id: 'A', title: '建議方案', subtitle: note,
+      keepPlants: [], movedPlants: [], replacements: [], touchedSpeciesCount: 0,
+      scopeNote: '無需調整', beforeIssueCount, afterIssueCount: beforeIssueCount,
+      modificationLevel: '低', applicableScenario: '目前配置無須調整',
       reasoning: note, pros: ['不改動任何植栽'], cons: [],
-      estimateNote: note,
-    }))
+    }]
   }
+
+  const stats = buildPlantProblemStats(zone.proximityConflicts)
+  const problemNames = alternatives.map(s => s.originalPlant.name)
 
   function buildPlan(
     id: 'A' | 'B' | 'C', title: string, subtitle: string,
-    shouldReplace: (originalName: string) => boolean,
-    preferFn: ((o: AltOption) => boolean) | undefined,
-    reasoning: string, pros: string[], cons: string[],
+    touchNames: Set<string>,
+    reasoning: string, pros: string[], cons: string[], applicableScenario: string,
   ): FixPlan {
     const keepPlants: string[] = []
+    const movedPlants: string[] = []
     const replacements: FixPlanReplacement[] = []
-    const unresolvedPlants: string[] = []
 
     for (const s of alternatives) {
-      if (!shouldReplace(s.originalPlant.name)) { keepPlants.push(s.originalPlant.name); continue }
-      const alt = pickAlternative(s.alternatives, preferFn)
-      if (!alt) { unresolvedPlants.push(s.originalPlant.name); continue }
-      replacements.push({ originalName: s.originalPlant.name, replacementName: alt.plant.name, reason: alt.reason })
+      const name = s.originalPlant.name
+      if (!touchNames.has(name)) { keepPlants.push(name); continue }
+      const hasDanger = (stats.get(name)?.dangerConflictCount ?? 0) > 0
+      const alt = hasDanger ? pickAlternative(s.alternatives) : undefined
+      if (alt) replacements.push({ originalName: name, replacementName: alt.plant.name, reason: alt.reason })
+      else movedPlants.push(name)   // 嚴重問題找不到替代植物，或本來就只是提醒等級：建議調整位置
     }
 
-    const replacedNames = new Set(replacements.map(r => r.originalName))
-    const { danger, caution } = countAddressedConflicts(zone.proximityConflicts, replacedNames)
-    const estimateNote = replacements.length === 0
-      ? '此方案不更換植栽，僅靠位置調整或維持現況。'
-      : danger > 0
-        ? `預估可明顯降低排水與配植衝突，處理 ${danger} 組涉及嚴重問題的配對。`
-        : caution > 0
-          ? `預估可降低提醒事項對應的配植衝突，處理 ${caution} 組配對。`
-          : '預估可提升整體植栽環境適應性，實際改善幅度建議施工前現場複核。'
+    const touchedSpeciesCount = movedPlants.length + replacements.length
+    const touchedNames = new Set([...movedPlants, ...replacements.map(r => r.originalName)])
+    const addressedConflictCount = countAddressed(zone.proximityConflicts, touchedNames)
+    const afterIssueCount = Math.max(0, beforeIssueCount - addressedConflictCount)
+    const modificationLevel: FixPlan['modificationLevel'] = id === 'A' ? '低' : id === 'B' ? '中' : '高'
+    const scopeNote = touchedSpeciesCount === 0
+      ? '本方案不調整任何植栽'
+      : `涉及 ${touchedSpeciesCount} 種植栽・${addressedConflictCount} 組配對`
 
     return {
-      id, title, subtitle,
-      expectedDangerAddressed: danger, expectedCautionAddressed: caution,
-      keepPlants, replacements, unresolvedPlants,
-      reasoning, pros, cons, estimateNote,
+      id, title, subtitle, keepPlants, movedPlants, replacements, touchedSpeciesCount,
+      scopeNote, beforeIssueCount, afterIssueCount, modificationLevel, applicableScenario,
+      reasoning, pros, cons,
     }
   }
 
+  // ── A：只挑問題最集中（嚴重配對數優先，其次總配對數）的 1～2 種植栽 ──────────
+  const rankedByProblem = [...problemNames].sort((a, b) => {
+    const sa = stats.get(a), sb = stats.get(b)
+    const da = sa?.dangerConflictCount ?? 0, db = sb?.dangerConflictCount ?? 0
+    if (db !== da) return db - da
+    return (sb?.totalConflictCount ?? 0) - (sa?.totalConflictCount ?? 0)
+  })
+  const planANames = new Set(rankedByProblem.slice(0, 2))
   const planA = buildPlan(
-    'A', '方案 A｜最小修改', '優先保留原有植栽，只調整必要問題，修改數量最少',
-    name => dangerPlantNames.has(name),
-    undefined,
-    '只更換牽涉「嚴重」等級配對的植栽，提醒等級的問題改以位置調整或養護管理處理，改動幅度最小。',
-    ['對原設計改動最少，施工成本與植栽採購成本最低', '保留大部分原始設計意圖'],
-    ['提醒等級的問題仍需另外透過位置或養護計畫處理，不會直接消除'],
+    'A', '方案 A｜最小修改', '優先保留原設計，只處理問題最集中的 1～2 種植栽，嚴重問題才替換，其餘建議調整位置',
+    planANames,
+    `只針對問題最集中的 ${planANames.size} 種植栽處理：涉及嚴重配對的植栽替換，其餘僅標記建議調整種植位置或範圍，其他植栽維持原設計。`,
+    ['對原設計改動最少，施工與植栽採購成本最低', '保留絕大部分原始設計意圖'],
+    ['未處理的提醒問題仍需另外透過位置或養護計畫留意'],
+    '設計已定案、僅需微調的專案，希望維持既有植栽採購與施工範圍',
   )
 
+  // ── B：只處理出現次數最多的問題類型 ──────────────────────────────────────
+  const categoryCount = new Map<IssueCategoryGroup, number>()
+  for (const c of zone.proximityConflicts) {
+    if (c.riskLevel === 'unmatched') continue
+    for (const issue of c.issues) {
+      const cat = classifyCategory(issue.category)
+      categoryCount.set(cat, (categoryCount.get(cat) ?? 0) + 1)
+    }
+  }
+  const primaryCategory = [...categoryCount.entries()].sort((a, b) => b[1] - a[1])[0]?.[0]
+  const primaryCategoryLabel = primaryCategory ? CATEGORY_GROUP_META[primaryCategory].label : ''
+  const planBNames = new Set(
+    primaryCategory ? problemNames.filter(name => stats.get(name)?.categories.has(primaryCategory)) : [],
+  )
   const planB = buildPlan(
-    'B', '方案 B｜最佳適配', '優先解決嚴重問題，選擇環境適應性較高的替代植物，平衡設計與審查結果',
-    () => true,
-    undefined,
-    '所有標記為有問題（嚴重或提醒）的植栽，全部換成既有評分機制中分數最高的替代植栽，兼顧審查結果與整體設計平衡。',
-    ['同時處理嚴重與提醒問題，審查結果最完整', '替代植栽皆為既有評分機制中適配度最高的選項'],
-    ['植栽異動範圍較大，需重新確認整體設計風格與採購成本'],
+    'B', '方案 B｜配置優化', `優先解決本區最多的「${primaryCategoryLabel || '主要'}」問題，重新分配相關植栽的位置或比例，部分植栽替換`,
+    planBNames,
+    `找出本區出現次數最多的問題類型（${primaryCategoryLabel || '無明顯主要類型'}），只處理落在這個類型底下的植栽：有嚴重配對的替換，其餘重新分配位置或種植比例，其他類型的問題暫不處理。`,
+    ['針對主要問題類型集中處理，效益比例較高', '仍保留與主要問題無關的原始設計'],
+    ['非主要類型的提醒問題仍會保留，需另外處理'],
+    '希望優先解決單一最大宗問題類型、但不想全面重做設計的專案',
   )
 
+  // ── C：全部問題植栽都替換 ────────────────────────────────────────────────
+  const planCNames = new Set(problemNames)
   const planC = buildPlan(
-    'C', '方案 C｜低維護方案', '優先選擇低維護、適應性較高的植物，降低後續養護風險',
-    () => true,
-    o => o.plant.maintenanceLevel === '低',
-    '所有標記為有問題的植栽，優先挑選養護需求「低」的替代植栽（找不到低維護選項時，退回既有評分最高的選項），降低後續管理負擔。',
-    ['長期養護成本與人力需求較低', '同時處理嚴重與提醒問題'],
-    ['部分植栽可能因優先考量維護需求而非最佳環境適配分數，設計效果需另行確認'],
+    'C', '方案 C｜整體替換', '全面替換所有標記為有問題的植栽，以降低全部嚴重與提醒問題為優先，配置調整幅度最大',
+    planCNames,
+    '所有標記為有問題（嚴重或提醒）的植栽全數替換為既有評分機制中適配度最高的選項，目標是盡量清空本區的嚴重與提醒問題。',
+    ['同時處理嚴重與提醒問題，審查結果最完整', '長期環境適應性最佳'],
+    ['植栽異動範圍最大，需重新確認整體設計風格與採購成本'],
+    '設計階段仍可大幅調整、以審查通過與長期穩定性為優先的專案',
   )
 
-  const plans = [planA, planB, planC]
+  // ── 若三個方案的替換／移動集合實質相同（資料量太小，三種策略殊途同歸），
+  // 去重合併，避免製造假選項──不是只藏卡片，是真的只回傳不重複的方案。
+  const signature = (p: FixPlan) => JSON.stringify({
+    moved: [...p.movedPlants].sort(),
+    replaced: p.replacements.map(r => `${r.originalName}>${r.replacementName}`).sort(),
+  })
+  const seen = new Set<string>()
+  const distinctPlans: FixPlan[] = []
+  for (const p of [planA, planB, planC]) {
+    const sig = signature(p)
+    if (seen.has(sig)) continue
+    seen.add(sig)
+    distinctPlans.push(p)
+  }
 
-  return plans
+  if (distinctPlans.length === 1) {
+    return [{ ...distinctPlans[0], title: '建議方案', subtitle: '目前資料只能產生一種有意義的調整方式，已合併為單一建議方案' }]
+  }
+  return distinctPlans
 }
 
 /** 依三方案處理的嚴重問題數量挑一個預設推薦——問題少時最小修改就夠、問題多時
  *  才需要最佳適配，沒有嚴重問題時預設走低維護方案。純粹是既有數字的排序規則，
  *  不是新的判斷邏輯。 */
 export function recommendFixPlan(plans: FixPlan[], totalDangerCount: number): { id: FixPlan['id']; reason: string } {
+  // 方案可能因為去重只剩 1～2 個，推薦一定要從實際存在的方案裡選，不能假設 A/B/C 都在。
+  if (plans.length === 1) {
+    return { id: plans[0].id, reason: '目前資料只能產生一種有意義的調整方式，已合併為單一建議方案。' }
+  }
+  const byId = (id: FixPlan['id']) => plans.find(p => p.id === id)
   if (totalDangerCount === 0) {
-    return { id: 'C', reason: '目前沒有嚴重問題，建議優先考慮降低後續養護負擔。' }
+    const pick = byId('C') ?? byId('B') ?? plans[plans.length - 1]
+    return { id: pick.id, reason: '目前沒有嚴重問題，建議優先考慮降低後續提醒事項。' }
   }
   if (totalDangerCount <= 2) {
-    return { id: 'A', reason: '嚴重問題數量不多，最小修改即可解決，不需大幅調整設計。' }
+    const pick = byId('A') ?? plans[0]
+    return { id: pick.id, reason: '嚴重問題數量不多，最小修改即可解決，不需大幅調整設計。' }
   }
-  return { id: 'B', reason: '嚴重問題較多，建議採用最佳適配方案完整處理審查結果。' }
+  const pick = byId('B') ?? byId('C') ?? plans[plans.length - 1]
+  return { id: pick.id, reason: '嚴重問題較多，建議採用配置優化方案完整處理審查結果。' }
 }

@@ -90,3 +90,26 @@ export function sunLevelOf(v: string | undefined): number | undefined { return v
 export function waterLevelOf(v: string | undefined): number | undefined { return v ? WATER_LEVEL[v] : undefined }
 export function wetLevelOf(v: string | undefined): number | undefined { return v ? WET_LEVEL[v] : undefined }
 export function maintenanceLevelOf(v: string | undefined): number | undefined { return v ? MAINTENANCE_LEVEL[v] : undefined }
+
+// ── 喬木排除規則（產品規則：喬木不納入配置評估）───────────────────────────────
+// 喬木只保留在圖面辨識／數量統計／位置顯示（既有的 TreeInventoryItem／喬木盤點
+// 系統已經是「空間事實盤點，不做兩兩相容性衝突卡」，見 plantProximity.ts 的
+// computeZoneTreeInventory）。這裡是唯一的「這是不是喬木、要不要排除」判斷入口
+// ——不管是日照/耐旱/耐濕/配置相容性衝突計算、問題群組、AI 修正方案或替代植栽
+// 候選，一律先呼叫這個函式過濾，不要各自在 UI 層各寫一次「不要顯示喬木」，
+// 底層資料如果還是把喬木算進去，換一個顯示位置遲早又漏出來。
+//
+// 兩種輸入形狀都支援：
+//   - CsvPlantRecord／SelectedCsvPlant（植栽資料庫紀錄）→ 看 normalizedCategory
+//   - SpatialPlantInstance（DXF 空間圖層）→ 看 kind
+// plantProximity.ts 的 computeZoneProximityPairs 已經用 kind==='tree' 排除喬木
+// 配對，維持不動；這個函式主要補上 plantEvaluator.ts 全區 evaluate() 呼叫（供
+// AI 修正方案替代植栽用）原本沒有做這層過濾的缺口。
+export function isExcludedFromPlantingEvaluation(
+  item: { normalizedCategory?: string } | { kind?: string } | undefined | null,
+): boolean {
+  if (!item) return false
+  if ('normalizedCategory' in item && item.normalizedCategory) return item.normalizedCategory === 'tree'
+  if ('kind' in item && item.kind) return item.kind === 'tree'
+  return false
+}

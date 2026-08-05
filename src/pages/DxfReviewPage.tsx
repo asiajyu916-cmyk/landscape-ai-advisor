@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useMemo, useEffect, Fragment } from 'rea
 import { createPortal } from 'react-dom'
 import {
   Upload, FileText, AlertTriangle, CheckCircle, HelpCircle,
-  ChevronDown, X, ArrowRight, Layers, Trash2, BookOpen, Table2, FileOutput,
+  ChevronDown, X, ArrowRight, Layers, Trash2, BookOpen, Table2, FileOutput, Sparkles,
 } from 'lucide-react'
 import { parseDxf, detectPlantSchedule, findNearbyTexts } from '@/utils/dxfParser'
 import { analyzeMultiLayer, zoneLabel, detectZonesFromText, buildZonePlantList, buildZoneAssignDebug, polygonBBox, polygonArea, pointInPolygon, detectAnalysisScope, SCHEDULE_KEYWORD_RE } from '@/utils/spatialAnalysis'
@@ -16,10 +16,13 @@ import {
   buildShortZoneConclusion, buildTechnicalAppendixHtml,
   BUCKET_LABEL, type ZoneEvent, type EventSeverity,
   type EventGroup, type NeedsReviewSummary,
+  buildUnknownSourceGroups, UNKNOWN_SOURCE_TYPE_LABEL, UNKNOWN_SOURCE_WHY_LABEL, type UnknownSourceGroup,
 } from '@/utils/dxfReportBuilder'
+import MergedIssueCard from '@/components/dxf/MergedIssueCard'
+import UnknownSourceGroupCard from '@/components/dxf/UnknownSourceGroupCard'
 import { aggregatePairConflictsToEvalResult, evaluate } from '@/utils/plantEvaluator'
 import type { EvalResult } from '@/utils/plantEvaluator'
-import { computeZonePlantConflicts, DEFAULT_PROXIMITY_CONFIG } from '@/utils/plantProximity'
+import { computeZonePlantConflicts, DEFAULT_PROXIMITY_CONFIG, layerOverrideKey } from '@/utils/plantProximity'
 import { loadPlantsFromStorage, savePlantsToStorage, loadPlantsWithCsvMerge } from '@/data/plantStore'
 import { searchPlantAllTiers, searchResultToDraft } from '@/utils/plantSearchClient'
 import { existsExactInLocalDatabase, normalizeLayerToken, buildLayerPlantKeywordMap, findPlantsByLayerName, normalizeScientificName } from '@/utils/plantNameMatch'
@@ -35,6 +38,7 @@ import AIFixPlanModal from '@/components/dxf/AIFixPlanModal'
 import { generateReviewSummary, generateFixPlans, recommendFixPlan, generateMapInsight, generateZoneOneLiner } from '@/utils/aiReviewNarrative'
 import ZoneOverviewMap, { type ZoneMapEntry, type ZoneMapIssuePoint, type FocusPoint } from '@/components/dxf/ZoneOverviewMap'
 import ZoneQuickPanel, { type QuickPanelIssue } from '@/components/dxf/ZoneQuickPanel'
+import ZoneMiniPreview from '@/components/dxf/ZoneMiniPreview'
 import AiAdvisorDrawer from '@/components/dxf/AiAdvisorDrawer'
 import {
   loadDxfRules, upsertDxfRule, deleteDxfRule, clearAllDxfRules,
@@ -491,7 +495,6 @@ function RiskFilterBar({ filter, onChange, stats }: {
     { key: 'all', label: '全部' },
     { key: 'severe', label: '嚴重' },
     { key: 'warning', label: '提醒' },
-    { key: 'passed', label: '通過' },
   ]
   return (
     <div className="space-y-2">
@@ -510,7 +513,7 @@ function RiskFilterBar({ filter, onChange, stats }: {
         ))}
       </div>
       <p className="text-sm text-stone-500">
-        有效相鄰配對 {stats.total} 組　嚴重 {stats.severe}｜提醒 {stats.warning}｜通過 {stats.passed}
+        重複問題已依同分區＋同根本原因＋位置相鄰合併　嚴重 {stats.severe} 項｜提醒 {stats.warning} 項
       </p>
     </div>
   )
@@ -2296,6 +2299,7 @@ export default function DxfReviewPage({
   onTabChange,
   onImport,
   layerOverrides,
+  onApplyLayerOverride,
   onZoneReviewsUpdated,
 }: {
   activeTab?: 'pdf' | 'landscape' | 'dxf' | 'advisor'
@@ -2305,6 +2309,9 @@ export default function DxfReviewPage({
   // 重跑整個分區分析——不是各頁各自維護一份判斷，兩邊共用同一份 override 狀態
   // （由 App.tsx 持有，見 layerOverrideKey()）。
   layerOverrides?: Map<string, LayerOverrideAction>
+  // 「人工確認」分頁的批次分類按鈕也寫回同一份 App.tsx 狀態，跟 LandscapeAdvisorPage
+  // 的「AI 審查回覆」共用同一個 applyLayerOverride，不是各自維護一份。
+  onApplyLayerOverride?: (key: string, action: LayerOverrideAction) => void
   // 每次重新分析完成（不論是使用者上傳/切單位，或套用 layerOverrides）都呼叫一次，
   // 讓 LandscapeAdvisorPage 知道要重新讀取 sessionStorage 的 dxf-zone-review-full。
   onZoneReviewsUpdated?: () => void
@@ -3184,6 +3191,9 @@ ${appendixHtml}`
             reviews={zoneReviews}
             zoneStatistics={zoneStatistics}
             detectedZones={detectedZones}
+            drawingUnit={drawingUnit}
+            layerOverrides={layerOverrides}
+            onApplyLayerOverride={onApplyLayerOverride}
             onAskAI={q => setAiDrawerQuestion(q)} />
         )}
 
@@ -3916,11 +3926,14 @@ const COMPAT_CLS: Record<string, string> = {
   '高風險不建議':   'bg-red-100 border-red-400 text-red-900',
 }
 
-function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones }: {
+function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones, drawingUnit, layerOverrides, onApplyLayerOverride }: {
   reviews: ZoneReviewResult[]
   onAskAI?: (q: string) => void
   zoneStatistics: ZoneStatisticsResult[]
   detectedZones: DetectedZone[]
+  drawingUnit: DrawingUnit
+  layerOverrides?: Map<string, LayerOverrideAction>
+  onApplyLayerOverride?: (key: string, action: LayerOverrideAction) => void
 }) {
   const [activeTab, setActiveTab] = useState<string>('overview')
   const [zoneSubTab, setZoneSubTab] = useState<'overview' | 'issues' | 'pending'>('overview')
@@ -3965,6 +3978,13 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones }: {
     return r.status === '植物待確認' ? '待確認' : '無資料'
   }
   const plantCount = (r: ZoneReviewResult) => r.blockEntries.reduce((s, b) => s + b.count, 0)
+  const riskColorHex = (r: ZoneReviewResult) => {
+    const level = r.evalResult?.overallRiskLevel
+    if (level === '高') return '#dc2626'
+    if (level === '中') return '#2563eb'
+    if (level === '低') return '#059669'
+    return '#a8a29e'
+  }
 
   // AI 審查結論／修正方案：全部從 reviews（既有 evalResult／proximityConflicts）
   // 動態算出，見 aiReviewNarrative.ts 檔頭說明——不寫死示範內容。
@@ -3977,33 +3997,51 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones }: {
   const topPriorityZoneName = reviewSummary.priorityZones[0]?.zoneName
 
   // ── 分區總覽圖資料組裝：座標／面積／植栽統計全部直接讀既有資料，不新增偵測 ──
-  const buildIssuePoints = (r: ZoneReviewResult): ZoneMapIssuePoint[] => r.proximityConflicts
-    .filter(c => c.riskLevel === 'high' || c.riskLevel === 'medium')
-    .map(c => {
-      const a = r.spatialInstances?.find(s => s.id === c.plantA.instanceId)
-      const b = r.spatialInstances?.find(s => s.id === c.plantB.instanceId)
-      if (!a || !b) return null
-      const severity: 'danger' | 'caution' = c.riskLevel === 'high' ? 'danger' : 'caution'
-      return { id: c.id, x: (a.center.x + b.center.x) / 2, y: (a.center.y + b.center.y) / 2, severity }
+  // 地圖問題點與分區快覽面板的「主要問題」共用同一份「重複問題合併」結果
+  // （clusterZoneEvents，跟審查問題分頁、PDF 匯出同一套運算），確保三處看到的
+  // 問題編號與數量完全一致，不會地圖說 12 個、面板說 24 個。
+  // clusterZoneEvents 是 O(n²) 空間群聚運算，大分區（實測曾遇過單區 3900+ 組
+  // 配對）若每次 render（例如純粹 hover 地圖）都重algo 全部 13 區會直接卡死頁面
+  // ——這裡用 useMemo 鎖定只在 reviews／drawingUnit 真的變動時才重算一次。
+  const zoneEventGroupsByZone = useMemo(() => {
+    const map = new Map<string, EventGroup[]>()
+    for (const r of reviews) {
+      const events = buildZoneEvents(r.zoneName, r.proximityConflicts)
+      const { groups } = clusterZoneEvents(r.zoneName, events, r.spatialInstances ?? [], drawingUnit)
+      map.set(r.zoneName, groups)
+    }
+    return map
+  }, [reviews, drawingUnit])
+  const buildZoneGroups = (r: ZoneReviewResult): EventGroup[] => zoneEventGroupsByZone.get(r.zoneName) ?? []
+
+  const buildIssuePoints = (r: ZoneReviewResult): ZoneMapIssuePoint[] => buildZoneGroups(r)
+    .map((g): ZoneMapIssuePoint | null => {
+      const insts = g.plantInstanceIds.map(id => r.spatialInstances?.find(s => s.id === id)).filter((x): x is SpatialPlantInstance => !!x)
+      if (insts.length === 0) return null
+      const x = insts.reduce((s, i2) => s + i2.center.x, 0) / insts.length
+      const y = insts.reduce((s, i2) => s + i2.center.y, 0) / insts.length
+      return { id: g.id, x, y, severity: g.maxSeverity, label: g.id.split('-')[1] ?? g.id }
     })
     .filter((p): p is ZoneMapIssuePoint => !!p)
 
-  const buildQuickPanelIssues = (r: ZoneReviewResult): QuickPanelIssue[] => r.proximityConflicts
-    .map(c => {
-      const level: QuickPanelIssue['level'] = c.riskLevel === 'high' ? 'danger' : c.riskLevel === 'medium' ? 'caution' : 'passed'
-      if (c.riskLevel === 'unmatched') {
-        return { id: c.id, title: '植物名稱未能比對到資料庫', level, reason: c.locationLabel }
-      }
-      const categoryResults = buildCategoryResults(c.issues)
-      const fallbackCategory = classifyCategory(c.issues[0]?.category)
-      const displayCategory = pickPrimaryCategory(categoryResults, fallbackCategory)
-      const primaryResult = categoryResults.find(cr => cr.category === displayCategory)
-      return { id: c.id, title: primaryResult?.title ?? c.locationLabel, level, reason: primaryResult?.summary ?? c.locationLabel }
-    })
-    .sort((a, b) => ({ danger: 0, caution: 1, passed: 2 }[a.level]) - ({ danger: 0, caution: 1, passed: 2 }[b.level]))
+  const buildQuickPanelIssues = (r: ZoneReviewResult): QuickPanelIssue[] => buildZoneGroups(r)
+    .map(g => ({
+      id: g.id, title: g.title, level: g.maxSeverity,
+      reason: `${g.cause}（涉及 ${g.pairCount} 組配對）`,
+      location: g.locationCodes.join('、'),
+    }))
+
+  // 植物辨識信心度＝已比對到植栽資料庫的圖塊／HATCH 數量占全部的比例（依 count
+  // 加權），是既有 matchStatus 資料直接算出來的真實數字，不是假造的 AI 分數。
+  const zoneMatchConfidence = (r: ZoneReviewResult): number | undefined => {
+    const totalBlocks = r.blockEntries.reduce((s, b) => s + b.count, 0)
+    const matchedBlocks = r.blockEntries.filter(b => b.matchStatus === 'db-matched').reduce((s, b) => s + b.count, 0)
+    return totalBlocks > 0 ? Math.round((matchedBlocks / totalBlocks) * 100) : undefined
+  }
 
   const buildMapEntries = (): ZoneMapEntry[] => reviews.map((r, i) => {
     const stats = zoneStatistics.find(s => s.zoneId === r.zoneName)
+    const matchConfidencePercent = zoneMatchConfidence(r)
     return {
       zoneName: r.zoneName,
       boundary: detectedZones.find(z => z.name === r.zoneName)?.boundary,
@@ -4015,6 +4053,7 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones }: {
       passedCount: r.proximityConflicts.filter(c => c.riskLevel === 'low' || c.riskLevel === 'unmatched').length,
       colorIndex: i,
       issuePoints: buildIssuePoints(r),
+      matchConfidencePercent,
     }
   })
   const focusPointsForZone = (zoneName: string): FocusPoint[] | undefined => {
@@ -4034,7 +4073,7 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones }: {
           {/* 總覽 tab */}
           <button
             onClick={() => setActiveTab('overview')}
-            className={`flex-shrink-0 px-5 py-3 text-sm font-semibold border-b-2 transition-colors whitespace-nowrap ${
+            className={`flex-shrink-0 px-5 py-3.5 text-base font-semibold border-b-2 transition-colors whitespace-nowrap ${
               activeTab === 'overview'
                 ? 'border-green-600 text-green-700 bg-green-50'
                 : 'border-transparent text-stone-500 hover:text-stone-700 hover:bg-stone-50'
@@ -4092,115 +4131,138 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones }: {
               )}
             </div>
 
-            {/* AI 審查結論（統計標籤與問題列表之間）*/}
-            {reviewSummary.stats.zoneCount > 0 && (
-              <AIReviewSummary
-                summary={reviewSummary}
-                onSelectZone={setActiveTab}
-                onGenerateFixPlan={topPriorityZoneName ? () => setFixPlanZone(reviews.find(r => r.zoneName === topPriorityZoneName) ?? null) : undefined}
-              />
-            )}
-
-            {/* 植栽分區配置總覽：先看整體空間關係，再看局部問題 */}
+            {/* 植栽分區配置總覽（左 60~70%）＋ AI 審查結論／快覽面板（右 30~40%）：
+                圖面是頁面主視覺，桌機大螢幕優先分欄，不做小縮圖再配一排文字卡片。*/}
             {(() => {
               const mapZones = buildMapEntries()
               const hasAnyBoundary = mapZones.some(z => z.boundary && z.boundary.vertices.length >= 3)
-              if (!hasAnyBoundary) return null
               return (
-                <div className="bg-white rounded-2xl border border-stone-200 p-4 space-y-3">
-                  <div className="flex items-center justify-between flex-wrap gap-2">
-                    <h3 className="text-base font-bold text-stone-800">植栽分區配置總覽</h3>
-                    <p className="text-sm text-stone-500">點選分區可篩選該區問題；滑鼠移入可查看面積與植栽概況</p>
-                  </div>
-                  <div className="flex justify-center">
-                    <ZoneOverviewMap
-                      zones={mapZones}
-                      activeZoneName={quickPanelZone}
-                      onSelectZone={zn => { setQuickPanelZone(zn); setQuickPanelIssueId(null) }}
-                      onReset={() => { setQuickPanelZone(null); setQuickPanelIssueId(null) }}
-                      selectedIssueId={quickPanelIssueId}
-                      onSelectIssuePoint={(zn, id) => { setQuickPanelZone(zn); setQuickPanelIssueId(id) }}
-                    />
-                  </div>
-                  <p className="text-sm text-green-700 bg-green-50 border border-green-100 rounded-lg px-3 py-2">
-                    {generateMapInsight(reviewSummary)}
-                  </p>
+                <div className={`grid grid-cols-1 gap-4 items-start ${hasAnyBoundary ? 'xl:grid-cols-[65fr_35fr]' : ''}`}>
+                  {hasAnyBoundary && (
+                    <div className="bg-white rounded-2xl border border-stone-200 p-4 md:p-5 space-y-3">
+                      <div className="flex items-center justify-between flex-wrap gap-2">
+                        <h3 className="text-xl font-bold text-stone-800">植栽分區配置總覽</h3>
+                        <p className="text-sm text-stone-500">點選分區可篩選該區問題；滑鼠移入可查看面積與植栽概況</p>
+                      </div>
+                      <div id="zone-overview-map-anchor" className="scroll-mt-4">
+                        <ZoneOverviewMap
+                          zones={mapZones}
+                          activeZoneName={quickPanelZone}
+                          onSelectZone={zn => { setQuickPanelZone(zn); setQuickPanelIssueId(null) }}
+                          onReset={() => { setQuickPanelZone(null); setQuickPanelIssueId(null) }}
+                          selectedIssueId={quickPanelIssueId}
+                          onSelectIssuePoint={(zn, id) => { setQuickPanelZone(zn); setQuickPanelIssueId(id) }}
+                          minHeightPx={560}
+                        />
+                      </div>
+                      <p className="text-base text-green-700 bg-green-50 border border-green-100 rounded-lg px-3.5 py-2.5">
+                        {generateMapInsight(reviewSummary)}
+                      </p>
+                    </div>
+                  )}
 
-                  {/* 分區快覽面板：點選分區後不離開總覽頁就能看到完整摘要與問題列表 */}
-                  {quickPanelZone && (() => {
-                    const qr = reviews.find(rr => rr.zoneName === quickPanelZone)
-                    if (!qr) return null
-                    return (
-                      <ZoneQuickPanel
-                        zoneName={qr.zoneName}
-                        riskLabel={riskLabel(qr)}
-                        dangerCount={qr.evalResult?.issues.filter(i2 => i2.level === 'danger').length ?? 0}
-                        cautionCount={qr.evalResult?.issues.filter(i2 => i2.level === 'caution').length ?? 0}
-                        passedCount={qr.proximityConflicts.filter(c => c.riskLevel === 'low' || c.riskLevel === 'unmatched').length}
-                        aiOneLiner={generateZoneOneLiner(qr)}
-                        issues={buildQuickPanelIssues(qr)}
-                        selectedIssueId={quickPanelIssueId}
-                        onSelectIssue={id => setQuickPanelIssueId(id)}
-                        onViewFull={() => { setActiveTab(qr.zoneName); setQuickPanelZone(null) }}
-                        onClose={() => { setQuickPanelZone(null); setQuickPanelIssueId(null) }}
+                  <div className="space-y-4">
+                    {reviewSummary.stats.zoneCount > 0 && (
+                      <AIReviewSummary
+                        summary={reviewSummary}
+                        onSelectZone={setActiveTab}
+                        onGenerateFixPlan={topPriorityZoneName ? () => setFixPlanZone(reviews.find(r => r.zoneName === topPriorityZoneName) ?? null) : undefined}
                       />
-                    )
-                  })()}
+                    )}
+
+                    {/* 分區快覽面板：點選分區後不離開總覽頁就能看到完整摘要與問題列表 */}
+                    {quickPanelZone && (() => {
+                      const qr = reviews.find(rr => rr.zoneName === quickPanelZone)
+                      if (!qr) return null
+                      return (
+                        <ZoneQuickPanel
+                          zoneName={qr.zoneName}
+                          riskLabel={riskLabel(qr)}
+                          dangerCount={qr.evalResult?.issues.filter(i2 => i2.level === 'danger').length ?? 0}
+                          cautionCount={qr.evalResult?.issues.filter(i2 => i2.level === 'caution').length ?? 0}
+                          passedCount={qr.proximityConflicts.filter(c => c.riskLevel === 'low' || c.riskLevel === 'unmatched').length}
+                          aiOneLiner={generateZoneOneLiner(qr)}
+                          issues={buildQuickPanelIssues(qr)}
+                          selectedIssueId={quickPanelIssueId}
+                          onSelectIssue={id => setQuickPanelIssueId(id)}
+                          onViewLocation={() => document.getElementById('zone-overview-map-anchor')?.scrollIntoView({ behavior: 'smooth', block: 'center' })}
+                          onViewFull={() => { setActiveTab(qr.zoneName); setQuickPanelZone(null) }}
+                          onClose={() => { setQuickPanelZone(null); setQuickPanelIssueId(null) }}
+                        />
+                      )
+                    })()}
+                  </div>
                 </div>
               )
             })()}
 
-            {/* 各區卡片（點擊開啟快覽面板）*/}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {/* 各區卡片：AI 分析卡（點擊開啟快覽面板）*/}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               {reviews.map(r => {
                 const dangerCnt  = r.evalResult?.issues.filter(i => i.level === 'danger').length ?? 0
                 const cautionCnt = r.evalResult?.issues.filter(i => i.level === 'caution').length ?? 0
                 const cnt = plantCount(r)
+                const boundary = detectedZones.find(z => z.name === r.zoneName)?.boundary
+                const confidence = zoneMatchConfidence(r)
+                const issuePointCount = dangerCnt + cautionCnt
+                const colorIndex = reviews.findIndex(rr => rr.zoneName === r.zoneName)
                 return (
                   <button key={r.zoneName}
                     onClick={() => { setQuickPanelZone(r.zoneName); setQuickPanelIssueId(null) }}
-                    className="text-left p-4 rounded-xl border border-stone-200 hover:border-green-300 hover:bg-green-50/30 transition-colors group">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-lg font-bold text-stone-800 group-hover:text-green-800">{r.zoneName}</span>
-                      <span className={`text-xs px-2 py-0.5 rounded-full border font-semibold ${riskBadgeCls(r)}`}>
-                        {riskLabel(r)}
+                    className="text-left rounded-2xl border border-stone-200 bg-white hover:border-emerald-300 hover:shadow-md transition-all group overflow-hidden">
+                    <div className="relative">
+                      <ZoneMiniPreview boundary={boundary} colorIndex={colorIndex} riskColor={riskColorHex(r)} issuePointCount={issuePointCount} heightPx={132} />
+                      <span className="absolute top-2 left-2 inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full bg-white/90 backdrop-blur-sm border border-stone-200 text-stone-600">
+                        <Sparkles size={11} className="text-emerald-500" />AI 已分析
                       </span>
                     </div>
-                    <div className="text-xs text-stone-500 space-y-1">
-                      <div className="flex justify-between">
-                        <span>植物數量</span>
-                        <span className="font-semibold text-stone-700">{cnt} 株 / {r.blockEntries.length} 種</span>
-                      </div>
-                      {r.evalResult && (
-                        <div className="flex justify-between">
-                          <span>配置健康度{r.evalResult.overallRiskLevel ? `（風險等級：${r.evalResult.overallRiskLevel}）` : ''}</span>
-                          <span className="font-semibold text-stone-700">{r.evalResult.score}/100</span>
-                        </div>
-                      )}
-                      {dangerCnt > 0 && (
-                        <div className="flex justify-between text-red-600">
-                          <span>嚴重問題</span>
-                          <span className="font-semibold">{dangerCnt} 項</span>
-                        </div>
-                      )}
-                      {cautionCnt > 0 && (
-                        <div className="flex justify-between text-blue-600">
-                          <span>提醒事項</span>
-                          <span className="font-semibold">{cautionCnt} 項</span>
-                        </div>
-                      )}
-                      <div className="flex justify-between">
-                        <span>審查狀態</span>
-                        <span className={`font-semibold ${r.status === '可審查' ? 'text-emerald-600' : r.status === '植物待確認' ? 'text-amber-600' : 'text-stone-400'}`}>
-                          {r.status}
+                    <div className="p-4">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-xl font-bold text-stone-800 group-hover:text-emerald-800">{r.zoneName}</span>
+                        <span className={`text-xs px-2 py-0.5 rounded-full border font-semibold ${riskBadgeCls(r)}`}>
+                          {riskLabel(r)}
                         </span>
                       </div>
+                      <div className="text-sm text-stone-500 space-y-1.5">
+                        <div className="flex justify-between">
+                          <span>已辨識植栽</span>
+                          <span className="font-semibold text-stone-700">{cnt} 株 / {r.blockEntries.length} 種</span>
+                        </div>
+                        {r.evalResult && (
+                          <div className="flex justify-between">
+                            <span>配置健康度</span>
+                            <span className="font-semibold text-stone-700">{r.evalResult.score}/100</span>
+                          </div>
+                        )}
+                        {typeof confidence === 'number' && (
+                          <div className="flex justify-between">
+                            <span>辨識信心值</span>
+                            <span className="font-semibold text-emerald-700">Confidence {confidence}%</span>
+                          </div>
+                        )}
+                        {issuePointCount > 0 && (
+                          <div className="flex justify-between">
+                            <span>問題數</span>
+                            <span className="font-semibold text-stone-700">
+                              {dangerCnt > 0 && <span className="text-red-600">嚴重 {dangerCnt}</span>}
+                              {dangerCnt > 0 && cautionCnt > 0 && '・'}
+                              {cautionCnt > 0 && <span className="text-blue-600">提醒 {cautionCnt}</span>}
+                            </span>
+                          </div>
+                        )}
+                        <div className="flex justify-between">
+                          <span>審查狀態</span>
+                          <span className={`font-semibold ${r.status === '可審查' ? 'text-emerald-600' : r.status === '植物待確認' ? 'text-amber-600' : 'text-stone-400'}`}>
+                            {r.status}
+                          </span>
+                        </div>
+                      </div>
+                      {r.evalResult?.aiSuggestion && (
+                        <p className="mt-2.5 text-sm text-stone-500 line-clamp-2 border-t border-stone-100 pt-2.5">
+                          {r.evalResult.aiSuggestion}
+                        </p>
+                      )}
                     </div>
-                    {r.evalResult?.aiSuggestion && (
-                      <p className="mt-2 text-xs text-stone-500 line-clamp-2 border-t border-stone-100 pt-2">
-                        {r.evalResult.aiSuggestion}
-                      </p>
-                    )}
                   </button>
                 )
               })}
@@ -4361,7 +4423,7 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones }: {
                 const hasAnyBoundary = mapZones.some(z => z.boundary && z.boundary.vertices.length >= 3)
                 if (!hasAnyBoundary) return null
                 return (
-                  <div className="flex justify-center">
+                  <div>
                     <ZoneOverviewMap
                       zones={mapZones}
                       activeZoneName={r.zoneName}
@@ -4376,10 +4438,10 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones }: {
                         setCategoryFilter('all')
                         setShowAllIssues(true)
                         requestAnimationFrame(() => {
-                          document.getElementById(`issue-card-${issueId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                          document.getElementById(`issue-group-${issueId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
                         })
                       }}
-                      widthPx={520} maxHeightPx={280} />
+                      minHeightPx={420} />
                   </div>
                 )
               })()}
@@ -4552,56 +4614,72 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones }: {
                   ? r.proximityConflicts
                   : r.proximityConflicts.filter(c =>
                       buildCategoryResults(c.issues).some(res => res.category === categoryFilter && res.severity !== 'normal'))
-                const emphasizeCategory = categoryFilter !== 'all' ? categoryFilter : undefined
 
-                const severeCards = categoryFiltered.filter(c => c.riskLevel === 'high')
-                const warningCards = categoryFiltered.filter(c => c.riskLevel === 'medium')
-                const passedCards = categoryFiltered.filter(c => c.riskLevel === 'low' || c.riskLevel === 'unmatched')
-                const filterStats = { total: categoryFiltered.length, severe: severeCards.length, warning: warningCards.length, passed: passedCards.length }
+                // 重複問題合併：同分區＋同根本原因＋位置相鄰的多組配對合併成一張卡，
+                // 不再因為植物配對數量產生大量卡片。運算完全沿用 PDF 匯出已驗證過的
+                // buildZoneEvents／clusterZoneEvents，這裡只是換成互動卡片呈現。
+                // riskLevel==='unmatched'（植物名稱無法辨識）與「無法從幾何本身確認是
+                // 否為真衝突」的 needs-review 事件不在這裡顯示，統一收斂到「人工確認」
+                // 分頁，避免同一件事在兩個分頁重複出現。
+                const zoneEvents = buildZoneEvents(r.zoneName, categoryFiltered)
+                const { groups } = clusterZoneEvents(r.zoneName, zoneEvents, r.spatialInstances ?? [], drawingUnit)
+                const severeGroups = groups.filter(g => g.maxSeverity === 'danger')
+                const cautionGroups = groups.filter(g => g.maxSeverity === 'caution')
+                const filterStats = { total: groups.length, severe: severeGroups.length, warning: cautionGroups.length, passed: 0 }
                 const WARNING_PREVIEW = 3
-                const visibleWarningCards = showAllIssues ? warningCards : warningCards.slice(0, WARNING_PREVIEW)
-                const hiddenWarningCount = warningCards.length - visibleWarningCards.length
+                const visibleCautionGroups = showAllIssues ? cautionGroups : cautionGroups.slice(0, WARNING_PREVIEW)
+                const hiddenCautionCount = cautionGroups.length - visibleCautionGroups.length
 
                 if (r.proximityConflicts.length === 0) {
                   return <p className="text-base text-stone-400 py-6 text-center">本區沒有空間鄰近配對需要檢討。</p>
+                }
+                if (groups.length === 0) {
+                  return (
+                    <div className="space-y-4">
+                      <CategoryFilterBar filter={categoryFilter} onChange={setCategoryFilter} counts={categoryCounts} total={r.proximityConflicts.length} />
+                      <p className="text-sm text-stone-400 py-6 text-center">
+                        本區沒有明確判定的嚴重或提醒問題（可能全數為需人工確認項目，請查看「待確認」分頁）。
+                      </p>
+                    </div>
+                  )
                 }
                 return (
                   <div className="space-y-4">
                     <CategoryFilterBar filter={categoryFilter} onChange={setCategoryFilter} counts={categoryCounts} total={r.proximityConflicts.length} />
                     <RiskFilterBar filter={riskFilter} onChange={setRiskFilter} stats={filterStats} />
 
-                    {(riskFilter === 'all' || riskFilter === 'severe') && severeCards.length > 0 && (
+                    {(riskFilter === 'all' || riskFilter === 'severe') && severeGroups.length > 0 && (
                       <div className="space-y-2">
-                        <p className="text-sm font-bold text-red-600">🔴 嚴重（{severeCards.length}）</p>
+                        <p className="text-sm font-bold text-red-600">🔴 嚴重（{severeGroups.length}）</p>
                         <div className="grid grid-cols-1 gap-3">
-                          {severeCards.map(c => (
-                            <div key={c.id} id={`issue-card-${c.id}`} className={focusedIssueId === c.id ? 'ring-2 ring-green-500 rounded-2xl' : ''}>
-                              <ProximityConflictCard conflict={c} onLocate={setLocatorTarget} defaultExpanded emphasizeCategory={emphasizeCategory} alternatives={r.evalResult?.alternatives} />
+                          {severeGroups.map(g => (
+                            <div key={g.id} id={`issue-group-${g.id}`} className={focusedIssueId === g.id ? 'ring-2 ring-green-500 rounded-2xl' : ''}>
+                              <MergedIssueCard group={g} conflicts={r.proximityConflicts} onLocate={setLocatorTarget} alternatives={r.evalResult?.alternatives} defaultShowDetail={g.pairCount <= 1} />
                             </div>
                           ))}
                         </div>
                       </div>
                     )}
 
-                    {(riskFilter === 'all' || riskFilter === 'warning') && warningCards.length > 0 && (
+                    {(riskFilter === 'all' || riskFilter === 'warning') && cautionGroups.length > 0 && (
                       <div className="space-y-2">
-                        <p className="text-sm font-bold text-blue-600">🔵 提醒（{warningCards.length}）</p>
+                        <p className="text-sm font-bold text-blue-600">🔵 提醒（{cautionGroups.length}）</p>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                          {visibleWarningCards.map(c => (
-                            <div key={c.id} id={`issue-card-${c.id}`} className={focusedIssueId === c.id ? 'ring-2 ring-green-500 rounded-2xl' : ''}>
-                              <ProximityConflictCard conflict={c} onLocate={setLocatorTarget} emphasizeCategory={emphasizeCategory} alternatives={r.evalResult?.alternatives} />
+                          {visibleCautionGroups.map(g => (
+                            <div key={g.id} id={`issue-group-${g.id}`} className={focusedIssueId === g.id ? 'ring-2 ring-green-500 rounded-2xl' : ''}>
+                              <MergedIssueCard group={g} conflicts={r.proximityConflicts} onLocate={setLocatorTarget} alternatives={r.evalResult?.alternatives} />
                             </div>
                           ))}
                         </div>
-                        {hiddenWarningCount > 0 && (
+                        {hiddenCautionCount > 0 && (
                           <button
                             type="button" onClick={() => setShowAllIssues(true)}
                             className="text-sm font-semibold text-green-700 hover:text-green-800"
                           >
-                            查看全部問題（還有 {hiddenWarningCount} 項）
+                            查看全部問題（還有 {hiddenCautionCount} 項）
                           </button>
                         )}
-                        {showAllIssues && warningCards.length > WARNING_PREVIEW && (
+                        {showAllIssues && cautionGroups.length > WARNING_PREVIEW && (
                           <button
                             type="button" onClick={() => setShowAllIssues(false)}
                             className="text-sm font-semibold text-stone-500 hover:text-stone-700 ml-4"
@@ -4612,39 +4690,11 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones }: {
                       </div>
                     )}
 
-                    {(riskFilter === 'all' || riskFilter === 'passed') && passedCards.length > 0 && (
-                      riskFilter === 'passed' ? (
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                          {passedCards.map(c => (
-                            <div key={c.id} id={`issue-card-${c.id}`} className={focusedIssueId === c.id ? 'ring-2 ring-green-500 rounded-2xl' : ''}>
-                              <ProximityConflictCard conflict={c} onLocate={setLocatorTarget} emphasizeCategory={emphasizeCategory} alternatives={r.evalResult?.alternatives} />
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <details>
-                          <summary className="text-sm font-semibold text-stone-500 cursor-pointer select-none">
-                            已通過項目（{passedCards.length}）
-                          </summary>
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2">
-                            {passedCards.map(c => (
-                              <div key={c.id} id={`issue-card-${c.id}`} className={focusedIssueId === c.id ? 'ring-2 ring-green-500 rounded-2xl' : ''}>
-                                <ProximityConflictCard conflict={c} onLocate={setLocatorTarget} alternatives={r.evalResult?.alternatives} />
-                              </div>
-                            ))}
-                          </div>
-                        </details>
-                      )
-                    )}
-
-                    {riskFilter === 'severe' && severeCards.length === 0 && (
+                    {riskFilter === 'severe' && severeGroups.length === 0 && (
                       <p className="text-sm text-stone-400 py-4 text-center">此分區沒有嚴重項目。</p>
                     )}
-                    {riskFilter === 'warning' && warningCards.length === 0 && (
+                    {riskFilter === 'warning' && cautionGroups.length === 0 && (
                       <p className="text-sm text-stone-400 py-4 text-center">此分區沒有提醒項目。</p>
-                    )}
-                    {riskFilter === 'passed' && passedCards.length === 0 && (
-                      <p className="text-sm text-stone-400 py-4 text-center">此分區沒有已通過項目。</p>
                     )}
                   </div>
                 )
@@ -4656,6 +4706,36 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones }: {
                   <p className="text-base text-stone-600">
                     已確認 <span className="font-bold text-emerald-700">{confirmedCnt}</span> 項、待確認 <span className="font-bold text-amber-700">{pendingCnt}</span> 項
                   </p>
+
+                  {/* 空間鄰近判定的人工確認：植物名稱無法辨識／圖層歸屬不明／缺少環境
+                      資訊，以「來源」為單位（不是配對數），只有單一未知圖層能安全批次
+                      分類；選擇答案後套用 onApplyLayerOverride，既有管線會自動重跑整個
+                      分區分析，這裡不做任何額外重算。 */}
+                  {(() => {
+                    const unknownGroups = buildUnknownSourceGroups(r.zoneName, r.proximityConflicts, layerOverrides)
+                    if (unknownGroups.length === 0) return null
+                    return (
+                      <div className="space-y-2">
+                        <p className="text-sm font-bold text-amber-700">
+                          🟡 人工確認（{unknownGroups.length} 個來源，影響 {unknownGroups.reduce((s, g) => s + g.pairCount, 0)} 組配對）
+                        </p>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          {unknownGroups.map(g => (
+                            <UnknownSourceGroupCard
+                              key={g.key}
+                              group={g}
+                              onLocate={() => {
+                                const conflict = r.proximityConflicts.find(c =>
+                                  c.plantA.instanceId === g.representativeInstanceIds[0] && c.plantB.instanceId === g.representativeInstanceIds[1])
+                                if (conflict) setLocatorTarget(conflict)
+                              }}
+                              onApply={onApplyLayerOverride ? action => onApplyLayerOverride(layerOverrideKey(g.zoneName, g.layerName), action) : undefined}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    )
+                  })()}
 
                   {/* 圖層或圖塊尚未對應到植物名稱的項目 */}
                   {stats && stats.unknownPlants.length > 0 && (

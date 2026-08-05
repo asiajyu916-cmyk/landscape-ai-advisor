@@ -6,7 +6,7 @@ import type { CsvPlantRecord, SelectedCsvPlant } from '@/types/csvPlant'
 import type { RiskLevel } from '@/types/dxf'
 import {
   gapSeverity, levelsGapSeverity, sunLevelOf, waterLevelOf, maintenanceLevelOf,
-  type GapSeverity,
+  isExcludedFromPlantingEvaluation, type GapSeverity,
 } from '@/utils/compatibilityLevels'
 import { detectSiteDrainageEvidence, type SiteDrainageEvidence } from '@/utils/siteDrainageContext'
 
@@ -98,10 +98,18 @@ function categoriesFromIssues(issues: IssueDetail[]): CatSummary[] {
 }
 
 export function evaluate(
-  plants: SelectedCsvPlant[],
-  allPlants: CsvPlantRecord[],
+  plantsIncludingTrees: SelectedCsvPlant[],
+  allPlantsIncludingTrees: CsvPlantRecord[],
   siteDrainageEvidence: SiteDrainageEvidence = 'ground-natural',
 ): EvalResult {
+  // 產品規則：喬木不納入配置評估——喬木只保留在圖面辨識／數量統計／位置顯示
+  // （見 TreeInventoryItem／computeZoneTreeInventory），不得參與日照/耐旱/耐濕/
+  // 配置相容性等衝突計算、不得計入嚴重提醒數量、不得成為被替換植物或替代候選。
+  // 這裡是唯一的過濾點：一律先排除喬木，底下所有比對都在無喬木的資料上進行，
+  // 不是在個別 issue 產生後才過濾（那樣還是要逐一檢查有沒有漏網的顯示位置）。
+  const plants = plantsIncludingTrees.filter(p => !isExcludedFromPlantingEvaluation(p))
+  const allPlants = allPlantsIncludingTrees.filter(p => !isExcludedFromPlantingEvaluation(p))
+
   const issues: IssueDetail[] = []
   const problemIds = new Set<string>()
   let deductions = 0
@@ -197,17 +205,10 @@ export function evaluate(
       '建議於養護計畫中分別標示各植栽的修剪頻率、施肥需求，並與管理單位確認執行能力。'))
   }
 
-  // 5. 根系風險
-  const trees        = plants.filter(p => p.normalizedCategory === 'tree')
-  const groundcovers = plants.filter(p => p.normalizedCategory === 'groundcover')
-  const tallTrees    = trees.filter(p => { const h = parseFloat(p.height); return !isNaN(h) && h >= 10 })
-  if (tallTrees.length > 0 && groundcovers.length > 0) {
-    deductions += 6
-    issues.push(makeIssue('根系風險', 'caution',
-      `本區大喬木（${tallTrees.map(p => `${p.name} ${p.height}`).join('、')}）與地被植物混植，需注意根系競爭與遮蔭問題。`,
-      '大喬木根系擴張範圍廣，長期可能壓縮地被生長空間，同時遮蔽地被所需日照。',
-      '建議規劃足夠種植間距，並選用耐陰地被配置於喬木冠幅範圍內。'))
-  }
+  // 5. 根系風險──喬木×地被的根系／遮蔭風險已排除在此（見函式頂部的喬木過濾），
+  // 改由既有的喬木盤點系統（TreeInventoryItem.canopyOverlapCount／shadedUnderstory，
+  // 見 plantProximity.ts 的 computeZoneTreeInventory）處理，那裡是純空間事實盤點，
+  // 不產生「配置相容性衝突」卡片，符合喬木不參與配置評估的規則。
 
   // 6. 養護管理風險（綜合）
   if (issues.filter(i => i.level !== 'ok').length >= 3) {
@@ -407,7 +408,6 @@ export function evaluate(
   if (sunSeverity === 'danger') adjustmentPlan.push('將全日照與耐陰植物分配至場域日照充足區與遮蔭區')
   else if (sunSeverity === 'caution') adjustmentPlan.push('確認場域各區塊實際日照時數，依日照需求分組配置')
   if (maintSeverity === 'danger' || maintSeverity === 'caution') adjustmentPlan.push('建立分植物養護時間表，標示各植栽修剪頻率與施肥計畫')
-  if (tallTrees.length > 0 && groundcovers.length > 0) adjustmentPlan.push('規劃喬木與地被之種植間距，選用耐陰地被配置於冠幅範圍內')
   if (incompleteData.length > 0) adjustmentPlan.push(`補查 ${incompleteData.map(p => p.name).join('、')} 的官方日照水分資料`)
   if (plantsWithPh.length >= 2 && gapSeverity(Math.max(...plantsWithPh.map(p => phOrder[p.soilPh])) - Math.min(...plantsWithPh.map(p => phOrder[p.soilPh]))) !== 'pass')
     adjustmentPlan.push('施工前進行土壤 pH 檢測，依各植栽需求調整酸鹼度，並分區管理')
@@ -507,9 +507,9 @@ export function aggregatePairConflictsToEvalResult(
     aiSuggestion = '本分區內空間鄰近植物配置相容性良好，鄰近範圍內未發現明顯衝突。'
   } else if (severeCnt > 0) {
     const cats = [...new Set(issues.filter(i => i.level === 'danger').map(i => i.category))].join('、')
-    aiSuggestion = `風險等級：高；整體評分：${score}；原因：高風險 ${severeCnt} 項、警示 ${warningCnt} 項、通過 ${passedCnt} 項${cats ? `（高風險類別：${cats}）` : ''}。建議於提送審查前優先調整高風險配對。`
+    aiSuggestion = `風險等級：高；整體評分：${score}；原因：高風險 ${severeCnt} 項、提醒 ${warningCnt} 項、通過 ${passedCnt} 項${cats ? `（高風險類別：${cats}）` : ''}。建議於提送審查前優先調整高風險配對。`
   } else if (warningCnt > 0) {
-    aiSuggestion = `風險等級：中；整體評分：${score}；警示 ${warningCnt} 項、通過 ${passedCnt} 項。整體可行，建議補充養護說明降低審查疑義。`
+    aiSuggestion = `風險等級：中；整體評分：${score}；提醒 ${warningCnt} 項、通過 ${passedCnt} 項。整體可行，建議補充養護說明降低審查疑義。`
   } else {
     aiSuggestion = `風險等級：低；整體評分：${score}；${passedCnt} 項配對皆已通過檢討。`
   }
@@ -519,7 +519,7 @@ export function aggregatePairConflictsToEvalResult(
 
   const reviewText = totalCnt === 0
     ? `本分區空間鄰近衝突檢討結果為「配置良好」（風險等級：低；整體評分：${score}），鄰近植物之間未發現明顯衝突。`
-    : `本分區空間鄰近衝突檢討結果──風險等級：${overallRiskLevel}；整體評分：${score}；原因：高風險 ${severeCnt} 項、警示 ${warningCnt} 項、通過 ${passedCnt} 項。\n\n${issues.map(i => `${i.category}：${i.cause}`).join('\n')}\n\n修正方向：\n${adjustmentPlan.map(p => `• ${p}`).join('\n')}`
+    : `本分區空間鄰近衝突檢討結果──風險等級：${overallRiskLevel}；整體評分：${score}；原因：高風險 ${severeCnt} 項、提醒 ${warningCnt} 項、通過 ${passedCnt} 項。\n\n${issues.map(i => `${i.category}：${i.cause}`).join('\n')}\n\n修正方向：\n${adjustmentPlan.map(p => `• ${p}`).join('\n')}`
 
   return { score, compatLevel, categories, issues, aiSuggestion, adjustmentPlan, reviewText, overallRiskLevel }
 }

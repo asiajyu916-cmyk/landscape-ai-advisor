@@ -12,6 +12,7 @@ export interface QuickPanelIssue {
   title: string
   level: 'danger' | 'caution' | 'passed'
   reason: string
+  location?: string
 }
 
 interface Props {
@@ -24,6 +25,9 @@ interface Props {
   issues: QuickPanelIssue[]
   selectedIssueId?: string | null
   onSelectIssue?: (issueId: string) => void
+  /** 「查看位置」──不離開快覽面板，直接把畫面捲動到分區總覽圖並高亮本區 */
+  onViewLocation?: () => void
+  /** 「展開詳細結果」──前往完整分區內容（既有分區頁籤切換機制） */
   onViewFull?: () => void
   onClose?: () => void
 }
@@ -40,11 +44,12 @@ const RISK_BADGE_CLS: Record<string, string> = {
   '通過': 'bg-emerald-100 text-emerald-700 border-emerald-300',
 }
 
-const PREVIEW_COUNT = 5
+// 驗收標準：每區預設最多只顯示三個主要問題，其餘要點「展開詳細結果」才看得到。
+const PREVIEW_COUNT = 3
 
 export default function ZoneQuickPanel({
   zoneName, riskLabel, dangerCount, cautionCount, passedCount, aiOneLiner,
-  issues, selectedIssueId, onSelectIssue, onViewFull, onClose,
+  issues, selectedIssueId, onSelectIssue, onViewLocation, onViewFull, onClose,
 }: Props) {
   const [expanded, setExpanded] = useState(false)
   const visibleIssues = expanded ? issues : issues.slice(0, PREVIEW_COUNT)
@@ -52,16 +57,16 @@ export default function ZoneQuickPanel({
 
   return (
     <div className="bg-white rounded-2xl border-2 border-green-200 shadow-sm overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-stone-100 bg-green-50/50">
+      <div className="flex items-center justify-between px-4 py-3.5 border-b border-stone-100 bg-green-50/50">
         <div className="flex items-center gap-2">
-          <span className="text-lg font-bold text-stone-800">{zoneName}</span>
-          <span className={`text-xs px-2 py-0.5 rounded-full border font-semibold ${RISK_BADGE_CLS[riskLabel] ?? 'bg-stone-100 text-stone-500 border-stone-200'}`}>
+          <span className="text-xl font-bold text-stone-800">{zoneName}</span>
+          <span className={`text-sm px-2 py-0.5 rounded-full border font-semibold ${RISK_BADGE_CLS[riskLabel] ?? 'bg-stone-100 text-stone-500 border-stone-200'}`}>
             風險等級：{riskLabel}
           </span>
         </div>
         {onClose && (
-          <button onClick={onClose} className="p-1 rounded-lg text-stone-400 hover:text-stone-600 hover:bg-stone-100" aria-label="關閉">
-            <X size={16} />
+          <button onClick={onClose} className="p-1.5 rounded-lg text-stone-400 hover:text-stone-600 hover:bg-stone-100" aria-label="關閉">
+            <X size={18} />
           </button>
         )}
       </div>
@@ -69,17 +74,17 @@ export default function ZoneQuickPanel({
       <div className="p-4 space-y-3">
         {/* 數量統計 */}
         <div className="flex gap-2 flex-wrap">
-          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-red-50 text-red-700 font-bold text-sm border border-red-100">🔴 嚴重 {dangerCount}</span>
-          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-blue-50 text-blue-700 font-bold text-sm border border-blue-100">🔵 提醒 {cautionCount}</span>
-          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-emerald-50 text-emerald-700 font-bold text-sm border border-emerald-100">🟢 通過 {passedCount}</span>
+          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-50 text-red-700 font-bold text-base border border-red-100">🔴 嚴重 {dangerCount}</span>
+          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-50 text-blue-700 font-bold text-base border border-blue-100">🔵 提醒 {cautionCount}</span>
+          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 font-bold text-base border border-emerald-100">🟢 通過 {passedCount}</span>
         </div>
 
         {/* AI 一句話摘要 */}
-        <p className="text-sm text-green-700 bg-green-50 border border-green-100 rounded-lg px-3 py-2">{aiOneLiner}</p>
+        <p className="text-base text-green-700 bg-green-50 border border-green-100 rounded-lg px-3 py-2.5">{aiOneLiner}</p>
 
         {/* 問題列表 */}
         {issues.length === 0 ? (
-          <p className="text-sm text-stone-400 py-2">本區沒有需要檢討的問題。</p>
+          <p className="text-base text-stone-400 py-2">本區沒有需要檢討的問題。</p>
         ) : (
           <div className="space-y-1.5">
             {visibleIssues.map(issue => {
@@ -89,18 +94,19 @@ export default function ZoneQuickPanel({
                 <button
                   key={issue.id}
                   onClick={() => onSelectIssue?.(issue.id)}
-                  className={`w-full text-left px-3 py-2 rounded-lg border transition-colors ${
+                  className={`w-full text-left px-3 py-2.5 rounded-lg border transition-colors ${
                     isSelected ? 'border-green-400 bg-green-50/70 ring-1 ring-green-300' : 'border-stone-200 hover:border-stone-300 hover:bg-stone-50'
                   }`}
                 >
                   <div className="flex items-start gap-2">
-                    <span className={`mt-1 inline-block w-2 h-2 rounded-full flex-shrink-0 ${meta.dot}`} />
+                    <span className={`mt-1.5 inline-block w-2 h-2 rounded-full flex-shrink-0 ${meta.dot}`} />
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className={`text-xs px-1.5 py-0.5 rounded border font-semibold ${meta.cls}`}>{meta.label}</span>
-                        <span className="text-sm font-semibold text-stone-800 truncate">{issue.title}</span>
+                        <span className={`text-sm px-1.5 py-0.5 rounded border font-semibold ${meta.cls}`}>{meta.label}</span>
+                        <span className="text-base font-semibold text-stone-800 truncate">{issue.title}</span>
                       </div>
-                      <p className="text-xs text-stone-500 mt-0.5 line-clamp-1">{issue.reason}</p>
+                      <p className="text-sm text-stone-500 mt-0.5 line-clamp-1">{issue.reason}</p>
+                      {issue.location && <p className="text-sm text-stone-400 mt-0.5">影響位置：{issue.location}</p>}
                     </div>
                   </div>
                 </button>
@@ -109,27 +115,37 @@ export default function ZoneQuickPanel({
             {hiddenCount > 0 && (
               <button
                 onClick={() => setExpanded(true)}
-                className="w-full text-center text-sm font-semibold text-green-700 hover:text-green-800 py-1.5 flex items-center justify-center gap-1"
+                className="w-full text-center text-base font-semibold text-green-700 hover:text-green-800 py-2 flex items-center justify-center gap-1"
               >
-                顯示全部 {issues.length} 項 <ChevronDown size={14} />
+                顯示全部 {issues.length} 項 <ChevronDown size={15} />
               </button>
             )}
             {expanded && issues.length > PREVIEW_COUNT && (
-              <button onClick={() => setExpanded(false)} className="w-full text-center text-sm font-medium text-stone-400 hover:text-stone-600 py-1">
+              <button onClick={() => setExpanded(false)} className="w-full text-center text-base font-medium text-stone-400 hover:text-stone-600 py-1.5">
                 收合
               </button>
             )}
           </div>
         )}
 
-        {onViewFull && (
-          <button
-            onClick={onViewFull}
-            className="w-full text-center text-sm font-semibold text-white bg-[#1a4731] hover:bg-[#2d6a4f] rounded-lg py-2 transition-colors"
-          >
-            查看完整分區內容 →
-          </button>
-        )}
+        <div className="flex gap-2">
+          {onViewLocation && (
+            <button
+              onClick={onViewLocation}
+              className="flex-1 text-center text-base font-semibold text-stone-700 bg-white border border-stone-300 hover:bg-stone-50 rounded-lg py-2.5 min-h-[44px] transition-colors"
+            >
+              📍 查看位置
+            </button>
+          )}
+          {onViewFull && (
+            <button
+              onClick={onViewFull}
+              className="flex-1 text-center text-base font-semibold text-white bg-[#1a4731] hover:bg-[#2d6a4f] rounded-lg py-2.5 min-h-[44px] transition-colors"
+            >
+              展開詳細結果 →
+            </button>
+          )}
+        </div>
       </div>
     </div>
   )

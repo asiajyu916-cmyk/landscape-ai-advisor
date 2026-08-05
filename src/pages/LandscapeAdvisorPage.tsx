@@ -35,7 +35,10 @@ import type { PlantConflictResult, TreeInventoryItem, LayerOverrideAction } from
 import { layerOverrideKey } from '@/utils/plantProximity'
 import ProximityConflictCard from '@/components/dxf/ProximityConflictCard'
 import { exportHtmlAsPaginatedPdf } from '@/utils/pdfCanvasExport'
-import { classifyOverlap } from '@/utils/dxfReportBuilder'
+import {
+  classifyOverlap, buildUnknownSourceGroups, UNKNOWN_SOURCE_TYPE_LABEL,
+  type UnknownSourceGroup, type UnknownSourceType,
+} from '@/utils/dxfReportBuilder'
 import { deriveConclusion, classifyCategory, CATEGORY_GROUP_ORDER, CATEGORY_GROUP_META, type IssueCategoryGroup } from '@/utils/issueCategoryMeta'
 import {
   gapSeverity, levelsGapSeverity, sunLevelOf, waterLevelOf, maintenanceLevelOf,
@@ -820,83 +823,9 @@ const CATEGORY_SHORT_TITLE: Record<IssueCategoryGroup, string> = {
   maintenance: '養護管理差異',
 }
 
-// ── 人工確認來源分組（取代逐筆配對計數）─────────────────────────────────────────
-// 使用者原話：「23 筆配對若都來自同一個未知 HATCH 圖層，只應顯示 1 個未知圖層待
-// 確認，影響 23 組配對」。合併 key＝zone+unknownSourceType+layerName+blockName+
-// unknownReason（blockName 目前恆為「—」：HATCH 沒有 BLOCK，這裡誠實揭露資料
-// 本身的限制，不是漏做）。
-export type UnknownSourceType = 'unknown-hatch' | 'layered-planting' | 'same-kind-overlap' | 'generic-overlap' | 'unmatched-name'
-
-export interface UnknownSourceGroup {
-  key: string
-  zoneName: string
-  unknownSourceType: UnknownSourceType
-  layerName: string
-  blockName: string
-  unknownReason: string
-  pairCount: number
-  // 只有「單一具體圖層」的 unknown-hatch 來源才能安全套用批次分類按鈕——
-  // layered-planting/same-kind-overlap/generic-overlap/unmatched-name 這幾類
-  // 是「兩邊植物種類都已知、但重疊語意不明確」或「純粹名稱比對不到」，沒有單一
-  // 圖層可以重新分類，批次按鈕對它們沒有意義，只顯示摘要。
-  singleLayer: boolean
-  overrideApplied?: LayerOverrideAction
-}
-
-function buildUnknownSourceGroups(
-  zoneName: string,
-  conflicts: PlantConflictResult[],
-  overrides?: Map<string, LayerOverrideAction>,
-): UnknownSourceGroup[] {
-  const groups = new Map<string, UnknownSourceGroup>()
-  for (const c of conflicts) {
-    let sourceType: UnknownSourceType
-    let layerName = '—'
-    let reason: string
-    if (c.riskLevel === 'unmatched') {
-      sourceType = 'unmatched-name'
-      reason = '植物名稱未能比對資料庫'
-    } else {
-      const note = classifyOverlap(c.plantA.kind, c.plantB.kind, c.proximity)
-      if (note.certain) continue
-      reason = note.label
-      const aUnknown = c.plantA.kind === 'unknown-hatch'
-      const bUnknown = c.plantB.kind === 'unknown-hatch'
-      if (aUnknown || bUnknown) {
-        sourceType = 'unknown-hatch'
-        const layers = dedupeStrings(
-          [aUnknown ? c.plantA.sourceLayer : undefined, bUnknown ? c.plantB.sourceLayer : undefined]
-            .filter((x): x is string => !!x),
-        )
-        layerName = layers.length > 0 ? layers.join('／') : '(無圖層名稱)'
-      } else if (reason.includes('上下層')) {
-        sourceType = 'layered-planting'
-      } else if (reason.includes('同類型')) {
-        sourceType = 'same-kind-overlap'
-      } else {
-        sourceType = 'generic-overlap'
-      }
-    }
-    const key = `${zoneName}::${sourceType}::${layerName}::—::${reason}`
-    const existing = groups.get(key)
-    if (existing) { existing.pairCount++; continue }
-    const singleLayer = sourceType === 'unknown-hatch' && layerName !== '(無圖層名稱)' && !layerName.includes('／')
-    groups.set(key, {
-      key, zoneName, unknownSourceType: sourceType, layerName, blockName: '—', unknownReason: reason,
-      pairCount: 1, singleLayer,
-      overrideApplied: singleLayer ? overrides?.get(layerOverrideKey(zoneName, layerName)) : undefined,
-    })
-  }
-  return [...groups.values()].sort((a, b) => b.pairCount - a.pairCount)
-}
-
-const UNKNOWN_SOURCE_TYPE_LABEL: Record<UnknownSourceType, string> = {
-  'unknown-hatch': '未知圖層',
-  'layered-planting': '上下層配置',
-  'same-kind-overlap': '同類型套疊',
-  'generic-overlap': '範圍重疊',
-  'unmatched-name': '名稱未比對',
-}
+// buildUnknownSourceGroups／UnknownSourceGroup／UNKNOWN_SOURCE_TYPE_LABEL 已搬到
+// dxfReportBuilder.ts（共用函式，DxfReviewPage.tsx 的「人工確認」分頁也要用同一套
+// 分組邏輯，不能各自維護一份），這裡改成 import，行為完全不變。
 
 interface AiReplySummary {
   compatLevel: string
