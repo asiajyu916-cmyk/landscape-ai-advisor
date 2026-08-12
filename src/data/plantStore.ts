@@ -1,6 +1,7 @@
 import { parsePlantCsv } from '@/utils/csvParser'
 import { normalizeForCompare, normalizePlantName } from '@/utils/plantNameMatch'
 import { dedupePlantsByName } from '@/utils/plantCsvMerge'
+import { fetchAllCloudPlants } from '@/services/plantCloudService'
 import type { CsvPlantRecord, ImportResult, PlantImageData, ImageStore } from '@/types/csvPlant'
 
 const STORAGE_KEY       = 'landscape_advisor_plants_v1'
@@ -53,13 +54,17 @@ export async function fetchDefaultPlants(): Promise<ImportResult | null> {
   }
 }
 
-// ── localStorage + 內建 CSV 合併載入 ────────────────────────────────────────────
+// ── localStorage + 內建 CSV + 雲端資料庫 三方合併載入 ───────────────────────────
 // 舊行為：localStorage 有資料就直接用，永遠不再讀 public/plantdb.csv，導致
 // CSV 新增/更新的植物即使部署上線，使用者瀏覽器裡也永遠看不到（除非手動清空
 // storage 重新匯入）。改為：localStorage 仍是主要來源（保留使用者已匯入/編輯
-// 的資料，不覆蓋、不刪除），但每次都同時讀取內建 CSV，只把「localStorage 裡
-// 完全沒有的植物名稱（正規化後比對，含台/臺等寫法差異）」補進去——只增不減、
-// 不覆蓋既有資料。
+// 的資料，不覆蓋、不刪除），但每次都同時讀取內建 CSV 與 Supabase 雲端植物庫，
+// 只把「localStorage 裡完全沒有的植物名稱（正規化後比對，含台/臺等寫法差異、
+// 已知別名）」補進去——只增不減、不覆蓋既有資料。
+//
+// 雲端植物庫是「換瀏覽器／無痕視窗／別台電腦也看得到匯入資料」的關鍵一環：
+// CSV 匯入（見 plantCsvMerge.ts／CsvImportModal）完成後會把本次新增/更新的植物
+// upsert 進 Supabase，這裡載入時再讀回來，才能讓其他裝置的瀏覽器也看到同一份資料。
 export interface PlantsLoadResult {
   plants: CsvPlantRecord[]
   source: 'csv-only' | 'localStorage-only' | 'localStorage+csv-merge'
@@ -67,31 +72,33 @@ export interface PlantsLoadResult {
   csvTotal: number
   csvLastPlantName: string
   addedFromCsv: number
+  addedFromCloud: number
 }
 
 export async function loadPlantsWithCsvMerge(): Promise<PlantsLoadResult> {
   const stored = loadPlantsFromStorage() ?? []
-  const csvResult = await fetchDefaultPlants()
+  const [csvResult, cloudPlants] = await Promise.all([fetchDefaultPlants(), fetchAllCloudPlants()])
   const csvPlants = csvResult?.plants ?? []
   const csvFileName = '/plantdb.csv'
   const csvLastPlantName = csvPlants.length > 0 ? csvPlants[csvPlants.length - 1].name : ''
 
-  if (!csvResult) {
-    return { plants: stored, source: 'localStorage-only', csvFileName, csvTotal: 0, csvLastPlantName, addedFromCsv: 0 }
-  }
-  if (stored.length === 0) {
-    savePlantsToStorage(csvPlants)
-    return { plants: csvPlants, source: 'csv-only', csvFileName, csvTotal: csvPlants.length, csvLastPlantName, addedFromCsv: csvPlants.length }
+  const storedKeys = new Set(stored.map(p => normalizeForCompare(p.name)))
+  const newFromCsv = csvPlants.filter(p => !storedKeys.has(normalizeForCompare(p.name)))
+  const afterCsvKeys = new Set([...storedKeys, ...newFromCsv.map(p => normalizeForCompare(p.name))])
+  const newFromCloud = cloudPlants.filter(p => !afterCsvKeys.has(normalizeForCompare(p.name)))
+
+  if (stored.length === 0 && newFromCsv.length === 0 && newFromCloud.length === 0) {
+    return { plants: [], source: 'localStorage-only', csvFileName, csvTotal: csvPlants.length, csvLastPlantName, addedFromCsv: 0, addedFromCloud: 0 }
   }
 
-  const existingKeys = new Set(stored.map(p => normalizeForCompare(p.name)))
-  const newOnes = csvPlants.filter(p => !existingKeys.has(normalizeForCompare(p.name)))
-  if (newOnes.length === 0) {
-    return { plants: stored, source: 'localStorage+csv-merge', csvFileName, csvTotal: csvPlants.length, csvLastPlantName, addedFromCsv: 0 }
-  }
-  const { deduped: merged, removedCount } = dedupePlantsByName([...stored, ...newOnes])
+  const { deduped: merged, removedCount } = dedupePlantsByName([...stored, ...newFromCsv, ...newFromCloud])
   savePlantsToStorage(merged)
-  return { plants: merged, source: 'localStorage+csv-merge', csvFileName, csvTotal: csvPlants.length, csvLastPlantName, addedFromCsv: newOnes.length - removedCount }
+  const source = stored.length === 0 ? 'csv-only' : 'localStorage+csv-merge'
+  return {
+    plants: merged, source, csvFileName, csvTotal: csvPlants.length, csvLastPlantName,
+    addedFromCsv: newFromCsv.length,
+    addedFromCloud: Math.max(0, newFromCloud.length - removedCount),
+  }
 }
 
 // ── File import (user upload) ──────────────────────────────────────────────────

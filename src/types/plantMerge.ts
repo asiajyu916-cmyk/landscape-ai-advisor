@@ -51,6 +51,7 @@ export interface MergeApplyResult {
   fieldErrors: string[]
   finalPlants: CsvPlantRecord[]
   duplicatesResolvedCount: number   // 寫回資料庫前，依名稱去重時額外合併掉的重複紀錄數
+  touchedPlants: CsvPlantRecord[]   // 本次新增／更新的完整記錄（去重後），供同步寫入雲端資料庫用
 }
 
 // ── 欄位中文標籤（供預覽/結果畫面顯示差異用）──────────────────────────────────

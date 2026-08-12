@@ -22,9 +22,18 @@ import { getAdvisorReply, type AdvisorReply } from '@/utils/plantAdvisor'
 import { buildMergePreview, applyMerge } from '@/utils/plantCsvMerge'
 import { findSimilarPlants, findPlantByName, normalizeForCompare } from '@/utils/plantNameMatch'
 import { searchPlantAllTiers, searchResultToDraft } from '@/utils/plantSearchClient'
-import { persistConfirmedPlant } from '@/services/plantCloudService'
+import { persistConfirmedPlant, upsertPlantsToCloud } from '@/services/plantCloudService'
 import PlantAutoAddModal from '@/components/modals/PlantAutoAddModal'
 import type { ImportMode, MergePreview, MergeApplyResult } from '@/types/plantMerge'
+
+// CSV 匯入結果：本機儲存與雲端同步是兩個獨立結果，畫面必須分開顯示，
+// 不能只要 localStorage 寫入成功就顯示「匯入成功」（雲端沒寫入的話換瀏覽器/
+// 裝置會看不到這批資料，見 plantCloudService.ts upsertPlantsToCloud）。
+interface CsvApplyOutcome {
+  saved: boolean
+  cloudSynced: boolean
+  cloudReason?: string
+}
 import type {
   CsvPlantRecord, SelectedCsvPlant, ImportResult, PlantStatus,
   PlantImageData, ImageStore, CandidatePhoto, ImageReviewStatus,
@@ -3432,7 +3441,7 @@ function PlantDatabaseModal({ plants, onClose, onSelect, selectedIds, imageStore
 function CsvImportModal({ onClose, existingPlants, onApply }: {
   onClose: () => void
   existingPlants: CsvPlantRecord[]
-  onApply: (finalPlants: CsvPlantRecord[], applyResult: MergeApplyResult, imageUrls: Record<string, string>) => boolean
+  onApply: (finalPlants: CsvPlantRecord[], applyResult: MergeApplyResult, imageUrls: Record<string, string>) => Promise<CsvApplyOutcome>
 }) {
   const [phase, setPhase] = useState<'idle' | 'processing' | 'preview' | 'result' | 'error'>('idle')
   const [parsed, setParsed] = useState<ImportResult | null>(null)
@@ -3442,6 +3451,8 @@ function CsvImportModal({ onClose, existingPlants, onApply }: {
   const [resolvedDuplicates, setResolvedDuplicates] = useState<Set<number>>(new Set())
   const [applyResult, setApplyResult] = useState<MergeApplyResult | null>(null)
   const [saveFailed, setSaveFailed] = useState(false)
+  const [cloudSynced, setCloudSynced] = useState(false)
+  const [cloudSyncReason, setCloudSyncReason] = useState('')
   const [errMsg, setErrMsg] = useState('')
   const [dragOver, setDragOver] = useState(false)
   const [showDiffs, setShowDiffs] = useState<Set<number>>(new Set())
@@ -3494,15 +3505,18 @@ function CsvImportModal({ onClose, existingPlants, onApply }: {
 
   const [submitting, setSubmitting] = useState(false)
 
-  const handleConfirmApply = () => {
+  const handleConfirmApply = async () => {
     if (submitting) return   // 防止手滑連點兩下造成重複匯入（這正是這次重複資料的成因）
     if (!preview || !parsed) return
     if (mode === 'replace' && !replaceConfirmed) return   // 安全門檻：完全取代必須勾選確認
     setSubmitting(true)
     const result = applyMerge(preview, existingPlants, resolvedDuplicates)
     setApplyResult(result)
-    const saved = onApply(result.finalPlants, result, parsed.imageUrls)
-    setSaveFailed(!saved)
+    const outcome = await onApply(result.finalPlants, result, parsed.imageUrls)
+    setSaveFailed(!outcome.saved)
+    setCloudSynced(outcome.cloudSynced)
+    setCloudSyncReason(outcome.cloudReason ?? '')
+    setSubmitting(false)
     setPhase('result')
   }
 
@@ -3722,6 +3736,22 @@ function CsvImportModal({ onClose, existingPlants, onApply }: {
                   <CheckCircle size={18} className="text-green-600 flex-shrink-0" />
                   <p className="text-sm font-medium text-stone-800">已套用至植栽資料庫</p>
                 </div>
+              )}
+              {!saveFailed && (
+                cloudSynced ? (
+                  <div className="flex items-center gap-3 p-3 bg-blue-50 rounded-xl border border-blue-100">
+                    <CheckCircle size={18} className="text-blue-600 flex-shrink-0" />
+                    <p className="text-sm font-medium text-stone-800">已同步至雲端資料庫，其他裝置／瀏覽器也看得到這批資料</p>
+                  </div>
+                ) : (
+                  <div className="flex gap-2 p-3 bg-amber-50 rounded-xl border border-amber-200">
+                    <AlertTriangle size={18} className="text-amber-600 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <p className="text-sm font-semibold text-amber-700">尚未同步至雲端，僅存在這個瀏覽器</p>
+                      <p className="text-xs text-amber-600 mt-1">{cloudSyncReason || '雲端寫入失敗，原因不明。'}換瀏覽器、無痕視窗或別台電腦目前還看不到這批資料，重新整理頁面也可能會恢復成同步前的內容。</p>
+                    </div>
+                  </div>
+                )
               )}
               <div className="grid grid-cols-2 gap-2 text-sm">
                 <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200">成功新增：<strong>{applyResult.addedCount}</strong> 筆</div>
@@ -4047,14 +4077,15 @@ export default function LandscapeAdvisorPage({
     })
   }, [canManagePlants])
 
-  const handleCsvImported = (finalPlants: CsvPlantRecord[], mergeResult: MergeApplyResult, imageUrls: Record<string, string>): boolean => {
-    if (!canManagePlants) return false
+  const handleCsvImported = async (finalPlants: CsvPlantRecord[], mergeResult: MergeApplyResult, imageUrls: Record<string, string>): Promise<CsvApplyOutcome> => {
+    if (!canManagePlants) return { saved: false, cloudSynced: false, cloudReason: '沒有管理植栽資料庫的權限。' }
     setAllPlants(finalPlants)
     const saved = savePlantsToStorage(finalPlants)
     if (!saved) {
       // 寫入失敗：結果畫面會顯示警示，這裡不做任何「看起來成功」的後續動作
-      // （不合併圖片、不清空選配），避免使用者誤以為資料已經更新。
-      return false
+      // （不合併圖片、不清空選配），避免使用者誤以為資料已經更新。也不寫雲端，
+      // 避免本機還沒存好、雲端卻先同步造成兩邊不一致。
+      return { saved: false, cloudSynced: false }
     }
     // 若 CSV 含圖片網址欄，自動合併進 imageStore（不覆蓋本機已上傳的檔案）
     if (Object.keys(imageUrls).length > 0) {
@@ -4075,7 +4106,10 @@ export default function LandscapeAdvisorPage({
       setSelectedPlants([])
       setResult(null)
     }
-    return true
+    // 本機儲存成功後，同步把這次新增／更新的植物寫入雲端資料庫，讓其他瀏覽器／
+    // 裝置也看得到——這一步失敗不影響本機已完成的匯入，但必須明確告知使用者。
+    const cloudResult = await upsertPlantsToCloud(mergeResult.touchedPlants)
+    return { saved: true, cloudSynced: cloudResult.ok, cloudReason: cloudResult.reason }
   }
 
   const handleExport = () => {

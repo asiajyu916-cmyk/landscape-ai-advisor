@@ -183,3 +183,72 @@ export async function persistConfirmedPlant(
   if (dataSource === 'cloud_db') return { ok: true }
   return insertCloudPlant(record, dataSource, sourceUrl)
 }
+
+// ── CSV 匯入 → 雲端同步（批次 upsert / 全量讀取）───────────────────────────────
+// 用途：CSV 匯入（新增或更新植物資料）過去只寫 localStorage，換瀏覽器／無痕視窗／
+// 別台電腦登入都看不到剛匯入的資料。改為匯入完成後，把本次新增／更新的植物一併
+// upsert 進 Supabase plants table（依 normalized_name 唯一鍵），並在載入植物清單
+// 時一併讀取雲端資料，才能真正做到「匯入一次，全站永久共用」。
+
+function recordToCloudRow(record: CsvPlantRecord) {
+  const normalizedName = normalizeForCompare(record.name)
+  const aliasGroup = getAliasGroup(record.name).map(normalizeForCompare).filter(Boolean)
+  const aliases = Array.from(new Set([normalizedName, ...aliasGroup]))
+  return {
+    name: record.name,
+    normalized_name: normalizedName,
+    scientific_name: record.scientificName || '',
+    normalized_scientific_name: record.scientificName ? normalizeScientificName(record.scientificName) : '',
+    aliases,
+    plant_type: record.category || '',
+    normalized_category: record.normalizedCategory || '',
+    height: record.height || '',
+    crown_width: record.crownWidth || '',
+    sun_requirement: record.sunRequirement || '',
+    water_requirement: record.waterRequirement || '',
+    drought_tolerance: record.droughtTolerance || '',
+    wet_tolerance: record.wetTolerance || '',
+    soil_requirement: record.soilTexture || '',
+    maintenance_level: record.maintenanceLevel || '',
+    landscape_use: record.remarks || '',
+    data_source: 'csv' as PlantDataSource,
+    source_url: record.officialUrl || '',
+    full_record: record,
+    is_ai_generated: false,
+    is_verified: true,
+  }
+}
+
+export interface CloudUpsertResult {
+  ok: boolean
+  successCount: number
+  failCount: number
+  reason?: string
+}
+
+/**
+ * CSV 匯入完成後呼叫：把本次新增／更新的植物批次 upsert 進 Supabase
+ * （依 normalized_name 唯一鍵，衝突時整列覆蓋，交由呼叫端保證傳入的是已經合併好的最終資料）。
+ * 未設定 Supabase 時明確回報失敗原因，呼叫端不得因此仍顯示「匯入成功」。
+ */
+export async function upsertPlantsToCloud(records: CsvPlantRecord[]): Promise<CloudUpsertResult> {
+  if (!supabase || !isSupabaseConfigured) {
+    return { ok: false, successCount: 0, failCount: records.length, reason: 'Supabase 尚未設定，本次匯入僅會存在本機瀏覽器，其他裝置或無痕視窗將看不到。' }
+  }
+  if (records.length === 0) return { ok: true, successCount: 0, failCount: 0 }
+
+  const rows = records.map(recordToCloudRow)
+  const { error } = await supabase.from(TABLE).upsert(rows, { onConflict: 'normalized_name' })
+  if (error) {
+    return { ok: false, successCount: 0, failCount: records.length, reason: `寫入 Supabase 失敗：${error.message}` }
+  }
+  return { ok: true, successCount: records.length, failCount: 0 }
+}
+
+/** 讀取雲端資料庫全部植物，供載入本地植物清單時合併（讓其他瀏覽器／裝置也看得到已匯入資料） */
+export async function fetchAllCloudPlants(): Promise<CsvPlantRecord[]> {
+  if (!supabase || !isSupabaseConfigured) return []
+  const { data, error } = await supabase.from(TABLE).select('*')
+  if (error || !data) return []
+  return (data as CloudPlantRow[]).map(rowToRecord)
+}

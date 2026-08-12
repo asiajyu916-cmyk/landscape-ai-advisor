@@ -248,6 +248,7 @@ export function applyMerge(
       fieldErrors: [],
       finalPlants: deduped,
       duplicatesResolvedCount: removedCount,
+      touchedPlants: deduped,   // 完全取代模式下，全部都算本次異動，需同步雲端
     }
   }
 
@@ -257,11 +258,13 @@ export function applyMerge(
   const fieldErrors: string[] = []
   const byId = new Map(existingPlants.map(p => [p.id, p]))
   const touchedIds = new Set<string>()
+  const touchedNames = new Set<string>()   // 本次新增／更新的植物名稱（正規化後），供雲端同步用
   const toAppend: CsvPlantRecord[] = []
 
   for (const row of preview.rows) {
     if (row.action === 'add') {
       toAppend.push(row.incoming)
+      touchedNames.add(normalizeForCompare(row.incoming.name))
       addedCount++
       continue
     }
@@ -269,12 +272,14 @@ export function applyMerge(
       const merged = mergeRecord(row.matchedExisting, row.incoming)
       byId.set(merged.id, merged)
       touchedIds.add(merged.id)
+      touchedNames.add(normalizeForCompare(merged.name))
       updatedCount++
       continue
     }
     if (row.action === 'duplicate') {
       if (resolvedDuplicateRowIndexes.has(row.rowIndex)) {
         toAppend.push(row.incoming)
+        touchedNames.add(normalizeForCompare(row.incoming.name))
         addedCount++
       } else {
         skippedCount++
@@ -293,10 +298,14 @@ export function applyMerge(
   // 依名稱再做一次去重，確保絕對不會產生同名重複紀錄
   const { deduped: finalPlants, removedCount } = dedupePlantsByName(rawFinalPlants)
   if (removedCount > 0) addedCount = Math.max(0, addedCount - removedCount)
+  // touchedNames 是比對前記錄的名稱，去重後 id 可能已被合併，改用去重後的最終名單
+  // 反查回實際要寫入雲端的完整記錄（避免推送到雲端的還是去重前的舊資料）
+  const touchedPlants = finalPlants.filter(p => touchedNames.has(normalizeForCompare(p.name)))
 
   return {
     addedCount, updatedCount, keptCount, skippedCount,
     failedCount: 0, fieldErrors, finalPlants,
     duplicatesResolvedCount: removedCount,
+    touchedPlants,
   }
 }
