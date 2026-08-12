@@ -232,15 +232,30 @@ export interface CloudUpsertResult {
  * 未設定 Supabase 時明確回報失敗原因，呼叫端不得因此仍顯示「匯入成功」。
  */
 export async function upsertPlantsToCloud(records: CsvPlantRecord[]): Promise<CloudUpsertResult> {
+  console.debug(`[雲端同步] upsertPlantsToCloud called with ${records.length} record(s):`, records.map(r => r.name))
   if (!supabase || !isSupabaseConfigured) {
+    console.warn('[雲端同步] Supabase 未設定，略過雲端寫入')
     return { ok: false, successCount: 0, failCount: records.length, reason: 'Supabase 尚未設定，本次匯入僅會存在本機瀏覽器，其他裝置或無痕視窗將看不到。' }
   }
-  if (records.length === 0) return { ok: true, successCount: 0, failCount: 0 }
+  if (records.length === 0) {
+    console.debug('[雲端同步] 本次沒有需要同步的植物（touchedPlants 為空），視為成功但不代表真的寫入了任何資料')
+    return { ok: true, successCount: 0, failCount: 0 }
+  }
 
   const rows = records.map(recordToCloudRow)
-  const { error } = await supabase.from(TABLE).upsert(rows, { onConflict: 'normalized_name' })
+  // 明確要求回傳受影響的列（select）——不能只看有沒有 error：RLS 或約束條件在某些情況下
+  // 會讓寫入實際受影響 0 筆卻不回傳 error，若只檢查 error 會誤判為成功。
+  const { data, error } = await supabase.from(TABLE).upsert(rows, { onConflict: 'normalized_name' }).select('id, name')
+  console.debug('[雲端同步] Supabase upsert 回應：', { error, dataCount: data?.length, data })
   if (error) {
     return { ok: false, successCount: 0, failCount: records.length, reason: `寫入 Supabase 失敗：${error.message}` }
+  }
+  const confirmedCount = data?.length ?? 0
+  if (confirmedCount < records.length) {
+    return {
+      ok: false, successCount: confirmedCount, failCount: records.length - confirmedCount,
+      reason: `Supabase 回報無錯誤，但只確認 ${confirmedCount}／${records.length} 筆實際寫入，可能受權限（RLS）或資料驗證規則影響，請聯繫開發者確認。`,
+    }
   }
   return { ok: true, successCount: records.length, failCount: 0 }
 }
