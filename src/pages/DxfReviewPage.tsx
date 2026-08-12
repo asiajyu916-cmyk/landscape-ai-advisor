@@ -2589,7 +2589,7 @@ export default function DxfReviewPage({
 
       // 偵測植栽索引表 + 與資料庫比對
       const sched = detectPlantSchedule(result.texts)
-      sched.entries.forEach(e => { e.dbMatched = loaded.some(p => p.name === e.plantName) })
+      sched.entries.forEach(e => { e.dbMatched = !!findPlantByName(loaded, e.plantName) })
       setPlantSchedule(sched)
       setScheduleManualOverrides({})
 
@@ -5928,6 +5928,9 @@ interface ScheduleEntrySource {
 // 但限制較短的一邊至少 2 字，避免單字誤配。
 function scheduleNameMatches(a: string, b: string): boolean {
   if (a === b) return true
+  // 已知別名（山馬茶/珍珠馬茶→馬茶花、矮梔子→梔子花等，見 @/data/plantAliases.ts）
+  // 正規化後相等也算命中，優先於子字串猜測，避免別名彼此無共同子字串而永遠比對不到。
+  if (normalizePlantName(a) === normalizePlantName(b)) return true
   const shorter = a.length <= b.length ? a : b
   const longer = a.length <= b.length ? b : a
   return shorter.length >= 2 && longer.includes(shorter)
@@ -5967,7 +5970,10 @@ function findMatchedDbPlant(
 ): CsvPlantRecord | undefined {
   const overrideName = manualOverrides[scheduleEntryKey(entry)]
   if (overrideName) return plants.find(p => p.name === overrideName)
-  return plants.find(p => scheduleNameMatches(p.name, entry.plantName))
+  // 已知別名優先（山馬茶→馬茶花、矮梔子→梔子花等，見 findPlantByName），
+  // 找不到才退回原本的子字串／學名比對
+  return findPlantByName(plants, entry.plantName)
+    ?? plants.find(p => scheduleNameMatches(p.name, entry.plantName))
     ?? (entry.scientificName ? plants.find(p => p.scientificName && normalizeScientificName(p.scientificName) === normalizeScientificName(entry.scientificName!)) : undefined)
 }
 
@@ -6029,13 +6035,16 @@ function ScheduleTab({ schedule, mappings, plants, zoneStatistics, manualOverrid
       .filter(m => m.matchStatus !== 'unmatched' && m.scheduleEntry?.code)
       .map(m => m.scheduleEntry!.code.trim())
   )
+  // 用正規化後（含已知別名）的名稱建立比對集合——mappings 裡的 plantName 現在優先
+  // 存資料庫正式名稱（例如「馬茶花」），而索引表原始文字可能是別名寫法（例如「山馬茶」），
+  // 兩者字面不同但應視為同一植物，不能直接用原始字串比對。
   const matchedNames = new Set(
     mappings
       .filter(m => m.matchStatus !== 'unmatched' && m.plantName)
-      .map(m => m.plantName!)
+      .map(m => normalizePlantName(m.plantName!))
   )
   const isBlockMatched = (e: PlantScheduleEntry) =>
-    (e.code && matchedCodes.has(e.code.trim())) || matchedNames.has(e.plantName)
+    (e.code && matchedCodes.has(e.code.trim())) || matchedNames.has(normalizePlantName(e.plantName))
 
   const isDbMatched      = (e: PlantScheduleEntry) => !!findMatchedDbPlant(e, plants, manualOverrides)
   const blockMatchedCount = schedule.entries.filter(isBlockMatched).length
