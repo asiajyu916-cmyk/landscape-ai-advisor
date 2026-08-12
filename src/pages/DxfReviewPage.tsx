@@ -28,7 +28,7 @@ import type { EvalResult } from '@/utils/plantEvaluator'
 import { computeZonePlantConflicts, DEFAULT_PROXIMITY_CONFIG, layerOverrideKey } from '@/utils/plantProximity'
 import { loadPlantsFromStorage, savePlantsToStorage, loadPlantsWithCsvMerge } from '@/data/plantStore'
 import { searchPlantAllTiers, searchResultToDraft } from '@/utils/plantSearchClient'
-import { existsExactInLocalDatabase, normalizeLayerToken, buildLayerPlantKeywordMap, findPlantsByLayerName, normalizeScientificName, normalizeForCompare } from '@/utils/plantNameMatch'
+import { existsExactInLocalDatabase, normalizeLayerToken, buildLayerPlantKeywordMap, findPlantsByLayerName, normalizeScientificName, normalizeForCompare, findPlantByName, normalizePlantName } from '@/utils/plantNameMatch'
 import { persistConfirmedPlant } from '@/services/plantCloudService'
 import type { PlantSearchResult, DraftPlantRecord } from '@/types/plantSearch'
 import { PLANT_DATA_SOURCE_LABELS } from '@/types/plantSearch'
@@ -132,7 +132,7 @@ function matchPlant(
   // ── P0. 已儲存規則（使用者手動確認，最高優先）───────────────────────────────
   const rule = savedRules.find(r => r.blockName === blockName)
   if (rule) {
-    const plant = plants.find(p => p.name === rule.plantName) ?? null
+    const plant = findPlantByName(plants, rule.plantName) ?? null
     ev.push(`已儲存規則：${rule.plantName}`)
     return ok(95, plant, `已儲存規則（${rule.plantName}）`, 'saved_rule', rule.plantName)
   }
@@ -143,17 +143,18 @@ function matchPlant(
     const val = attr.value.trim()
     if (!val || val.length < 2) continue
 
-    // P1a. ATTRIB value 完全等於 DB 中的植物名稱
-    const exactDbPlant = plants.find(p => p.name === val)
+    // P1a. ATTRIB value（含已知別名，如「山馬茶」）對應 DB 中的植物名稱
+    const exactDbPlant = findPlantByName(plants, val)
     if (exactDbPlant) {
-      ev.push(`Block屬性 [${attr.tag}]="${val}" → 資料庫植物名稱完全吻合`)
-      return ok(92, exactDbPlant, `Block屬性「${val}」（資料庫確認）`, 'attribute', val)
+      const aliasNote = normalizeForCompare(exactDbPlant.name) !== normalizeForCompare(val) ? `（別名對應：${val} → ${exactDbPlant.name}）` : ''
+      ev.push(`Block屬性 [${attr.tag}]="${val}" → 資料庫植物名稱完全吻合${aliasNote}`)
+      return ok(92, exactDbPlant, `Block屬性「${val}」（資料庫確認）${aliasNote}`, 'attribute', val)
     }
 
     // P1b. ATTRIB value 對應索引表植物名稱
     const schedByAttrName = schedule.find(s => s.plantName === val)
     if (schedByAttrName) {
-      const plant = plants.find(p => p.name === val) ?? null
+      const plant = findPlantByName(plants, val) ?? null
       ev.push(`Block屬性 [${attr.tag}]="${val}" → 索引表植物名稱吻合`)
       return ok(90, plant, `Block屬性對應索引表「${val}」`, 'attribute', val, schedByAttrName)
     }
@@ -161,7 +162,7 @@ function matchPlant(
     // P1c. ATTRIB value 對應索引表代號
     const schedByAttrCode = schedule.find(s => s.code && s.code === val)
     if (schedByAttrCode) {
-      const plant = plants.find(p => p.name === schedByAttrCode.plantName) ?? null
+      const plant = findPlantByName(plants, schedByAttrCode.plantName) ?? null
       ev.push(`Block屬性 [${attr.tag}]="${val}" → 索引表代號 ${schedByAttrCode.code}（${schedByAttrCode.plantName}）`)
       return ok(88, plant, `Block屬性代號對應索引表「${schedByAttrCode.plantName}」`, 'attribute', schedByAttrCode.plantName, schedByAttrCode)
     }
@@ -180,18 +181,20 @@ function matchPlant(
   }
 
   // ── P2. Block Name 含植物資訊 ─────────────────────────────────────────────
-  // P2a. Block name 完全等於 DB 植物名稱
-  const exactDbBlock = plants.find(p => /[一-鿿]/.test(p.name) && p.name === blockName.trim())
+  // P2a. Block name（含已知別名，如「矮梔子」）對應 DB 植物名稱
+  const blockNameTrimmed = blockName.trim()
+  const exactDbBlock = /[一-鿿]/.test(blockNameTrimmed) ? findPlantByName(plants, blockNameTrimmed) : undefined
   if (exactDbBlock) {
-    ev.push(`圖塊名稱「${blockName}」完全符合資料庫植物名稱`)
-    return ok(88, exactDbBlock, `圖塊名稱即植物名稱「${exactDbBlock.name}」`, 'block', exactDbBlock.name)
+    const aliasNote = normalizeForCompare(exactDbBlock.name) !== normalizeForCompare(blockNameTrimmed) ? `（別名對應：${blockNameTrimmed} → ${exactDbBlock.name}）` : ''
+    ev.push(`圖塊名稱「${blockName}」完全符合資料庫植物名稱${aliasNote}`)
+    return ok(88, exactDbBlock, `圖塊名稱即植物名稱「${exactDbBlock.name}」${aliasNote}`, 'block', blockNameTrimmed)
   }
 
   // P2b. Block name 就是索引表代號（完全相等）
   const schedByBlockCode = schedule.find(e => e.code && e.code.toLowerCase() === bn)
   if (schedByBlockCode) {
     ev.push(`圖塊名稱「${blockName}」= 索引表代號 ${schedByBlockCode.code}（${schedByBlockCode.plantName}）`)
-    const plant = plants.find(p => p.name === schedByBlockCode.plantName) ?? null
+    const plant = findPlantByName(plants, schedByBlockCode.plantName) ?? null
     return ok(88, plant, `圖塊名稱對應索引表代號「${schedByBlockCode.plantName}」`, 'block', schedByBlockCode.plantName, schedByBlockCode, schedByBlockCode.code)
   }
 
@@ -228,7 +231,7 @@ function matchPlant(
     })
     if (schedByNum) {
       ev.push(`圖塊名稱含數字代號 ${possibleCode}，索引表有對應記錄（${schedByNum.plantName}）`)
-      const plant = plants.find(p => p.name === schedByNum.plantName) ?? null
+      const plant = findPlantByName(plants, schedByNum.plantName) ?? null
       const qtyOk = schedByNum.quantity !== undefined &&
         Math.abs(count - schedByNum.quantity) <= Math.max(1, Math.round(count * 0.15))
       if (qtyOk) ev.push(`圖塊數量 ${count} ≈ 索引表數量 ${schedByNum.quantity}`)
@@ -244,7 +247,7 @@ function matchPlant(
     const e = schedule.find(s => s.code && s.code === t)
     if (e) {
       ev.push(`附近文字「${t}」= 索引表代號 ${e.code}（${e.plantName}）`)
-      const plant = plants.find(p => p.name === e.plantName) ?? null
+      const plant = findPlantByName(plants, e.plantName) ?? null
       return ok(85, plant, `附近文字對應索引表代號「${e.plantName}」`, 'text', e.plantName, e, e.code)
     }
   }
@@ -254,8 +257,20 @@ function matchPlant(
     const e = schedule.find(s => text.includes(s.plantName) && s.plantName.length >= 2)
     if (e) {
       ev.push(`附近文字「${text}」包含索引表植物名稱「${e.plantName}」`)
-      const plant = plants.find(p => p.name === e.plantName) ?? null
+      const plant = findPlantByName(plants, e.plantName) ?? null
       return ok(78, plant, `附近文字對應索引表植物名稱「${e.plantName}」`, 'text', e.plantName, e)
+    }
+  }
+
+  // ── P4b. 附近文字（含已知別名，如「山馬茶」「珍珠馬茶」）直接對應資料庫植物名稱 ──
+  // 放在既有 P5 子字串比對之前：別名是精確查表比對（不會誤判），優先於較弱的子字串猜測。
+  for (const text of nearbyTexts) {
+    const t = text.trim()
+    if (t.length < 2) continue
+    const aliasPlant = findPlantByName(plants, t)
+    if (aliasPlant && normalizeForCompare(aliasPlant.name) !== normalizeForCompare(t)) {
+      ev.push(`附近文字「${t}」為已知別名，對應資料庫植物名稱「${aliasPlant.name}」（別名對應：${t} → ${aliasPlant.name}）`)
+      return ok(80, aliasPlant, `附近文字別名對應「${aliasPlant.name}」（別名對應：${t} → ${aliasPlant.name}）`, 'text', t)
     }
   }
 
@@ -893,13 +908,10 @@ interface ZoneReviewResult {
 
 function uid() { return Math.random().toString(36).slice(2) }
 
-// 植物名稱比對：優先完全匹配，fallback 到 trim / 忽略空白的模糊比對
+// 植物名稱比對：完全相等 / 全半形與空白差異 / 已知別名（山馬茶→馬茶花、矮梔子→梔子花等，
+// 見 @/data/plantAliases.ts），統一委派給 findPlantByName（@/utils/plantNameMatch.ts）
 function findInDB(name: string | undefined, db: CsvPlantRecord[]): CsvPlantRecord | undefined {
-  if (!name) return undefined
-  const n = name.trim()
-  return db.find(p => p.name === n)                           // 完全相等
-    ?? db.find(p => p.name.trim() === n)                      // trim 後相等
-    ?? db.find(p => p.name.replace(/\s/g, '') === n.replace(/\s/g, ''))  // 忽略空白
+  return findPlantByName(db, name)
 }
 
 /** Legend / site HATCH lookup key — pattern name if present, else stable geometry fingerprint */

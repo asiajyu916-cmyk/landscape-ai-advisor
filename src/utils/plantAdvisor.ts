@@ -6,6 +6,8 @@
 
 import type { CsvPlantRecord } from '@/types/csvPlant'
 import { waterScore, sunConflictLevel, drainageConflictLevel } from '@/utils/csvParser'
+import { findPlantByName } from '@/utils/plantNameMatch'
+import { PLANT_ALIAS_MAP } from '@/data/plantAliases'
 
 // ── 回覆結構（規則引擎與未來 AI 後端共用）─────────────────────────────────────
 export interface AdvisorReply {
@@ -50,20 +52,25 @@ export async function getAdvisorReply(question: string, ctx: AdvisorContext): Pr
 
 function findPlant(name: string, db: CsvPlantRecord[]): CsvPlantRecord | undefined {
   const n = name.trim()
-  return db.find(p => p.name === n)
-    ?? db.find(p => p.name.replace(/\s/g, '') === n.replace(/\s/g, ''))
+  return findPlantByName(db, n)
     ?? db.find(p => n.length >= 2 && (p.name.includes(n) || n.includes(p.name)))
 }
 
-/** 從問題文字抓出資料庫內的植物名稱（長名優先，避免「杜鵑」吃掉「平戶杜鵑」）*/
+/** 從問題文字抓出資料庫內的植物名稱（長名優先，避免「杜鵑」吃掉「平戶杜鵑」）；
+ *  已知別名（見 @/data/plantAliases.ts，如「山馬茶」）與資料庫正式名稱一併掃描，
+ *  命中別名時直接採用其對應的資料庫記錄。 */
 function extractPlants(text: string, db: CsvPlantRecord[]): { found: CsvPlantRecord[]; unknown: string[] } {
   const found: CsvPlantRecord[] = []
   let rest = text
-  const sorted = [...db].sort((a, b) => b.name.length - a.name.length)
-  for (const p of sorted) {
-    if (p.name.length >= 2 && rest.includes(p.name)) {
-      found.push(p)
-      rest = rest.split(p.name).join('※')
+  const aliasCandidates = Object.keys(PLANT_ALIAS_MAP)
+    .map(alias => ({ matchText: alias, plant: findPlantByName(db, alias) }))
+    .filter((c): c is { matchText: string; plant: CsvPlantRecord } => !!c.plant)
+  const dbCandidates = db.map(p => ({ matchText: p.name, plant: p }))
+  const sorted = [...dbCandidates, ...aliasCandidates].sort((a, b) => b.matchText.length - a.matchText.length)
+  for (const { matchText, plant } of sorted) {
+    if (matchText.length >= 2 && rest.includes(matchText) && !found.some(f => f.id === plant.id)) {
+      found.push(plant)
+      rest = rest.split(matchText).join('※')
     }
   }
   // 疑似植物但不在 DB：抓「XX木」「XX花」「XX草」「XX樹」「XX藤」等常見尾字組合

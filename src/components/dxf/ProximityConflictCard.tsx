@@ -51,6 +51,11 @@ const SEVERITY_BG_CLS: Record<Severity, string> = {
   high: 'bg-red-50', warning: 'bg-blue-50', normal: 'bg-stone-50',
 }
 
+/** 保留原圖面名稱，已知別名（canonicalName 存在時）附註對應資料庫正式名稱 */
+function plantDisplayName(p: { name: string; canonicalName?: string }): string {
+  return p.canonicalName ? `${p.name}（對應：${p.canonicalName}）` : p.name
+}
+
 function relationshipText(c: PlantConflictResult): string {
   if (c.proximity === 'overlap') return '範圍重疊'
   if (c.proximity === 'touching') return '邊界相接'
@@ -86,8 +91,10 @@ export default function ProximityConflictCard({ conflict: c, onLocate, defaultEx
   ]).filter(p => p.label !== '__headline')
 
   // 6. 替代方案：只在配對雙方任一株有相關建議、且建議清單非空時顯示，避免留空標題
+  // 用資料庫正式名稱（canonicalName，若圖面用了已知別名）比對替代方案清單——alternatives
+  // 是依 evaluatePlantPair() 比對到的資料庫記錄產生的，key 一律是正式名稱，不是原圖面名稱。
   const relevantAlts = !isUnmatched && alternatives
-    ? [c.plantA.name, c.plantB.name]
+    ? [c.plantA.canonicalName ?? c.plantA.name, c.plantB.canonicalName ?? c.plantB.name]
         .map(name => alternatives.find(a => a.originalPlant.name === name))
         .filter((a): a is AltSuggestion => !!a && a.alternatives.length > 0)
     : []
@@ -114,10 +121,12 @@ export default function ProximityConflictCard({ conflict: c, onLocate, defaultEx
             {/* 1. 問題名稱 */}
             <p className="text-lg font-bold text-stone-800 leading-relaxed mb-1">{primaryTitle}</p>
 
-            {/* 2. 問題位置／分區 + 植物名稱／HATCH／空間關係／距離：收合或展開都固定顯示 */}
+            {/* 2. 問題位置／分區 + 植物名稱／HATCH／空間關係／距離：收合或展開都固定顯示
+             *  名稱屬於已知別名時（見 @/data/plantAliases.ts）保留原圖面名稱，並附註對應
+             *  資料庫正式名稱，例如「矮梔子（對應：梔子花）」，避免與施工圖對不起來。 */}
             <p className="text-sm text-stone-500 mb-1">{c.locationLabel}</p>
             <p className="text-sm text-stone-500 mb-3">
-              {c.plantA.name} × {c.plantB.name}｜HATCH {c.plantA.label} × {c.plantB.label}｜{relationshipText(c)}｜最近距離 {c.distanceCm} cm
+              {plantDisplayName(c.plantA)} × {plantDisplayName(c.plantB)}｜HATCH {c.plantA.label} × {c.plantB.label}｜{relationshipText(c)}｜最近距離 {c.distanceCm} cm
             </p>
 
             {/* 3. AI 判斷：一句結論，卡片只突出這個核心結論 */}

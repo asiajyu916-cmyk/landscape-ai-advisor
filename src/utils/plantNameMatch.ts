@@ -6,6 +6,7 @@
 import type { CsvPlantRecord } from '@/types/csvPlant'
 import type { PlantMatchCandidate, SimilarPlantCandidate } from '@/types/plantSearch'
 import type { PlantScheduleEntry } from '@/types/dxf'
+import { PLANT_ALIAS_MAP } from '@/data/plantAliases'
 
 // ── 全形/半形統一 + 去空白 ────────────────────────────────────────────────────
 // 注意：這段（含 normalizeForCompare）一定要放在 ALIAS_GROUPS/ALIAS_MAP 之前——
@@ -69,10 +70,35 @@ const ALIAS_GROUPS: string[][] = [
   ['越橘葉蔓榕', '蔓榕'],
 ]
 
+// ── 集中管理的別名對照表（@/data/plantAliases.ts）併入上方的多對多別名群組 ─────────
+// PLANT_ALIAS_MAP 是「別名 → 正式名稱」的一對一寫法，這裡依正式名稱分組，
+// 併入既有的 ALIAS_GROUPS（若正式名稱已存在於某群組，就把新別名加進該群組，
+// 否則新開一組），讓 resolveAlias／getAliasGroup／findLocalPlantMatch 等既有機制
+// 自動涵蓋 plantAliases.ts 新增的別名，不需要另外維護第二套查表。
+function buildCombinedAliasGroups(): string[][] {
+  const groups = ALIAS_GROUPS.map(g => [...g])
+  const aliasesByCanonical = new Map<string, string[]>()
+  for (const [alias, canonical] of Object.entries(PLANT_ALIAS_MAP)) {
+    const arr = aliasesByCanonical.get(canonical) ?? []
+    arr.push(alias)
+    aliasesByCanonical.set(canonical, arr)
+  }
+  for (const [canonical, aliases] of aliasesByCanonical) {
+    const existingGroup = groups.find(g => normalizeForCompare(g[0]) === normalizeForCompare(canonical))
+    if (existingGroup) {
+      for (const a of aliases) if (!existingGroup.includes(a)) existingGroup.push(a)
+    } else {
+      groups.push([canonical, ...aliases])
+    }
+  }
+  return groups
+}
+const COMBINED_ALIAS_GROUPS = buildCombinedAliasGroups()
+
 /** 建立「任一寫法 → 正式代表名稱」的查表（代表名取該組第一個） */
 function buildAliasMap(): Map<string, string> {
   const m = new Map<string, string>()
-  for (const group of ALIAS_GROUPS) {
+  for (const group of COMBINED_ALIAS_GROUPS) {
     const canonical = group[0]
     for (const alt of group) m.set(normalizeForCompare(alt), canonical)
   }
@@ -84,7 +110,7 @@ const ALIAS_MAP = buildAliasMap()
  *（resolveAlias 只回傳代表名，無法反查同組其他別名，例如由「今葉石菖蒲」查不到「石菖蒲」）*/
 function buildAliasGroupMap(): Map<string, string[]> {
   const m = new Map<string, string[]>()
-  for (const group of ALIAS_GROUPS) {
+  for (const group of COMBINED_ALIAS_GROUPS) {
     for (const alt of group) m.set(normalizeForCompare(alt), group)
   }
   return m
@@ -108,6 +134,43 @@ export function normalizeScientificName(raw: string): string {
 export function resolveAlias(raw: string): string {
   const key = normalizeForCompare(raw)
   return ALIAS_MAP.get(key) ?? raw
+}
+
+/** 清理原始文字雜訊：去不可見字元、換行/Tab、全形空白轉半形、多重空白收斂成一個、
+ *  去除前後標點符號——保留原始寫法（不轉小寫、不去除中間空白），供畫面顯示「原圖面名稱」用 */
+function cleanRawPlantNameText(raw: string): string {
+  return raw
+    .replace(INVISIBLE_CHARS_RE, '')
+    .replace(/[\r\n\t]+/g, '')
+    .replace(/　/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^[、，,。.:：;；\-—·]+|[、，,。.:：;；\-—·]+$/g, '')
+    .trim()
+}
+
+/**
+ * 植物名稱正規化入口：清理雜訊字元後，查詢集中管理的別名對照表（@/data/plantAliases.ts，
+ * 與既有 ALIAS_GROUPS 合併查表）——命中已知別名則回傳資料庫正式名稱，未命中則回傳清理後
+ * 的原字串。只做「已知別名」的精確比對，不做模糊／包含字串猜測（例如不會因為字面像就誤判）。
+ *
+ * 所有在查詢資料庫前使用植物名稱的流程都應先呼叫本函式：CSV 匯入比對、DXF/PDF 名稱解析、
+ * AI 配植搜尋、分區審查、植栽資料庫搜尋、審查報告輸出。
+ */
+export function normalizePlantName(raw: string): string {
+  if (!raw) return raw
+  const cleaned = cleanRawPlantNameText(raw)
+  const key = normalizeForCompare(cleaned)
+  return ALIAS_MAP.get(key) ?? cleaned
+}
+
+/** 依（已知別名正規化後的）植物名稱在資料庫中找出對應記錄；找不到回傳 undefined。
+ *  用於取代過去「p.name === rawName」的嚴格字串比對——那種比對法連全形/半形、
+ *  前後空白、已知別名都無法容忍，會把「山馬茶」「矮梔子 」誤判為資料庫查無此植物。*/
+export function findPlantByName(plantDB: CsvPlantRecord[], rawName: string | undefined): CsvPlantRecord | undefined {
+  if (!rawName) return undefined
+  const canonicalKey = normalizeForCompare(normalizePlantName(rawName))
+  return plantDB.find(p => normalizeForCompare(p.name) === canonicalKey)
 }
 
 /**

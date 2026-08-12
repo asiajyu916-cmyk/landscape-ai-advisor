@@ -23,7 +23,7 @@ import {
   groupHatchLoopsByHandle, classifyOuterAndHoles, toRing,
   CM_PER_DRAWING_UNIT, AREA_EPS, multiPolygonArea,
 } from '@/utils/zoneStatistics'
-import { findPlantsByLayerName, normalizeLayerToken } from '@/utils/plantNameMatch'
+import { findPlantsByLayerName, normalizeLayerToken, findPlantByName, normalizeForCompare } from '@/utils/plantNameMatch'
 import { evaluatePlantPair } from '@/utils/plantEvaluator'
 import type { IssueDetail } from '@/utils/plantEvaluator'
 import { isExcludedFromPlantingEvaluation } from '@/utils/compatibilityLevels'
@@ -196,7 +196,7 @@ export function buildAllSpatialInstances(
     if (!assignedZone) continue
 
     const plantName = item.plantName ?? ins.blockName
-    const record = plantDB.find(p => p.name === plantName)
+    const record = findPlantByName(plantDB, plantName)
     const canopyRadius = resolveTreeCanopyRadiusDU(record, ins, extent, unit)
     const center = extent ? computeWorldCenter(ins.x, ins.y, ins.scaleX, ins.scaleY, ins.rotation, extent) : { x: ins.x, y: ins.y }
 
@@ -455,8 +455,8 @@ export function computeZonePlantConflicts(
       if (pair.a.kind === 'tree' || pair.b.kind === 'tree') continue   // 喬木走盤點，不產生衝突卡
       if (!pair.a.plantName || !pair.b.plantName) continue
 
-      const recA = plantDB.find(p => p.name === pair.a.plantName)
-      const recB = plantDB.find(p => p.name === pair.b.plantName)
+      const recA = findPlantByName(plantDB, pair.a.plantName)
+      const recB = findPlantByName(plantDB, pair.b.plantName)
 
       // 產品規則：喬木不納入配置評估。上面的 kind==='tree' 只排得掉「畫成獨立
       // 喬木符號」的實體——喬木樹種如果是用 HATCH 面狀畫（例如密植的喬木綠籬/
@@ -484,13 +484,19 @@ export function computeZonePlantConflicts(
         issues = evalResult.issues
       }
 
+      // 只有「圖面名稱屬於已知別名」才附上 canonicalName（畫面顯示「原名（對應：正式名稱）」）；
+      // 單純全形/半形、空白等寫法差異已由 normalizePlantName／findPlantByName 內部吸收，
+      // 比對到的資料庫名稱與原圖名稱正規化後相同時不算別名，不顯示對應提示。
+      const canonicalA = recA && normalizeForCompare(recA.name) !== normalizeForCompare(pair.a.plantName) ? recA.name : undefined
+      const canonicalB = recB && normalizeForCompare(recB.name) !== normalizeForCompare(pair.b.plantName) ? recB.name : undefined
+
       seq++
       results.push({
         id: `conflict-${zoneName}-${seq}`,
         zoneName,
         locationLabel: `${zoneName}／種植區塊 ${pair.a.label}${pair.a.label !== pair.b.label ? `‑${pair.b.label}` : ''}`,
-        plantA: { name: pair.a.plantName, label: pair.a.label, kind: pair.a.kind, instanceId: pair.a.id, sourceLayer: pair.a.sourceLayer },
-        plantB: { name: pair.b.plantName, label: pair.b.label, kind: pair.b.kind, instanceId: pair.b.id, sourceLayer: pair.b.sourceLayer },
+        plantA: { name: pair.a.plantName, canonicalName: canonicalA, label: pair.a.label, kind: pair.a.kind, instanceId: pair.a.id, sourceLayer: pair.a.sourceLayer },
+        plantB: { name: pair.b.plantName, canonicalName: canonicalB, label: pair.b.label, kind: pair.b.kind, instanceId: pair.b.id, sourceLayer: pair.b.sourceLayer },
         proximity: pair.level,
         nearBand: pair.nearBand,
         distanceCm: Math.round(pair.distanceCm),

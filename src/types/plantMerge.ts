@@ -50,6 +50,7 @@ export interface MergeApplyResult {
   failedCount: number
   fieldErrors: string[]
   finalPlants: CsvPlantRecord[]
+  duplicatesResolvedCount: number   // 寫回資料庫前，依名稱去重時額外合併掉的重複紀錄數
 }
 
 // ── 欄位中文標籤（供預覽/結果畫面顯示差異用）──────────────────────────────────

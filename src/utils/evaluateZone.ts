@@ -1,5 +1,6 @@
 import type { ZonePlantingRow } from './parsePdfZones'
 import type { CsvPlantRecord } from '@/types/csvPlant'
+import { findPlantByName } from '@/utils/plantNameMatch'
 
 export interface ZoneIssue {
   type: string
@@ -20,7 +21,7 @@ export interface ZoneReviewResult {
 export function evaluateZone(zone: ZonePlantingRow, db: CsvPlantRecord[]): ZoneReviewResult {
   const allNames = [...zone.shrubs, ...zone.trees]
   const found = allNames
-    .map(name => db.find(p => p.name === name || p.name.includes(name) || name.includes(p.name)))
+    .map(name => findPlantByName(db, name) ?? db.find(p => p.name.includes(name) || name.includes(p.name)))
     .filter((p): p is CsvPlantRecord => !!p)
 
   let score = 85
@@ -94,7 +95,7 @@ export function evaluateZone(zone: ZonePlantingRow, db: CsvPlantRecord[]): ZoneR
 
   // 植物不在資料庫
   const unknownPlants = allNames.filter(
-    name => !db.find(p => p.name === name || p.name.includes(name) || name.includes(p.name))
+    name => !findPlantByName(db, name) && !db.find(p => p.name.includes(name) || name.includes(p.name))
   )
   if (unknownPlants.length > 0) {
     score -= 3

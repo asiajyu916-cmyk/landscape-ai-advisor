@@ -1,5 +1,6 @@
 import { parsePlantCsv } from '@/utils/csvParser'
-import { normalizeForCompare } from '@/utils/plantNameMatch'
+import { normalizeForCompare, normalizePlantName } from '@/utils/plantNameMatch'
+import { dedupePlantsByName } from '@/utils/plantCsvMerge'
 import type { CsvPlantRecord, ImportResult, PlantImageData, ImageStore } from '@/types/csvPlant'
 
 const STORAGE_KEY       = 'landscape_advisor_plants_v1'
@@ -21,7 +22,15 @@ export function loadPlantsFromStorage(): CsvPlantRecord[] | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return null
-    return JSON.parse(raw) as CsvPlantRecord[]
+    const plants = JSON.parse(raw) as CsvPlantRecord[]
+    // 自我修復：清除歷史累積下來的同名重複紀錄（例如多次匯入未正確比對到既有資料）。
+    // 只在真的偵測到重複時才寫回 storage，避免每次讀取都觸發不必要的寫入。
+    const { deduped, removedCount } = dedupePlantsByName(plants)
+    if (removedCount > 0) {
+      savePlantsToStorage(deduped)
+      return deduped
+    }
+    return plants
   } catch {
     return null
   }
@@ -80,9 +89,9 @@ export async function loadPlantsWithCsvMerge(): Promise<PlantsLoadResult> {
   if (newOnes.length === 0) {
     return { plants: stored, source: 'localStorage+csv-merge', csvFileName, csvTotal: csvPlants.length, csvLastPlantName, addedFromCsv: 0 }
   }
-  const merged = [...stored, ...newOnes]
+  const { deduped: merged, removedCount } = dedupePlantsByName([...stored, ...newOnes])
   savePlantsToStorage(merged)
-  return { plants: merged, source: 'localStorage+csv-merge', csvFileName, csvTotal: csvPlants.length, csvLastPlantName, addedFromCsv: newOnes.length }
+  return { plants: merged, source: 'localStorage+csv-merge', csvFileName, csvTotal: csvPlants.length, csvLastPlantName, addedFromCsv: newOnes.length - removedCount }
 }
 
 // ── File import (user upload) ──────────────────────────────────────────────────
@@ -167,7 +176,14 @@ export function filterPlants(plants: CsvPlantRecord[], f: PlantFilter): CsvPlant
   return plants.filter(p => {
     if (f.search) {
       const q = f.search.toLowerCase()
-      if (!p.name.includes(f.search) &&
+      // 已知別名（見 @/data/plantAliases.ts）：搜尋字串整體剛好是一個已知別名時，
+      // 也算命中該別名對應的資料庫正式名稱（例如搜尋「山馬茶」找得到「馬茶花」）。
+      // 只做整字比對，不做子字串猜測。
+      const aliasCanonical = normalizePlantName(f.search)
+      const aliasHit = normalizeForCompare(aliasCanonical) !== normalizeForCompare(f.search) &&
+        normalizeForCompare(p.name) === normalizeForCompare(aliasCanonical)
+      if (!aliasHit &&
+          !p.name.includes(f.search) &&
           !(p.scientificName ?? '').toLowerCase().includes(q) &&
           !(p.subCategory ?? '').includes(f.search)) return false
     }

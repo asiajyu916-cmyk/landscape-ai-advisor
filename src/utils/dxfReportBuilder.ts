@@ -267,8 +267,12 @@ export interface ZoneEvent {
   zoneName: string
   severity: EventSeverity
   overlapLabel: string             // classifyOverlap 的說明文字，卡片小字顯示，不是主標題
-  plantAName: string
+  plantAName: string                // 資料庫正式名稱（若圖面用了已知別名，已正規化）——比對用
   plantBName: string
+  /** 畫面／報告顯示用：保留原圖面名稱，屬於已知別名時附註「（對應：正式名稱）」，
+   *  例如「矮梔子（對應：梔子花）」——避免報告與施工圖對不起來。無別名差異時等於 plantAName/plantBName。 */
+  plantADisplayName: string
+  plantBDisplayName: string
   locationLabels: string[]
   instanceIds: [string, string]
   categories: IssueBucketKey[]     // 問題類型標籤（去重）
@@ -292,9 +296,12 @@ export function buildZoneEvents(zoneName: string, conflicts: PlantConflictResult
   const draft: Array<Omit<ZoneEvent, 'id'>> = conflicts.map(conflict => {
     const overlap = classifyOverlap(conflict.plantA.kind, conflict.plantB.kind, conflict.proximity)
     const locationLabels = dedupe([conflict.plantA.label, conflict.plantB.label])
+    const plantADisplayName = conflict.plantA.canonicalName ? `${conflict.plantA.name}（對應：${conflict.plantA.canonicalName}）` : conflict.plantA.name
+    const plantBDisplayName = conflict.plantB.canonicalName ? `${conflict.plantB.name}（對應：${conflict.plantB.canonicalName}）` : conflict.plantB.name
     const base = {
       zoneName, overlapLabel: overlap.label,
       plantAName: conflict.plantA.name, plantBName: conflict.plantB.name,
+      plantADisplayName, plantBDisplayName,
       locationLabels, instanceIds: [conflict.plantA.instanceId, conflict.plantB.instanceId] as [string, string],
       distanceCm: conflict.proximity === 'overlap' ? null : conflict.distanceCm,
       sourcePairId: conflict.id,
@@ -303,10 +310,10 @@ export function buildZoneEvents(zoneName: string, conflicts: PlantConflictResult
       return {
         ...base, severity: 'needs-review' as EventSeverity, categories: [], primaryBucket: 'proximity' as IssueBucketKey,
         title: '植物名稱未能比對資料庫，相容性無法判定',
-        cause: `${conflict.plantA.name} 與 ${conflict.plantB.name} 空間${proximityLabel(conflict)}，惟至少一方植物名稱未能比對資料庫，無法判斷相容性。`,
+        cause: `${plantADisplayName} 與 ${plantBDisplayName} 空間${proximityLabel(conflict)}，惟至少一方植物名稱未能比對資料庫，無法判斷相容性。`,
         impact: '無法確認是否存在生長習性衝突，建議人工核實植物品種後再評估。',
         suggestion: '請設計者確認植物名稱與圖例對照，並於必要時補充至植栽資料庫。',
-        causeFull: `${conflict.plantA.name} 與 ${conflict.plantB.name} 空間${proximityLabel(conflict)}，惟至少一方植物名稱未能比對資料庫，無法判斷相容性。`,
+        causeFull: `${plantADisplayName} 與 ${plantBDisplayName} 空間${proximityLabel(conflict)}，惟至少一方植物名稱未能比對資料庫，無法判斷相容性。`,
         impactFull: '無法確認是否存在生長習性衝突，建議人工核實植物品種後再評估。',
         suggestionFull: '請設計者確認植物名稱與圖例對照，並於必要時補充至植栽資料庫。',
         needsReviewNote: '植物名稱無法比對資料庫',
@@ -543,7 +550,7 @@ export function clusterZoneEvents(
       zoneName, maxSeverity, primaryBucket, secondaryBuckets,
       pairCount: cluster.length,
       plantInstanceIds: dedupe(cluster.flatMap(e => e.instanceIds)),
-      plantNames: dedupe(cluster.flatMap(e => [e.plantAName, e.plantBName])),
+      plantNames: dedupe(cluster.flatMap(e => [e.plantADisplayName, e.plantBDisplayName])),
       locationCodes: dedupe(cluster.flatMap(e => e.locationLabels)),
       sourceConflictIds: dedupe(cluster.map(e => e.sourcePairId)),
       title: worst.title,
@@ -1202,7 +1209,7 @@ export function buildTechnicalAppendixHtml(zoneReviews: Array<{
       <tbody>${rows.map(ev => `
       <tr><td><strong style="color:${severityColor(ev.severity)}">${escHtml(ev.id)}</strong></td>
       <td style="font-weight:700">${escHtml(conflictToGroup.get(ev.sourcePairId) ?? '需人工確認')}</td>
-      <td>${escHtml(ev.plantAName)}</td><td>${escHtml(ev.plantBName)}</td>
+      <td>${escHtml(ev.plantADisplayName)}</td><td>${escHtml(ev.plantBDisplayName)}</td>
       <td style="font-family:monospace;font-size:11px;word-break:break-all">${escHtml(ev.locationLabels.join('／'))}</td>
       <td style="font-size:11px">${ev.distanceCm !== null ? `${ev.distanceCm} cm` : escHtml(ev.overlapLabel)}</td>
       <td style="color:${severityColor(ev.severity)};font-weight:700">${escHtml(severityLabel(ev.severity))}</td>

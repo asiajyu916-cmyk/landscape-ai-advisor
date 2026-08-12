@@ -260,8 +260,11 @@ export interface PlantConflictResult {
   id: string
   zoneName: string
   locationLabel: string          // 例如 "A區／種植區塊 H-12"
-  plantA: { name: string; label: string; kind: SpatialInstanceKind; instanceId: string; sourceLayer?: string }
-  plantB: { name: string; label: string; kind: SpatialInstanceKind; instanceId: string; sourceLayer?: string }
+  // canonicalName：僅在「圖面名稱屬於已知別名，正規化後對應到另一個資料庫正式名稱」時才會填入，
+  // 用途是畫面顯示「原圖名稱（對應：正式名稱）」，同時保留原始圖面文字避免與施工圖對不起來。
+  // 相容性判斷一律使用 canonicalName（若有）查資料庫，不使用 name 直接查。
+  plantA: { name: string; canonicalName?: string; label: string; kind: SpatialInstanceKind; instanceId: string; sourceLayer?: string }
+  plantB: { name: string; canonicalName?: string; label: string; kind: SpatialInstanceKind; instanceId: string; sourceLayer?: string }
   proximity: ProximityLevel
   nearBand?: NearBand
   distanceCm: number

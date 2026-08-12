@@ -11,6 +11,8 @@ import { loadPlantsFromStorage } from '@/data/plantStore'
 import type { CsvPlantRecord } from '@/types/csvPlant'
 import { parsePdfZonePlantingTable, detectJointZoneTitle, CAPTION_EXCLUDE_RE, type ZonePlantingRow, type ZoneConfidence } from '@/utils/parsePdfZones'
 import { evaluateZone, type ZoneReviewResult } from '@/utils/evaluateZone'
+import { findPlantByName } from '@/utils/plantNameMatch'
+import { PLANT_ALIAS_MAP } from '@/data/plantAliases'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.mjs',
@@ -267,6 +269,19 @@ function extractPlants(rawText: string, db: CsvPlantRecord[]): ExtractResult {
 
     const { excluded: isExcl, reason } = isNonPlantLine(line)
     if (isExcl) { excluded.push({ text: line, reason: reason! }); continue }
+
+    // 已知別名比對（見 @/data/plantAliases.ts）：優先於一般精確比對，只認完全已知的別名
+    // 字串，不做模糊猜測——例如文字含「山馬茶」直接對應資料庫「馬茶花」。
+    const aliasHit = Object.keys(PLANT_ALIAS_MAP).find(alias => line.includes(alias))
+    if (aliasHit) {
+      const plant = findPlantByName(db, aliasHit)
+      if (plant && !seen.has(plant.name)) {
+        seen.add(plant.name)
+        matched.push({ plantName: plant.name, quantity: extractQuantity(line), matchReason: `別名對應：${aliasHit} → ${plant.name}` })
+        continue
+      }
+      if (plant) continue
+    }
 
     // 精確比對
     const exact = db.find(p => line.includes(p.name))

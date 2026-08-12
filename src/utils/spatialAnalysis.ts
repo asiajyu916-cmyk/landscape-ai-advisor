@@ -7,6 +7,7 @@ import type {
   BlockExtent,
 } from '@/types/dxf'
 import type { CsvPlantRecord } from '@/types/csvPlant'
+import { findPlantByName } from '@/utils/plantNameMatch'
 
 // ── Ray-casting point-in-polygon ──────────────────────────────────────────────
 
@@ -1418,7 +1419,7 @@ export function analyzeMultiLayer(
 
   // Identify tree mappings
   const treeMappings = mappings.filter(m => {
-    const plant = plants.find(p => p.name === m.plantName)
+    const plant = findPlantByName(plants, m.plantName)
     return isLikelyTree(m, plant)
   })
 
@@ -1426,7 +1427,7 @@ export function analyzeMultiLayer(
   if (treeMappings.length === 0) return []
 
   for (const treeItem of treeMappings) {
-    const plant = plants.find(p => p.name === treeItem.plantName)
+    const plant = findPlantByName(plants, treeItem.plantName)
 
     // Analyse each insertion point (limit to 20 per block for performance)
     const positions = treeItem.positions.slice(0, 20)

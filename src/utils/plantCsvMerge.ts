@@ -9,7 +9,9 @@ import type { ImportMode, MergeRow, MergePreview, MergeApplyResult, FieldDiff } 
 import { MERGE_DISPLAY_FIELDS } from '@/types/plantMerge'
 import { normalizeForCompare, normalizeScientificName, resolveAlias } from './plantNameMatch'
 
-// ── 比對現有資料庫：學名 → 中文名稱 → 別名（依此優先順序）────────────────────
+// ── 比對現有資料庫：以「植物名稱」為主要比對鍵（中文名稱 → 別名），
+// 學名僅作為名稱比對不到時的輔助備援，避免同名植物因學名寫法差異被誤判為新植物、
+// 產生重複紀錄 ──────────────────────────────────────────────────────────────
 function findMatch(
   incoming: CsvPlantRecord,
   existing: CsvPlantRecord[],
@@ -18,22 +20,70 @@ function findMatch(
   const incName = normalizeForCompare(incoming.name)
   const incAlias = normalizeForCompare(resolveAlias(incoming.name))
 
-  // 1. 學名完全相同（雙方都要有學名，避免兩筆都空字串誤判為相同）
-  if (incSci) {
-    const bySci = existing.find(p => p.scientificName && normalizeScientificName(p.scientificName) === incSci)
-    if (bySci) return { plant: bySci, matchType: 'scientific_name' }
-  }
-  // 2. 中文名稱完全相同（正規化後）
+  // 1. 中文名稱完全相同（正規化後，主要比對鍵）
   const byName = existing.find(p => normalizeForCompare(p.name) === incName)
   if (byName) return { plant: byName, matchType: 'chinese_name' }
-  // 3. 常用別名相同（查表雙向）
+  // 2. 常用別名相同（查表雙向）
   const byAlias = existing.find(p =>
     normalizeForCompare(resolveAlias(p.name)) === incAlias ||
     normalizeForCompare(resolveAlias(p.name)) === incName,
   )
   if (byAlias) return { plant: byAlias, matchType: 'alias' }
+  // 3. 學名完全相同（備援：名稱比對不到、但學名一致，仍視為同一植物避免重複；
+  //    雙方都要有學名，避免兩筆都空字串誤判為相同）
+  if (incSci) {
+    const bySci = existing.find(p => p.scientificName && normalizeScientificName(p.scientificName) === incSci)
+    if (bySci) return { plant: bySci, matchType: 'scientific_name' }
+  }
 
   return null
+}
+
+/** 欄位完整度：非空字串欄位數（供重複記錄合併時判斷「較完整的資料」用）*/
+function countFilledFields(p: CsvPlantRecord): number {
+  return Object.values(p).filter(v => typeof v === 'string' && v.trim()).length
+}
+
+/** 用其他重複記錄「補齊」base 的空欄位，base 既有的非空值一律保留不覆蓋
+ *  （與 mergeRecord 不同：mergeRecord 用於「新 CSV 更新既有植物」，語意是信任新資料；
+ *  這裡用於「同名重複記錄合併」，沒有新舊之分，只補真正的空缺，不動既有資料）*/
+function fillEmptyFields(base: CsvPlantRecord, other: CsvPlantRecord): CsvPlantRecord {
+  const merged: CsvPlantRecord = { ...base }
+  for (const key of Object.keys(other) as Array<keyof CsvPlantRecord>) {
+    const baseVal = merged[key]
+    const otherVal = other[key]
+    if (typeof baseVal === 'string' && !baseVal.trim() && typeof otherVal === 'string' && otherVal.trim()) {
+      (merged as any)[key] = otherVal
+    } else if (Array.isArray(baseVal) && baseVal.length === 0 && Array.isArray(otherVal) && otherVal.length > 0) {
+      (merged as any)[key] = otherVal
+    }
+  }
+  return merged
+}
+
+/** 資料庫層級去重：同植物名稱（正規化後）只保留一筆，以欄位完整度最高的記錄為主，
+ *  其餘重複記錄的非空欄位用來補齊主記錄的空缺欄位，不遺失資料。
+ *  用於 CSV 匯入結果的最終保險，以及既有資料庫的自我修復（清除歷史累積的重複紀錄）*/
+export function dedupePlantsByName(plants: CsvPlantRecord[]): { deduped: CsvPlantRecord[]; removedCount: number } {
+  const groups = new Map<string, CsvPlantRecord[]>()
+  const order: string[] = []
+  for (const p of plants) {
+    const key = normalizeForCompare(p.name)
+    if (!groups.has(key)) { groups.set(key, []); order.push(key) }
+    groups.get(key)!.push(p)
+  }
+  const deduped: CsvPlantRecord[] = []
+  let removedCount = 0
+  for (const key of order) {
+    const group = groups.get(key)!
+    if (group.length === 1) { deduped.push(group[0]); continue }
+    const sorted = [...group].sort((a, b) => countFilledFields(b) - countFilledFields(a))
+    let base = sorted[0]
+    for (let i = 1; i < sorted.length; i++) base = fillEmptyFields(base, sorted[i])
+    deduped.push(base)
+    removedCount += group.length - 1
+  }
+  return { deduped, removedCount }
 }
 
 /** 判斷是否為「疑似重複但無法確認」：中文名稱相似（去空白後幾乎相同）但學名衝突。
@@ -85,16 +135,30 @@ export function buildMergePreview(
 ): MergePreview {
   const rows: MergeRow[] = []
   const usedExistingIds = new Set<string>()
+  // 同一次 CSV 內，尚未比對到現有資料庫、但已被判定為「新增」的列，依名稱記錄下來——
+  // 避免同一份 CSV 裡有兩列同名植物時，兩列都各自變成一筆新紀錄（互相看不到彼此）
+  const pendingAddByName = new Map<string, number>()   // normalizeForCompare(name) → rowIndex
 
   importResult.plants.forEach((incoming, i) => {
+    const rowIndex = i + 2
     if (mode === 'replace') {
-      rows.push({ rowIndex: i + 2, incoming, action: 'add' })   // replace 模式下全部視為「新建」內容
+      rows.push({ rowIndex, incoming, action: 'add' })   // replace 模式下全部視為「新建」內容
       return
     }
 
     const match = findMatch(incoming, existingPlants)
     if (!match) {
-      rows.push({ rowIndex: i + 2, incoming, action: 'add' })
+      const incKey = normalizeForCompare(incoming.name)
+      const priorRowIndex = pendingAddByName.get(incKey)
+      if (priorRowIndex !== undefined) {
+        rows.push({
+          rowIndex, incoming, action: 'duplicate',
+          errorReason: `此 CSV 中第 ${priorRowIndex} 列已是同名植物「${incoming.name}」的新增列，需人工確認是否為重複列`,
+        })
+        return
+      }
+      pendingAddByName.set(incKey, rowIndex)
+      rows.push({ rowIndex, incoming, action: 'add' })
       return
     }
 
@@ -173,15 +237,17 @@ export function applyMerge(
   resolvedDuplicateRowIndexes: Set<number> = new Set(),
 ): MergeApplyResult {
   if (preview.mode === 'replace') {
-    const finalPlants = preview.rows.map(r => r.incoming)
+    const rawPlants = preview.rows.map(r => r.incoming)
+    const { deduped, removedCount } = dedupePlantsByName(rawPlants)
     return {
-      addedCount: finalPlants.length,
+      addedCount: deduped.length,
       updatedCount: 0,
       keptCount: 0,
       skippedCount: 0,
       failedCount: 0,
       fieldErrors: [],
-      finalPlants,
+      finalPlants: deduped,
+      duplicatesResolvedCount: removedCount,
     }
   }
 
@@ -222,10 +288,15 @@ export function applyMerge(
   }
 
   const keptCount = existingPlants.filter(p => !touchedIds.has(p.id)).length
-  const finalPlants = [...byId.values(), ...toAppend]
+  const rawFinalPlants = [...byId.values(), ...toAppend]
+  // 最後一道保險：無論上面的比對邏輯是否百分之百攔住所有情況，寫回資料庫前一律
+  // 依名稱再做一次去重，確保絕對不會產生同名重複紀錄
+  const { deduped: finalPlants, removedCount } = dedupePlantsByName(rawFinalPlants)
+  if (removedCount > 0) addedCount = Math.max(0, addedCount - removedCount)
 
   return {
     addedCount, updatedCount, keptCount, skippedCount,
     failedCount: 0, fieldErrors, finalPlants,
+    duplicatesResolvedCount: removedCount,
   }
 }

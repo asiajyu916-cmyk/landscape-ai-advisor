@@ -20,7 +20,7 @@ import {
 } from '@/utils/csvParser'
 import { getAdvisorReply, type AdvisorReply } from '@/utils/plantAdvisor'
 import { buildMergePreview, applyMerge } from '@/utils/plantCsvMerge'
-import { findSimilarPlants } from '@/utils/plantNameMatch'
+import { findSimilarPlants, findPlantByName, normalizeForCompare } from '@/utils/plantNameMatch'
 import { searchPlantAllTiers, searchResultToDraft } from '@/utils/plantSearchClient'
 import { persistConfirmedPlant } from '@/services/plantCloudService'
 import PlantAutoAddModal from '@/components/modals/PlantAutoAddModal'
@@ -3730,6 +3730,11 @@ function CsvImportModal({ onClose, existingPlants, onApply }: {
                 <div className="p-3 bg-amber-50 rounded-xl border border-amber-200">跳過：<strong>{applyResult.skippedCount}</strong> 筆</div>
                 <div className="p-3 bg-red-50 rounded-xl border border-red-200 col-span-2">失敗：<strong>{applyResult.failedCount}</strong> 筆</div>
               </div>
+              {applyResult.duplicatesResolvedCount > 0 && (
+                <div className="p-3 bg-violet-50 rounded-xl border border-violet-200 text-sm text-stone-700">
+                  已自動合併 <strong>{applyResult.duplicatesResolvedCount}</strong> 筆同名重複紀錄（保留欄位較完整的資料，不會產生重複植物）
+                </div>
+              )}
               {applyResult.fieldErrors.length > 0 && (
                 <div className="p-3 bg-amber-50 rounded-xl border border-amber-100">
                   <p className="text-xs font-medium text-stone-700 mb-1">欄位錯誤清單</p>
@@ -3969,7 +3974,7 @@ export default function LandscapeAdvisorPage({
     if (db.length === 0) return   // 資料庫還沒載入，等下一次觸發
 
     const imported: SelectedCsvPlant[] = importedPlantNames
-      .map(name => db.find(p => p.name === name))
+      .map(name => findPlantByName(db, name))
       .filter((p): p is CsvPlantRecord => !!p)
       .map(plant => ({ ...plant, instanceId: uid(), status: '可用' as const }))
 
