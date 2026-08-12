@@ -10,5 +10,7 @@
 export const PLANT_ALIAS_MAP: Record<string, string> = {
   '山馬茶': '馬茶花',
   '珍珠馬茶': '馬茶花',
+  '球型珍珠馬茶': '馬茶花',
   '矮梔子': '梔子花',
+  '球型福建茶': '福建茶',
 }
