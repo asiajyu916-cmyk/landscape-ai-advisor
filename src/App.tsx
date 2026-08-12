@@ -57,6 +57,9 @@ function AuthenticatedApp() {
   }
   // DxfReviewPage 重新分析完成後 +1，LandscapeAdvisorPage 依此重讀 sessionStorage
   const [zoneReviewsVersion, setZoneReviewsVersion] = useState(0)
+  // 植栽資料庫實際新增/更新/刪除後 +1（LandscapeAdvisorPage 呼叫），DxfReviewPage
+  // 依此重新載入植物清單並自動重算目前已載入 DXF 的分區審查，不需要使用者重新上傳圖面。
+  const [plantsVersion, setPlantsVersion] = useState(0)
 
   const handlePdfImport = (plantNames: string[], zoneTable?: ZonePlantingRow[]) => {
     setImportedPlantNames(plantNames)
@@ -86,6 +89,7 @@ function AuthenticatedApp() {
         layerOverrides={layerOverrides}
         onApplyLayerOverride={applyLayerOverride}
         zoneReviewsVersion={zoneReviewsVersion}
+        onPlantsUpdated={() => setPlantsVersion(v => v + 1)}
       />
       {/* PDF / DXF 頁面的內容渲染在共用 Header 下方 —— 沒有權限的分頁不 mount 對應
           元件（不是用 CSS 藏起來），改顯示無權限提示 */}
@@ -111,6 +115,7 @@ function AuthenticatedApp() {
           layerOverrides={layerOverrides}
           onApplyLayerOverride={applyLayerOverride}
           onZoneReviewsUpdated={() => setZoneReviewsVersion(v => v + 1)}
+          plantsVersion={plantsVersion}
         />
       ) : (activeTab === 'dxf' && <NoPermissionNotice featureName="DXF 審查" />)}
       {activeTab === 'advisor' && (

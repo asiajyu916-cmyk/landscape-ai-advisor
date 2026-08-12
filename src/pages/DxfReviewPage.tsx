@@ -2358,6 +2358,7 @@ export default function DxfReviewPage({
   layerOverrides,
   onApplyLayerOverride,
   onZoneReviewsUpdated,
+  plantsVersion = 0,
 }: {
   activeTab?: 'pdf' | 'landscape' | 'dxf' | 'advisor'
   onTabChange?: (tab: 'pdf' | 'landscape' | 'dxf' | 'advisor') => void
@@ -2372,6 +2373,9 @@ export default function DxfReviewPage({
   // 每次重新分析完成（不論是使用者上傳/切單位，或套用 layerOverrides）都呼叫一次，
   // 讓 LandscapeAdvisorPage 知道要重新讀取 sessionStorage 的 dxf-zone-review-full。
   onZoneReviewsUpdated?: () => void
+  // 植栽資料庫（LandscapeAdvisorPage）新增／更新／刪除時 +1（見 App.tsx），本頁
+  // 依此重新載入植物清單並自動重算目前已載入 DXF 的分區審查，不需要使用者重新上傳圖面。
+  plantsVersion?: number
 } = {}) {
   const [parseResult, setParseResult]     = useState<DxfParseResult | null>(null)
   const [mappings, setMappings]           = useState<MappedItem[]>([])
@@ -2700,6 +2704,19 @@ export default function DxfReviewPage({
     setZoneStatistics(newStats)
     setUnitAnomaly(detectUnitAnomaly(newStats))
   }
+
+  // 植栽資料庫在別的分頁（AI 配植評估）新增／更新／刪除後，plantsVersion 會 +1——
+  // 重新載入植物清單並完整重跑一次比對／分區審查，不需要使用者重新上傳 DXF。
+  // 用 ref 跳過初次掛載（本頁已有自己的初次載入流程，避免重複跑一次）。
+  const plantsVersionMounted = useRef(false)
+  useEffect(() => {
+    if (!plantsVersionMounted.current) { plantsVersionMounted.current = true; return }
+    loadPlantsWithCsvMerge().then(res => {
+      setAllPlants(res.plants)
+      if (parseResult) rebuildMappings(savedRules, res.plants)
+    })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plantsVersion])
 
   // 使用者手動變更圖面單位：套用整份圖面，所有分區與 HATCH 面積、空間鄰近衝突檢討
   // 的公分換算立即依新單位重新計算（鄰近門檻以 cm 為準，換算結果會隨圖面單位改變）

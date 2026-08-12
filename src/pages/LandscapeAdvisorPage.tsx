@@ -3815,6 +3815,7 @@ export default function LandscapeAdvisorPage({
   layerOverrides,
   onApplyLayerOverride,
   zoneReviewsVersion = 0,
+  onPlantsUpdated,
 }: {
   activeTab?: 'pdf' | 'landscape' | 'dxf' | 'advisor'
   onTabChange?: (tab: 'pdf' | 'landscape' | 'dxf' | 'advisor') => void
@@ -3835,6 +3836,10 @@ export default function LandscapeAdvisorPage({
   layerOverrides?: Map<string, LayerOverrideAction>
   onApplyLayerOverride?: (key: string, action: LayerOverrideAction) => void
   zoneReviewsVersion?: number
+  // 植栽資料庫實際發生新增／更新／刪除時呼叫一次（CSV 匯入、AI 查詢確認新增、刪除），
+  // 讓 DxfReviewPage 知道要重新載入植物清單並重算目前已載入 DXF 的分區審查，
+  // 不需要使用者重新上傳圖面。見 App.tsx plantsVersion。
+  onPlantsUpdated?: () => void
 } = {}) {
   const { profile, signOut } = useAuth()
   const canReviewPdf = hasPermission(profile?.role, 'canReviewPdf')
@@ -4054,6 +4059,7 @@ export default function LandscapeAdvisorPage({
       if (prev.some(p => p.name === record.name)) return prev
       const next = [...prev, record]
       savePlantsToStorage(next)
+      onPlantsUpdated?.()
       return next
     })
     addPlant(record)
@@ -4062,7 +4068,7 @@ export default function LandscapeAdvisorPage({
         if (!res.ok && res.reason) console.warn(`[雲端資料庫] 「${record.name}」未永久儲存：${res.reason}`)
       })
     }
-  }, [addPlant])
+  }, [addPlant, onPlantsUpdated])
 
   const handleDeletePlant = useCallback((plantId: string) => {
     if (!canManagePlants) return
@@ -4073,9 +4079,10 @@ export default function LandscapeAdvisorPage({
         window.alert('刪除失敗：瀏覽器儲存空間可能已滿，請稍後再試或先清理照片。')
         return prev
       }
+      onPlantsUpdated?.()
       return next
     })
-  }, [canManagePlants])
+  }, [canManagePlants, onPlantsUpdated])
 
   const handleCsvImported = async (finalPlants: CsvPlantRecord[], mergeResult: MergeApplyResult, imageUrls: Record<string, string>): Promise<CsvApplyOutcome> => {
     if (!canManagePlants) return { saved: false, cloudSynced: false, cloudReason: '沒有管理植栽資料庫的權限。' }
@@ -4106,6 +4113,9 @@ export default function LandscapeAdvisorPage({
       setSelectedPlants([])
       setResult(null)
     }
+    // 本機已確定存好，通知 DxfReviewPage 重新載入植物清單並重算目前已載入 DXF 的
+    // 分區審查——不等雲端同步結果，本機資料已經是最新的，DXF 頁不需要等雲端。
+    onPlantsUpdated?.()
     // 本機儲存成功後，同步把這次新增／更新的植物寫入雲端資料庫，讓其他瀏覽器／
     // 裝置也看得到——這一步失敗不影響本機已完成的匯入，但必須明確告知使用者。
     const cloudResult = await upsertPlantsToCloud(mergeResult.touchedPlants)
