@@ -463,6 +463,20 @@ export function evaluatePlantPair(
  */
 export function aggregatePairConflictsToEvalResult(
   pairs: Array<{ issues: IssueDetail[]; riskLevel: RiskLevel }>,
+  /** 顯示給使用者看的嚴重／提醒／通過數字，必須是呼叫端已經用唯一統計來源
+   *  （dxfReportBuilder.ts computeZoneSeverityCounts／ZoneEvent）算好的結果——這裡
+   *  絕不能自己從 riskLevel 重新 filter 一套不同的數字給 aiSuggestion／reviewText
+   *  顯示，否則會跟頂部總覽、AI 審查結論、分區卡片的數字對不起來。未提供時
+   *  fallback 回舊有 riskLevel-based 計數，只給沒有能力先算好唯一統計來源的呼叫端
+   *  （目前沒有這種呼叫端，純防禦）使用。 */
+  displayCounts?: { danger: number; caution: number; passed: number },
+  /** 顯示給使用者看的「配置健康度」分數，必須是呼叫端已經用唯一評分引擎
+   *  （dxfReportBuilder.ts computeZoneScore，依問題群組計次扣分且有上限）算好的
+   *  結果——不提供時 fallback 回下面內部配分公式，只給沒有分區群組資料的呼叫端
+   *  （目前沒有，純防禦）使用。分數／compatLevel／aiSuggestion／reviewText 裡的
+   *  數字全部改用這個值，否則「配置健康度 86」卡片旁邊的文字卻寫「整體評分：
+   *  60」，同一張卡片自相矛盾。 */
+  scoreOverride?: number,
 ): EvalResult {
   const issues: IssueDetail[] = []
   const seen = new Set<string>()
@@ -479,15 +493,18 @@ export function aggregatePairConflictsToEvalResult(
   // 配對一多、去重後的 danger/caution 類別數稍微超過 6~7 項就會把分數打到 0，
   // 跟「只有 2 項高風險」的實際情況觀感不成比例）。改以配對數為分母算加權
   // 比例：嚴重配對計 0 分、警示配對計半分、已通過配對計滿分，score 天生就落在
-  // 0~100 之間，不需要 clamp，也不會因配對數變多而輕易歸零。
+  // 0~100 之間，不需要 clamp，也不會因配對數變多而輕易歸零。這裡的 severeCnt／
+  // warningCnt／passedCnt 只用於「配分公式」內部計算，不是使用者看到的統計數字
+  // ——分數公式本身不受本輪「統計口徑一致性」規則影響（規則第 9 點）。
   const severeCnt = pairs.filter(p => p.riskLevel === 'high').length
   const warningCnt = pairs.filter(p => p.riskLevel === 'medium').length
   const passedCnt = pairs.filter(p => p.riskLevel === 'low' || p.riskLevel === 'unmatched').length
   const totalCnt = severeCnt + warningCnt + passedCnt
 
-  const score = totalCnt === 0
+  const internalScore = totalCnt === 0
     ? 100
     : Math.round(((severeCnt * 0 + warningCnt * 0.5 + passedCnt * 1) / totalCnt) * 100)
+  const score = scoreOverride ?? internalScore
 
   let compatLevel: CompatLevel
   if (score >= 80) compatLevel = '配置良好'
@@ -495,31 +512,40 @@ export function aggregatePairConflictsToEvalResult(
   else if (score >= 40) compatLevel = '需調整配置'
   else compatLevel = '高風險不建議'
 
-  // 風險等級跟 score 是兩條獨立資訊（雙軌顯示）：score 答「整體配置健康度」，
-  // 風險等級答「需不需要優先處理」——只要有嚴重配對就是「高」，不會因為多數
-  // 配對已通過、score 被拉高而被稀釋掉「這裡有緊急問題」的訊號。
-  const overallRiskLevel: '高' | '中' | '低' = severeCnt > 0 ? '高' : warningCnt > 0 ? '中' : '低'
-
   const categories = categoriesFromIssues(issues)
 
+  // aiSuggestion／reviewText／overallRiskLevel（嚴重／提醒／通過 badge）顯示的
+  // 數字：優先用呼叫端傳入的唯一統計來源（displayCounts），只有在沒有提供時才
+  // fallback 回上面配分公式用的數字——risk badge 跟顯示文字必須用同一組數字，
+  // 否則會出現「badge 說通過，文字說有 3 項提醒」這種同一張卡片內部矛盾。
+  const dDanger = displayCounts?.danger ?? severeCnt
+  const dCaution = displayCounts?.caution ?? warningCnt
+  const dPassed = displayCounts?.passed ?? passedCnt
+  const dTotal = dDanger + dCaution + dPassed
+
+  // 風險等級跟 score 是兩條獨立資訊（雙軌顯示）：score 答「整體配置健康度」，
+  // 風險等級答「需不需要優先處理」——只要有嚴重事件就是「高」，不會因為多數
+  // 事件已通過、score 被拉高而被稀釋掉「這裡有緊急問題」的訊號。
+  const overallRiskLevel: '高' | '中' | '低' = dDanger > 0 ? '高' : dCaution > 0 ? '中' : '低'
+
   let aiSuggestion: string
-  if (totalCnt === 0) {
+  if (dTotal === 0) {
     aiSuggestion = '本分區內空間鄰近植物配置相容性良好，鄰近範圍內未發現明顯衝突。'
-  } else if (severeCnt > 0) {
+  } else if (dDanger > 0) {
     const cats = [...new Set(issues.filter(i => i.level === 'danger').map(i => i.category))].join('、')
-    aiSuggestion = `風險等級：高；整體評分：${score}；原因：高風險 ${severeCnt} 項、提醒 ${warningCnt} 項、通過 ${passedCnt} 項${cats ? `（高風險類別：${cats}）` : ''}。建議於提送審查前優先調整高風險配對。`
-  } else if (warningCnt > 0) {
-    aiSuggestion = `風險等級：中；整體評分：${score}；提醒 ${warningCnt} 項、通過 ${passedCnt} 項。整體可行，建議補充養護說明降低審查疑義。`
+    aiSuggestion = `風險等級：高；整體評分：${score}；原因：高風險 ${dDanger} 項、提醒 ${dCaution} 項、通過 ${dPassed} 項${cats ? `（高風險類別：${cats}）` : ''}。建議於提送審查前優先調整高風險配對。`
+  } else if (dCaution > 0) {
+    aiSuggestion = `風險等級：中；整體評分：${score}；提醒 ${dCaution} 項、通過 ${dPassed} 項。整體可行，建議補充養護說明降低審查疑義。`
   } else {
-    aiSuggestion = `風險等級：低；整體評分：${score}；${passedCnt} 項配對皆已通過檢討。`
+    aiSuggestion = `風險等級：低；整體評分：${score}；${dPassed} 項配對皆已通過檢討。`
   }
 
   const adjustmentPlan = [...new Set(issues.map(i => i.suggestion))]
   if (adjustmentPlan.length === 0) adjustmentPlan.push('維持現有配置，施工前確認種植間距與覆土深度符合各植栽需求')
 
-  const reviewText = totalCnt === 0
+  const reviewText = dTotal === 0
     ? `本分區空間鄰近衝突檢討結果為「配置良好」（風險等級：低；整體評分：${score}），鄰近植物之間未發現明顯衝突。`
-    : `本分區空間鄰近衝突檢討結果──風險等級：${overallRiskLevel}；整體評分：${score}；原因：高風險 ${severeCnt} 項、提醒 ${warningCnt} 項、通過 ${passedCnt} 項。\n\n${issues.map(i => `${i.category}：${i.cause}`).join('\n')}\n\n修正方向：\n${adjustmentPlan.map(p => `• ${p}`).join('\n')}`
+    : `本分區空間鄰近衝突檢討結果──風險等級：${overallRiskLevel}；整體評分：${score}；原因：高風險 ${dDanger} 項、提醒 ${dCaution} 項、通過 ${dPassed} 項。\n\n${issues.map(i => `${i.category}：${i.cause}`).join('\n')}\n\n修正方向：\n${adjustmentPlan.map(p => `• ${p}`).join('\n')}`
 
   return { score, compatLevel, categories, issues, aiSuggestion, adjustmentPlan, reviewText, overallRiskLevel }
 }

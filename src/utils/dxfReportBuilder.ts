@@ -577,6 +577,135 @@ export function clusterZoneEvents(
   return { groups, needsReview }
 }
 
+// ── 嚴重／提醒／通過：唯一統計來源（single source of truth）─────────────────
+// 背景：同一份審查結果，頂部總覽、AI 審查結論、各分區摘要、問題明細頁籤過去
+// 各自從不同資料（evalResult.issues／proximityConflicts／EventGroup）獨立
+// 重新計數，口徑不一致（issues 是整區去重後的問題「類別」數，可能比配對數
+// 多；EventGroup 是合併顯示用的卡片數，一定比配對數少），導致同一份結果在不
+// 同畫面顯示不同數字。
+//
+// 規則：嚴重／提醒／通過的「總數」只能由這裡的 review events（buildZoneEvents
+// 的輸出，一配對一事件，已含 classifyOverlap／finalizeSeverity 的嚴重度調整）
+// 統計出來，全站唯一入口就是這兩個函式——UI 不得自行 filter evalResult.issues
+// 或 proximityConflicts 來算「總數」，grouping／EventGroup 只能用在「問題明細
+// 呈現」，不得拿卡片數當事件總數（見下方 groupedIssueCount 欄位的用途註解）。
+export interface ZoneSeverityCounts {
+  zoneName: string
+  /** 嚴重事件數（review events，非 evalResult.issues 類別數） */
+  danger: number
+  /** 提醒事件數 */
+  caution: number
+  /** 需人工確認事件數（unmatched 名稱／無法從幾何確認的重疊等） */
+  needsReview: number
+  /** 通過數＝完成相容性判定的配對數（evaluatedPairCount，含 judgment==='ok'）
+   *  減去 danger+caution+needsReview——不是「低風險」的近似值，是真正 judgment
+   *  ==='ok' 的配對數。 */
+  passed: number
+  /** danger+caution+needsReview+passed，恆等於該區 evaluatedPairCount */
+  totalEvaluated: number
+  /** danger+caution+needsReview（不含 passed）＝ ZoneEvent 總數，供需要「事件
+   *  數」而非「配對評估總數」的地方使用（例如問題明細頁籤標題） */
+  eventCount: number
+  /** 整併後問題卡片數（EventGroup 數，只算 danger/caution，不含 needsReview 彙總）
+   *  ──只能用於「N 項｜M 類問題」這種明確標示「已合併」的顯示，不得取代 danger/
+   *  caution 的事件總數。呼叫端沒有現成的 clusterZoneEvents 結果時可以不傳
+   *  instances／unit，此時為 undefined，UI 應該只顯示事件數，不要顯示假的合併數。 */
+  groupedIssueCount?: number
+}
+
+/** 唯一計算入口：一個分區的嚴重／提醒／通過統計，全部從 review events 算出。
+ *  groupedIssueCount 是額外的「問題明細」用數字，不影響 danger/caution/passed
+ *  本身——傳入 instances/unit 才會計算（clusterZoneEvents 需要植物實例算空間
+ *  距離），呼叫端沒有現成資料時可以省略，只是不顯示「N 類問題」細節。 */
+export function computeZoneSeverityCounts(
+  zoneName: string,
+  proximityConflicts: PlantConflictResult[],
+  evaluatedPairCount: number,
+  instances?: SpatialPlantInstance[],
+  unit?: DrawingUnit,
+): ZoneSeverityCounts {
+  const events = buildZoneEvents(zoneName, proximityConflicts)
+  const danger = events.filter(e => e.severity === 'danger').length
+  const caution = events.filter(e => e.severity === 'caution').length
+  const needsReview = events.filter(e => e.severity === 'needs-review').length
+  // evaluatedPairCount 理論上恆 ≥ events.length（events 是 evaluatedPairCount 的子集，
+  // 只有非 'ok' 才會變成 event）；用 Math.max(0, …) 只是防禦上游資料不同步時不要
+  // 顯示負數，不代表這是預期會發生的情況。
+  const passed = Math.max(0, evaluatedPairCount - events.length)
+  const groupedIssueCount = (instances && unit)
+    ? clusterZoneEvents(zoneName, events, instances, unit).groups.length
+    : undefined
+  return {
+    zoneName, danger, caution, needsReview, passed,
+    totalEvaluated: evaluatedPairCount,
+    eventCount: events.length,
+    groupedIssueCount,
+  }
+}
+
+export interface CaseSeverityCounts {
+  danger: number
+  caution: number
+  needsReview: number
+  passed: number
+  totalEvaluated: number
+  eventCount: number
+  zoneCount: number
+}
+
+/** 全案彙總＝各分區 ZoneSeverityCounts 相加——不是另一套獨立算法，只是加總，
+ *  保證「全案總數必須等於各分區數量加總」（規則第 3 點）恆成立。 */
+export function computeCaseSeverityCounts(zones: ZoneSeverityCounts[]): CaseSeverityCounts {
+  return zones.reduce((acc, z) => ({
+    danger: acc.danger + z.danger,
+    caution: acc.caution + z.caution,
+    needsReview: acc.needsReview + z.needsReview,
+    passed: acc.passed + z.passed,
+    totalEvaluated: acc.totalEvaluated + z.totalEvaluated,
+    eventCount: acc.eventCount + z.eventCount,
+    zoneCount: acc.zoneCount + 1,
+  }), { danger: 0, caution: 0, needsReview: 0, passed: 0, totalEvaluated: 0, eventCount: 0, zoneCount: 0 })
+}
+
+/** Debug 完整性檢查（規則第 8 點）：獨立重算一次「把全案所有配對當成一個大
+ *  分區」的統計，跟「各分區分別統計後加總」比較——兩者理論上恆相等（因為
+ *  buildZoneEvents 是逐配對純函式，跟怎麼分組完全無關），若不相等代表統計
+ *  管線本身出現不一致，用 console.warn 明確示警，不要讓數字悄悄對不起來。
+ *  unassignedCount 由呼叫端傳入（例如 proximityConflicts 裡有 zoneName 找不到
+ *  對應分區的配對），目前架構下應恆為 0，這裡仍納入檢查供未來擴充防呆。 */
+export function verifySeverityCountIntegrity(
+  zoneCounts: ZoneSeverityCounts[],
+  allConflictsFlat: PlantConflictResult[],
+  allEvaluatedPairCount: number,
+  unassignedCount = 0,
+): void {
+  const sumOfZoneCounts = computeCaseSeverityCounts(zoneCounts)
+  const globalCount = computeZoneSeverityCounts('__global__', allConflictsFlat, allEvaluatedPairCount)
+  const groupedIssueCountTotal = zoneCounts.reduce((s, z) => s + (z.groupedIssueCount ?? 0), 0)
+
+  console.group('🧮 審查統計完整性檢查（嚴重／提醒／通過 single source of truth）')
+  console.table({
+    'global count（全案合併重算）': { 嚴重: globalCount.danger, 提醒: globalCount.caution, 需人工確認: globalCount.needsReview, 通過: globalCount.passed, 事件總數: globalCount.eventCount },
+    'sum of zone counts（各分區加總）': { 嚴重: sumOfZoneCounts.danger, 提醒: sumOfZoneCounts.caution, 需人工確認: sumOfZoneCounts.needsReview, 通過: sumOfZoneCounts.passed, 事件總數: sumOfZoneCounts.eventCount },
+  })
+  console.debug(`ungrouped event count（未合併事件數，danger+caution+needsReview）：${sumOfZoneCounts.eventCount}`)
+  console.debug(`grouped issue count（合併後問題卡片數，僅 danger/caution）：${groupedIssueCountTotal}`)
+  console.debug(`unassigned count（不屬於任何分區的事件數）：${unassignedCount}`)
+
+  const mismatch =
+    globalCount.danger !== sumOfZoneCounts.danger + 0 ||
+    globalCount.caution !== sumOfZoneCounts.caution + 0 ||
+    globalCount.needsReview !== sumOfZoneCounts.needsReview + 0 ||
+    globalCount.passed !== sumOfZoneCounts.passed + 0 ||
+    globalCount.eventCount !== sumOfZoneCounts.eventCount + unassignedCount
+  if (mismatch) {
+    console.warn('⚠️ 統計口徑不一致：global count ≠ sum of zone counts + unassigned count，請檢查 computeZoneSeverityCounts／computeCaseSeverityCounts 呼叫端是否有資料未納入。', { globalCount, sumOfZoneCounts, unassignedCount })
+  } else {
+    console.debug('✅ global count 與 sum of zone counts 一致')
+  }
+  console.groupEnd()
+}
+
 // ── 區域層級修正策略（每區 3-5 項，取代逐群組各自的替代方案）───────────────────
 const STRATEGY_BY_BUCKET: Partial<Record<IssueBucketKey, string>> = {
   watering: '檢討灌溉分區配置，依水分需求差異調整澆灌迴路',
@@ -602,29 +731,101 @@ export function buildZoneFixStrategies(groups: EventGroup[], needsReviewCount: n
   return strategies.slice(0, 5)
 }
 
-// ── 報告呈現分數 ───────────────────────────────────────────────────────────
-// 刻意跟即時畫面的 evalResult.score（aggregatePairConflictsToEvalResult 算出來的
-// 既有公式）分開——那個公式不會因為 0cm 重疊語意不明而排除計分，這裡是報告層
-// 專用、公式透明、且會把扣分依據直接印在報告上的另一套分數，不影響、不取代
-// 即時畫面顯示的分數。
+// ── 評分引擎（唯一來源）──────────────────────────────────────────────────────
+// 背景：舊公式（100 - dangerCount*12 - cautionCount*5）用「原始配對數」無上限
+// 累扣，同一根本原因只要牽涉到多株植物就會被重複扣很多次分，而且分區數/配對數
+// 一多，全案總分必然被拖到極低分，跟「大部分分區其實都是 90～100 分」的實況
+// 矛盾。改為：
+//   1. 分區分數：以「問題群組」（同 zone＋同根本原因＋位置相鄰＝一個 scoring
+//      event，見 clusterZoneEvents）計次扣分，而不是逐一配對扣分，且分區內
+//      扣分本身也設上限（一區真的問題很多，分數探底是合理的，但不會因為同一
+//      個問題牽涉到 10 株植物就扣 10 次）。
+//   2. 全案分數＝各分區分數的（面積）平均，不是全案問題數重新累扣一次——這是
+//      這次修正的核心：分區數增加不會讓全案分數無止盡下降。
+//   3. 全案層級再對「嚴重問題」加一個有上限的整體懲罰（凸顯「有嚴重問題要看」
+//      這個訊號），但不會把平均分數打到不成比例的低分。
+//   4. 「需人工確認」完全不參與分數（見 classifyOverlap，那類事件連是否為真
+//      衝突都無法確認）。
+// 全站唯一入口：computeZoneScore()／computeOverallScore()，畫面總覽分數、PDF
+// 報告總分、各區分數都必須呼叫這兩個函式，不得另外用 issue 數量從 100 累扣。
 
-export interface ReportScore {
-  score: number
-  tier: '良好' | '可接受' | '需修正' | '高風險'
-  tierNote: string
-  reasonLine: string
+// 分區內扣分：同根本原因的問題群組計次，各自設扣分上限，避免同一問題因牽涉
+// 多株植物而被放大成離譜低分（一區若真的有 4 個以上不同嚴重問題，40 分封頂
+// 已經足以把該區標成「高風險」，不需要無上限繼續扣）。
+const ZONE_SEVERE_GROUP_PENALTY = 10
+const ZONE_SEVERE_GROUP_PENALTY_CAP = 40
+const ZONE_CAUTION_GROUP_PENALTY = 4
+const ZONE_CAUTION_GROUP_PENALTY_CAP = 30
+
+export function computeZoneScore(severeGroupCount: number, cautionGroupCount: number): number {
+  const penalty =
+    Math.min(ZONE_SEVERE_GROUP_PENALTY_CAP, severeGroupCount * ZONE_SEVERE_GROUP_PENALTY) +
+    Math.min(ZONE_CAUTION_GROUP_PENALTY_CAP, cautionGroupCount * ZONE_CAUTION_GROUP_PENALTY)
+  return Math.max(0, Math.min(100, Math.round(100 - penalty)))
 }
 
-export function computeReportScore(dangerCount: number, cautionCount: number, needsReviewCount: number): ReportScore {
-  // 需人工確認的事件連「是否為真衝突」都無法確認（見 classifyOverlap），刻意不計入
-  // 扣分──否則光是配對數量一多，即使全案 0 高風險，分數也會被大量「不確定」項目
-  // 拖到「高風險」等級，跟卡片本身「不列入高風險或扣分計算」的承諾自相矛盾。
-  const score = Math.max(0, Math.min(100, 100 - dangerCount * 12 - cautionCount * 5))
-  const tier: ReportScore['tier'] = score >= 80 ? '良好' : score >= 65 ? '可接受' : score >= 50 ? '需修正' : '高風險'
-  const tierNote = tier === '良好' ? '配置相容性良好' : tier === '可接受' ? '建議局部改善' : tier === '需修正' ? '建議修正後再提送審查' : '建議重新配置'
-  const reasonLine = `主要原因：${dangerCount} 項嚴重、${cautionCount} 項提醒`
-    + (needsReviewCount > 0 ? `（另有 ${needsReviewCount} 項需人工確認，不列入評分）` : '')
-  return { score, tier, tierNote, reasonLine }
+export type ScoreTier = '良好' | '可接受' | '需局部調整' | '較高風險' | '高風險'
+
+/** 規則第 9 點的風險等級門檻，畫面總覽／PDF／各區分數共用同一套區間，不再各自
+ *  訂一套不同的分級標準（例如舊版 ReportScore 用 80/65/50，跟這裡不一致）。 */
+export function scoreTier(score: number): { tier: ScoreTier; tierNote: string } {
+  const tier: ScoreTier =
+    score >= 90 ? '良好' : score >= 80 ? '可接受' : score >= 70 ? '需局部調整' : score >= 60 ? '較高風險' : '高風險'
+  const tierNote =
+    tier === '良好' ? '配置相容性良好' :
+    tier === '可接受' ? '可行，局部提醒' :
+    tier === '需局部調整' ? '建議局部調整' :
+    tier === '較高風險' ? '建議優先處理' : '建議重新檢視配置'
+  return { tier, tierNote }
+}
+
+// 全案層級：嚴重問題的「額外」懲罰，跟分區分數平均分開計算，且設上限——凸顯
+// 「有嚴重問題」這個事實，但不會因為問題群組數量隨分區數增加而把平均分數
+// 二次打低。
+const OVERALL_SEVERE_GLOBAL_PENALTY = 3
+const OVERALL_SEVERE_GLOBAL_PENALTY_CAP = 12
+
+export interface OverallScoreZoneInput {
+  zoneName: string
+  score: number
+  /** 分區面積（m²）；全部分區都有時採面積加權平均，否則退回單純平均（規則
+   *  第 3、4 點）。 */
+  areaM2?: number
+}
+
+export interface OverallScore {
+  score: number
+  tier: ScoreTier
+  tierNote: string
+  reasonLine: string
+  /** 存在嚴重問題時的補充說明，跟分數是否被拉低無關——分數本身已經只扣有上限
+   *  的全域懲罰，這裡純粹是「提醒使用者去看」，不是分數的一部分（規則第 10 點）。 */
+  severeNote: string | null
+}
+
+export function computeOverallScore(
+  zoneScores: OverallScoreZoneInput[],
+  totalSevereGroupCount: number,
+): OverallScore {
+  if (zoneScores.length === 0) {
+    return { score: 100, tier: '良好', tierNote: '尚無可評分分區', reasonLine: '尚無可評分分區', severeNote: null }
+  }
+  const hasArea = zoneScores.every(z => typeof z.areaM2 === 'number' && z.areaM2 > 0)
+  const totalArea = hasArea ? zoneScores.reduce((s, z) => s + z.areaM2!, 0) : 0
+  const base = hasArea && totalArea > 0
+    ? zoneScores.reduce((s, z) => s + z.score * z.areaM2!, 0) / totalArea
+    : zoneScores.reduce((s, z) => s + z.score, 0) / zoneScores.length
+
+  const severePenalty = Math.min(OVERALL_SEVERE_GLOBAL_PENALTY_CAP, totalSevereGroupCount * OVERALL_SEVERE_GLOBAL_PENALTY)
+  const score = Math.max(0, Math.min(100, Math.round(base - severePenalty)))
+  const { tier, tierNote } = scoreTier(score)
+
+  const reasonLine = `以 ${zoneScores.length} 個分區${hasArea ? '面積加權' : ''}平均分數 ${Math.round(base)} 分為基礎`
+    + (severePenalty > 0 ? `，另計入全案 ${totalSevereGroupCount} 項嚴重問題（全案扣 ${severePenalty} 分，上限 ${OVERALL_SEVERE_GLOBAL_PENALTY_CAP} 分）` : '')
+
+  const severeNote = totalSevereGroupCount > 0 ? `存在 ${totalSevereGroupCount} 項嚴重問題，建議優先處理` : null
+
+  return { score, tier, tierNote, reasonLine, severeNote }
 }
 
 // ── SVG 地圖 ───────────────────────────────────────────────────────────────
@@ -954,7 +1155,7 @@ export function buildEventAlternatives(
 
 // ── 分區短結論 ─────────────────────────────────────────────────────────────
 
-export function buildShortZoneConclusion(zoneName: string, stats: ZoneEventStats, reportScore: ReportScore): string {
+export function buildShortZoneConclusion(zoneName: string, stats: ZoneEventStats, reportScore: { score: number; tier: string }): string {
   const scoreNote = `（評分 ${reportScore.score}/100，${reportScore.tier}）`
   if (stats.mergedEventCount === 0) {
     return `${zoneName}整體配置相容性良好${scoreNote}，未發現需優先調整之問題項目，建議維持現有配置並依常規養護計畫執行。`

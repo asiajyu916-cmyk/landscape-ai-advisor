@@ -6,16 +6,29 @@
 import { useState } from 'react'
 import { Sparkles, ChevronDown, ChevronUp, Wand2 } from 'lucide-react'
 import type { ReviewSummary } from '@/utils/aiReviewNarrative'
+import type { OverallScore } from '@/utils/dxfReportBuilder'
 
 interface Props {
   summary: ReviewSummary
+  /** 全案整體評分：跟 PDF 報告總分／各區分數共用同一套評分引擎
+   *  （computeOverallScore／computeZoneScore，見 dxfReportBuilder.ts），這裡純顯示，
+   *  不重新計算。 */
+  overallScore?: OverallScore
   /** 點選優先處理區域時跳到對應分區 tab */
   onSelectZone?: (zoneName: string) => void
   /** 「讓 AI 產生修正方案」主要操作按鈕；不傳就不顯示按鈕（例如完全沒有問題時） */
   onGenerateFixPlan?: () => void
 }
 
-export default function AIReviewSummary({ summary, onSelectZone, onGenerateFixPlan }: Props) {
+const SCORE_TIER_CLS: Record<string, string> = {
+  '良好': 'bg-emerald-100 text-emerald-700',
+  '可接受': 'bg-blue-100 text-blue-700',
+  '需局部調整': 'bg-amber-100 text-amber-700',
+  '較高風險': 'bg-orange-100 text-orange-700',
+  '高風險': 'bg-red-100 text-red-700',
+}
+
+export default function AIReviewSummary({ summary, overallScore, onSelectZone, onGenerateFixPlan }: Props) {
   const [expanded, setExpanded] = useState(false)
   const { overallConclusion, topRisks, priorityZones, suggestedOrder, stats } = summary
 
@@ -32,15 +45,28 @@ export default function AIReviewSummary({ summary, onSelectZone, onGenerateFixPl
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap mb-1">
             <p className="text-base font-bold text-stone-800">AI 審查結論</p>
+            {overallScore && (
+              <span className={`text-xs px-2 py-0.5 rounded-full font-bold ${SCORE_TIER_CLS[overallScore.tier] ?? 'bg-stone-100 text-stone-600'}`}>
+                整體評分 {overallScore.score}/100・{overallScore.tier}
+              </span>
+            )}
             {stats.totalDanger > 0 && (
-              <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-semibold">嚴重 {stats.totalDanger}</span>
+              <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-semibold">嚴重 {stats.totalDanger} 項</span>
             )}
             {stats.totalCaution > 0 && (
-              <span className="text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 font-semibold">提醒 {stats.totalCaution}</span>
+              <span className="text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 font-semibold">
+                提醒 {stats.totalCaution} 項{stats.totalGroupedIssueCount > 0 && stats.totalGroupedIssueCount < stats.totalDanger + stats.totalCaution ? `｜${stats.totalGroupedIssueCount} 類問題` : ''}
+              </span>
             )}
-            <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-semibold">通過 {stats.totalPassed}</span>
+            <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-semibold">通過 {stats.totalPassed} 項</span>
+            {stats.totalNeedsReview > 0 && (
+              <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-semibold">需人工確認 {stats.totalNeedsReview} 項</span>
+            )}
           </div>
           <p className="text-sm text-stone-700 leading-relaxed">{overallConclusion}</p>
+          {overallScore?.severeNote && (
+            <p className="text-sm text-red-600 font-semibold leading-relaxed mt-1">⚠ {overallScore.severeNote}</p>
+          )}
         </div>
         <div className="flex-shrink-0 text-stone-400 mt-1.5">
           {expanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}

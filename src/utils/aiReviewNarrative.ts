@@ -14,6 +14,7 @@ import {
   classifyCategory, CATEGORY_GROUP_META, CATEGORY_GROUP_ORDER, buildCategoryResults,
   type IssueCategoryGroup, type CategoryResult,
 } from '@/utils/issueCategoryMeta'
+import type { ZoneSeverityCounts, CaseSeverityCounts } from '@/utils/dxfReportBuilder'
 
 // ── 共用小工具 ──────────────────────────────────────────────────────────────
 
@@ -83,6 +84,11 @@ export interface ZoneReviewInput {
   zoneName: string
   evalResult?: EvalResult
   proximityConflicts: PlantConflictResult[]
+  /** 嚴重／提醒／通過的唯一統計來源（見 dxfReportBuilder.ts computeZoneSeverityCounts
+   *  檔頭說明）——這裡不可以再自己從 evalResult.issues 或 proximityConflicts 重新
+   *  filter 算「總數」，呼叫端（DxfReviewPage.tsx）必須把已經用同一套函式算好的
+   *  結果傳進來，AI 摘要只能「解讀」既有統計，不能自己生成或推估數字。 */
+  severity: ZoneSeverityCounts
 }
 
 export interface PriorityZone {
@@ -97,29 +103,36 @@ export interface ReviewSummary {
   topRisks: PrimaryRisk[]
   priorityZones: PriorityZone[]
   suggestedOrder: string[]
-  stats: { totalDanger: number; totalCaution: number; totalPassed: number; zoneCount: number }
+  /** 全部直接來自呼叫端傳入的 CaseSeverityCounts（各分區 severity 加總），這裡
+   *  純粹轉存，不重新計算——totalDanger/totalCaution/totalPassed 三個數字必須
+   *  跟頂部總覽、各分區卡片顯示的數字完全一致，因為算法是同一個函式。 */
+  stats: { totalDanger: number; totalCaution: number; totalPassed: number; totalNeedsReview: number; zoneCount: number; totalEventCount: number; totalGroupedIssueCount: number }
 }
 
 /**
  * 【未來可替換為真正 LLM API 的函式之一】目前用規則式樣板組句：依 danger／caution
- * 數量與 groupPrimaryRisks 的歸納結果套固定句型。輸入輸出介面（ZoneReviewInput[] →
- * ReviewSummary）之後接真正的語言模型摘要時不需要改動呼叫端。
+ * 數量與 groupPrimaryRisks 的歸納結果套固定句型。danger/caution/passed 等數字全部
+ * 直接取用呼叫端傳入的 caseSeverity／zone.severity（唯一統計來源），這裡只負責把
+ * 已經算好的數字套進句型與排序，不重新計數、不推估——之後接真正的語言模型摘要時，
+ * 也只能把這些既有數字「讀出來講」，不能讓模型自己數。
  */
-export function generateReviewSummary(zones: ZoneReviewInput[]): ReviewSummary {
+export function generateReviewSummary(zones: ZoneReviewInput[], caseSeverity: CaseSeverityCounts): ReviewSummary {
   const reviewable = zones.filter((z): z is ZoneReviewInput & { evalResult: EvalResult } => !!z.evalResult)
 
   const allIssues = reviewable.flatMap(z => z.evalResult.issues)
-  const totalDanger = allIssues.filter(i => i.level === 'danger').length
-  const totalCaution = allIssues.filter(i => i.level === 'caution').length
-  const totalPassed = reviewable.reduce(
-    (s, z) => s + z.proximityConflicts.filter(c => c.riskLevel === 'low' || c.riskLevel === 'unmatched').length, 0)
+  const { danger: totalDanger, caution: totalCaution, passed: totalPassed, needsReview: totalNeedsReview, eventCount: totalEventCount } = caseSeverity
+  const totalGroupedIssueCount = zones.reduce((s, z) => s + (z.severity.groupedIssueCount ?? 0), 0)
 
+  // topRisks 是「問題類型」的分類分布（用來組句「主要集中於澆水與排水」），跟
+  // danger/caution 總數是兩件事——類別分布本來就可能比事件總數多（一個事件可能
+  // 橫跨多個類別），這裡繼續讀 evalResult.issues 純粹是為了取得類別標籤，不影響
+  // 上面已經用 severity 算好的總數。
   const topRisks = groupPrimaryRisks(allIssues, 3)
 
   const priorityZones: PriorityZone[] = reviewable
     .map(z => {
-      const d = z.evalResult.issues.filter(i => i.level === 'danger').length
-      const c = z.evalResult.issues.filter(i => i.level === 'caution').length
+      const d = z.severity.danger
+      const c = z.severity.caution
       const top = groupPrimaryRisks(z.evalResult.issues, 1)[0]
       const reason = d > 0
         ? `${d} 項嚴重問題${top ? `，主要為${top.label}` : ''}`
@@ -151,7 +164,7 @@ export function generateReviewSummary(zones: ZoneReviewInput[]): ReviewSummary {
 
   return {
     overallConclusion, topRisks, priorityZones, suggestedOrder,
-    stats: { totalDanger, totalCaution, totalPassed, zoneCount: reviewable.length },
+    stats: { totalDanger, totalCaution, totalPassed, totalNeedsReview, zoneCount: reviewable.length, totalEventCount, totalGroupedIssueCount },
   }
 }
 
@@ -175,8 +188,8 @@ export function generateMapInsight(summary: ReviewSummary): string {
  */
 export function generateZoneOneLiner(zone: ZoneReviewInput): string {
   if (!zone.evalResult) return 'AI 判斷：本分區尚未完成植栽比對，無法產生摘要。'
-  const d = zone.evalResult.issues.filter(i => i.level === 'danger').length
-  const c = zone.evalResult.issues.filter(i => i.level === 'caution').length
+  const d = zone.severity.danger
+  const c = zone.severity.caution
   if (d === 0 && c === 0) return `AI 判斷：${zone.zoneName}整體配置通過審查，未發現需優先處理的問題。`
   const top = groupPrimaryRisks(zone.evalResult.issues, 1)[0]
   if (d > 0) {

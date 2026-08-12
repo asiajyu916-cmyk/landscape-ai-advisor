@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useMemo, useEffect, Fragment } from 'rea
 import { createPortal } from 'react-dom'
 import {
   Upload, FileText, AlertTriangle, CheckCircle, HelpCircle,
-  ChevronDown, X, ArrowRight, Layers, Trash2, BookOpen, Table2, FileOutput,
+  ChevronDown, X, ArrowRight, Layers, Trash2, BookOpen, Table2, FileOutput, Search,
 } from 'lucide-react'
 import { parseDxf, detectPlantSchedule, findNearbyTexts } from '@/utils/dxfParser'
 import { analyzeMultiLayer, zoneLabel, detectZonesFromText, buildZonePlantList, buildZoneAssignDebug, polygonBBox, polygonArea, pointInPolygon, detectAnalysisScope, SCHEDULE_KEYWORD_RE } from '@/utils/spatialAnalysis'
@@ -12,12 +12,14 @@ import { detectAndAlignDuplicatePlans, mergeAlignedInsertsIntoParseResult } from
 import { exportHtmlAsPaginatedPdf } from '@/utils/pdfCanvasExport'
 import {
   escHtml, scoreColor, statusColor, getZoneColor, SPATIAL_KIND_LEGEND,
-  buildZoneEvents, buildZoneEventStats, computeReportScore, clusterZoneEvents, buildZoneFixStrategies,
+  buildZoneEvents, buildZoneEventStats, clusterZoneEvents, buildZoneFixStrategies,
   buildZoneOverviewMapSvg, buildZoneLocalMapSvg,
   buildShortZoneConclusion, buildTechnicalAppendixHtml,
   BUCKET_LABEL, type ZoneEvent, type EventSeverity,
   type EventGroup, type NeedsReviewSummary,
   buildUnknownSourceGroups, UNKNOWN_SOURCE_TYPE_LABEL, UNKNOWN_SOURCE_WHY_LABEL, type UnknownSourceGroup,
+  computeCaseSeverityCounts, verifySeverityCountIntegrity, type ZoneSeverityCounts,
+  computeZoneScore, computeOverallScore, scoreTier, type OverallScoreZoneInput, type OverallScore,
 } from '@/utils/dxfReportBuilder'
 import MergedIssueCard from '@/components/dxf/MergedIssueCard'
 import UnknownSourceGroupCard from '@/components/dxf/UnknownSourceGroupCard'
@@ -26,7 +28,7 @@ import type { EvalResult } from '@/utils/plantEvaluator'
 import { computeZonePlantConflicts, DEFAULT_PROXIMITY_CONFIG, layerOverrideKey } from '@/utils/plantProximity'
 import { loadPlantsFromStorage, savePlantsToStorage, loadPlantsWithCsvMerge } from '@/data/plantStore'
 import { searchPlantAllTiers, searchResultToDraft } from '@/utils/plantSearchClient'
-import { existsExactInLocalDatabase, normalizeLayerToken, buildLayerPlantKeywordMap, findPlantsByLayerName, normalizeScientificName } from '@/utils/plantNameMatch'
+import { existsExactInLocalDatabase, normalizeLayerToken, buildLayerPlantKeywordMap, findPlantsByLayerName, normalizeScientificName, normalizeForCompare } from '@/utils/plantNameMatch'
 import { persistConfirmedPlant } from '@/services/plantCloudService'
 import type { PlantSearchResult, DraftPlantRecord } from '@/types/plantSearch'
 import { PLANT_DATA_SOURCE_LABELS } from '@/types/plantSearch'
@@ -36,7 +38,7 @@ import { classifyCategory, CATEGORY_GROUP_META, CATEGORY_GROUP_ORDER, buildCateg
 import DrawingLocatorModal from '@/components/dxf/DrawingLocatorModal'
 import AIReviewSummary from '@/components/dxf/AIReviewSummary'
 import AIFixPlanModal from '@/components/dxf/AIFixPlanModal'
-import { generateReviewSummary, generateFixPlans, recommendFixPlan, generateMapInsight, generateZoneOneLiner } from '@/utils/aiReviewNarrative'
+import { generateReviewSummary, generateFixPlans, recommendFixPlan, generateMapInsight, generateZoneOneLiner, type ZoneReviewInput } from '@/utils/aiReviewNarrative'
 import ZoneOverviewMap, { type ZoneMapEntry, type ZoneMapIssuePoint, type FocusPoint } from '@/components/dxf/ZoneOverviewMap'
 import ZoneQuickPanel, { type QuickPanelIssue } from '@/components/dxf/ZoneQuickPanel'
 import ZoneMiniPreview from '@/components/dxf/ZoneMiniPreview'
@@ -490,13 +492,18 @@ type RiskFilterKey = 'all' | 'severe' | 'warning' | 'passed'
 function RiskFilterBar({ filter, onChange, stats }: {
   filter: RiskFilterKey
   onChange: (f: RiskFilterKey) => void
-  stats: { total: number; severe: number; warning: number; passed: number }
+  /** eventCount＝review events 真正數量（唯一統計來源）；groupCount＝合併顯示後的
+   *  問題卡片數，兩者不同時必須「N 項｜M 類問題」並列顯示，不能只講其中一個當作
+   *  「總數」（見 dxfReportBuilder.ts computeZoneSeverityCounts 檔頭說明）。 */
+  stats: { total: number; severeEventCount: number; severeGroupCount: number; cautionEventCount: number; cautionGroupCount: number }
 }) {
   const options: Array<{ key: RiskFilterKey; label: string }> = [
     { key: 'all', label: '全部' },
     { key: 'severe', label: '嚴重' },
     { key: 'warning', label: '提醒' },
   ]
+  const fmt = (eventCount: number, groupCount: number) =>
+    groupCount < eventCount ? `${eventCount} 項｜${groupCount} 類問題` : `${eventCount} 項`
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap gap-2">
@@ -514,7 +521,7 @@ function RiskFilterBar({ filter, onChange, stats }: {
         ))}
       </div>
       <p className="text-sm text-stone-500">
-        重複問題已依同分區＋同根本原因＋位置相鄰合併　嚴重 {stats.severe} 項｜提醒 {stats.warning} 項
+        重複問題已依同分區＋同根本原因＋位置相鄰合併顯示　嚴重 {fmt(stats.severeEventCount, stats.severeGroupCount)}｜提醒 {fmt(stats.cautionEventCount, stats.cautionGroupCount)}
       </p>
     </div>
   )
@@ -865,6 +872,15 @@ interface ZoneReviewResult {
   boundaryArea?: number   // 分區邊界面積（圖面座標單位，圖面為公尺時即 m²；無邊界則 undefined）
   evalResult?: EvalResult
   proximityConflicts: PlantConflictResult[]  // 空間鄰近式衝突檢討逐對結果（見 plantProximity.ts）
+  /** 完成相容性判定的配對數（含 judgment==='ok'），是「嚴重/提醒/通過」統計唯一
+   *  來源 computeZoneSeverityCounts() 的必要輸入——見 dxfReportBuilder.ts 檔頭說明。
+   *  不要用 proximityConflicts.length 代替，那已經排除了 'ok' 配對。 */
+  evaluatedPairCount: number
+  /** 分區內「嚴重／提醒」問題群組數（同根本原因＋位置相鄰＝一個 scoring event），
+   *  是 computeZoneScore()／computeOverallScore() 唯一評分引擎的輸入，供全案總分
+   *  彙總時重用，不必重新跑一次 clusterZoneEvents（見 dxfReportBuilder.ts）。 */
+  groupedSevereCount: number
+  groupedCautionCount: number
   spatialInstances: SpatialPlantInstance[]   // 本分區逐一實體幾何（供「在圖面定位」查詢）
   treeInventory: TreeInventoryItem[]         // 喬木盤點（樹種/數量/株距/樹冠重疊/遮蔭影響）
   finalReviewResults: FinalReviewResult[]  // 最終審查結果（UI/PDF 唯一來源）
@@ -1374,7 +1390,7 @@ function buildZoneReviews(
   // ── 空間鄰近式衝突檢討（取代舊有整區 min/max 落差比較）─────────────────────
   // 分區篩選（zonePlantLists 本身已是分區篩選結果）→ 空間鄰近篩選 → 植物特性
   // 衝突判斷，全部分區一次算完，下方逐區迴圈只需查表。見 plantProximity.ts。
-  const { resultsByZone: conflictsByZone, instancesByZone, treeInventoryByZone } = computeZonePlantConflicts(
+  const { resultsByZone: conflictsByZone, instancesByZone, treeInventoryByZone, evaluatedPairCountByZone } = computeZonePlantConflicts(
     zonePlantLists.map(z => z.zone),
     { inserts, polygons, blockExtents },
     mappings,
@@ -1977,14 +1993,39 @@ function buildZoneReviews(
     const hasAnyBlock = blockEntries.length > 0
 
     const proximityConflicts = conflictsByZone.get(zpl.zone.name) ?? []
+    const evaluatedPairCount = evaluatedPairCountByZone.get(zpl.zone.name) ?? 0
     const spatialInstances = instancesByZone.get(zpl.zone.name) ?? []
     const treeInventory = treeInventoryByZone.get(zpl.zone.name) ?? []
 
     let status: ZoneReviewStatus = '無法審查'
     let evalResult: EvalResult | undefined
+    let groupedSevereCount = 0
+    let groupedCautionCount = 0
     if (confirmed.length >= 1) {
       status = '可審查'
-      evalResult = aggregatePairConflictsToEvalResult(proximityConflicts)
+      // aiSuggestion／reviewText 裡顯示的嚴重／提醒／通過數字必須跟全站唯一統計
+      // 來源一致（見 dxfReportBuilder.ts computeZoneSeverityCounts 檔頭說明），不能
+      // 讓這段文字自己用 riskLevel 重新算一套——分數／compatLevel／overallRiskLevel
+      // 的計算邏輯本身不動（規則第 9 點：不更動審查門檻），只把「顯示給使用者看
+      // 的數字」換成同一套 review events 統計。
+      const zoneEventsForText = buildZoneEvents(zpl.zone.name, proximityConflicts)
+      const canonicalCounts = {
+        danger: zoneEventsForText.filter(e => e.severity === 'danger').length,
+        caution: zoneEventsForText.filter(e => e.severity === 'caution').length,
+        passed: Math.max(0, evaluatedPairCount - zoneEventsForText.length),
+      }
+      // ── 分區「配置健康度」分數：唯一評分引擎 computeZoneScore() ──────────────
+      // 不用 aggregatePairConflictsToEvalResult 內建的逐配對加權公式當作分數顯示
+      // 值，改用「同 zone＋同根本原因＋位置相鄰」的問題群組（clusterZoneEvents）
+      // 計次扣分，分區內、全案層級都設有上限，避免配對數量、分區數量把分數無限
+      // 拖低。算好後直接傳入 scoreOverride，讓 aiSuggestion／reviewText 裡引用的
+      // 分數跟卡片上顯示的「配置健康度」是同一個數字，不會同一張卡片內部矛盾。
+      // 這裡算出的分數是全站畫面總覽分數／PDF報告總分／各區分數共用的唯一來源。
+      const { groups: zoneGroupsForScore } = clusterZoneEvents(zpl.zone.name, zoneEventsForText, spatialInstances, unit)
+      groupedSevereCount = zoneGroupsForScore.filter(g => g.maxSeverity === 'danger').length
+      groupedCautionCount = zoneGroupsForScore.filter(g => g.maxSeverity === 'caution').length
+      const zoneScore = computeZoneScore(groupedSevereCount, groupedCautionCount)
+      evalResult = aggregatePairConflictsToEvalResult(proximityConflicts, canonicalCounts, zoneScore)
       // 替代植栽建議另外呼叫一次 evaluate()（跟空間鄰近彙整分數是兩套獨立判斷，
       // 這裡只取它的 alternatives，不覆蓋 aggregatePairConflictsToEvalResult 算出的分數/問題）
       evalResult.alternatives = evaluate(confirmed, plantDB).alternatives
@@ -2179,6 +2220,9 @@ function buildZoneReviews(
       boundaryArea: zpl.zone.boundary ? polygonArea(zpl.zone.boundary.vertices) : undefined,
       evalResult,
       proximityConflicts,
+      evaluatedPairCount,
+      groupedSevereCount,
+      groupedCautionCount,
       spatialInstances,
       treeInventory,
       hatchPlants: { confirmed: hatchConfirmed, candidates: hatchCandidates, unmatchedCount: hatchUnmatchedCount },
@@ -2739,7 +2783,11 @@ export default function DxfReviewPage({
       // 避免各自重算導致編號兜不起來
       const eventsByZone = new Map<string, ZoneEvent[]>()
       const statsByZoneEvents = new Map<string, ReturnType<typeof buildZoneEventStats>>()
-      const scoreByZone = new Map<string, ReturnType<typeof computeReportScore>>()
+      // 分區分數：直接沿用 buildZoneReviews 已經算好的 r.evalResult.score（唯一評分
+      // 引擎 computeZoneScore()，見 dxfReportBuilder.ts），不在這裡另外重算一套——
+      // 畫面總覽分數／PDF報告總分／各區分數必須共用同一個數字，不是巧合地算出
+      // 相同結果。tier／tierNote 用同一套 scoreTier() 門檻轉成報告用的文字。
+      const scoreByZone = new Map<string, { score: number; tier: ReturnType<typeof scoreTier>['tier']; tierNote: string }>()
       const groupsByZone = new Map<string, EventGroup[]>()
       const needsReviewByZone = new Map<string, NeedsReviewSummary>()
       for (const r of zoneReviews) {
@@ -2747,7 +2795,8 @@ export default function DxfReviewPage({
         const stats = buildZoneEventStats(events, r.proximityConflicts ?? [])
         eventsByZone.set(r.zoneName, events)
         statsByZoneEvents.set(r.zoneName, stats)
-        scoreByZone.set(r.zoneName, computeReportScore(stats.dangerCount, stats.cautionCount, stats.needsReviewCount))
+        const zScore = r.evalResult?.score ?? computeZoneScore(r.groupedSevereCount, r.groupedCautionCount)
+        scoreByZone.set(r.zoneName, { score: zScore, ...scoreTier(zScore) })
         const { groups, needsReview } = clusterZoneEvents(r.zoneName, events, r.spatialInstances ?? [], drawingUnit)
         groupsByZone.set(r.zoneName, groups)
         needsReviewByZone.set(r.zoneName, needsReview)
@@ -2776,10 +2825,24 @@ export default function DxfReviewPage({
 
       const allGroups = [...groupsByZone.values()].flat()
       const sortGroupsBySeverity = (a: EventGroup, b: EventGroup) => (a.maxSeverity === b.maxSeverity ? 0 : a.maxSeverity === 'danger' ? -1 : 1)
-      const overallDanger = allGroups.filter(g => g.maxSeverity === 'danger').length
-      const overallCaution = allGroups.filter(g => g.maxSeverity === 'caution').length
+      // 全案嚴重／提醒總數＝各分區 stats（events-based，buildZoneEventStats）加總，
+      // 跟下方全區總覽表的每列數字、每分區頁面的統計同一套算法——不可用 allGroups
+      // （合併後的問題卡片數）代替，否則封面數字會跟分區明細對不起來（規則第 1、
+      // 3 點：全案總數必須等於各分區數量加總）。
+      const overallDanger = [...statsByZoneEvents.values()].reduce((s, st) => s + st.dangerCount, 0)
+      const overallCaution = [...statsByZoneEvents.values()].reduce((s, st) => s + st.cautionCount, 0)
       const overallNeedsReview = [...needsReviewByZone.values()].reduce((sum, nr) => sum + nr.count, 0)
-      const overallScore = computeReportScore(overallDanger, overallCaution, overallNeedsReview)
+      // 全案總分＝各分區分數（面積加權）平均＋有上限的全域嚴重問題懲罰，不是全案
+      // 問題數重新從 100 累扣一次——見 dxfReportBuilder.ts computeOverallScore()。
+      const totalSevereGroupCount = zoneReviews.reduce((s, r) => s + r.groupedSevereCount, 0)
+      const overallScore = computeOverallScore(
+        zoneReviews.map(r => ({
+          zoneName: r.zoneName,
+          score: scoreByZone.get(r.zoneName)?.score ?? 100,
+          areaM2: zoneAreaStats.get(r.zoneName)?.zoneAreaM2,
+        })),
+        totalSevereGroupCount,
+      )
       const totalPlantSpecies = new Set(zoneReviews.flatMap(r => r.plants.map(p => p.name))).size
       const top3 = [...allGroups].sort(sortGroupsBySeverity).slice(0, 3)
 
@@ -2813,6 +2876,7 @@ export default function DxfReviewPage({
       <span style="font-size:16px;font-weight:700;color:${scoreColor(overallScore.score)}">綜合評估：${esc(overallScore.tier)}（${esc(overallScore.tierNote)}）</span>
     </div>
     <div style="font-size:13px;color:#44403c;margin-top:6px">${esc(overallScore.reasonLine)}</div>
+    ${overallScore.severeNote ? `<div style="font-size:13px;color:#dc2626;font-weight:700;margin-top:4px">⚠ ${esc(overallScore.severeNote)}</div>` : ''}
   </div>
   <div class="kpi-grid no-break">
     <div class="kpi"><div class="kpi-v" style="color:#1a4731">${zoneReviews.length}</div><div class="kpi-l">分區數量</div></div>
@@ -2870,8 +2934,13 @@ export default function DxfReviewPage({
           instances: r.spatialInstances ?? [], groups,
         })
         const priority = [...groups].sort(sortGroupsBySeverity).slice(0, 3)
+        // 嚴重／提醒的「總數」一律用 events（stats.dangerCount／cautionCount，來自
+        // buildZoneEventStats，跟封面全區總覽表同一套算法）；groups 只用來額外標示
+        // 「已合併為幾類問題卡片」，不得取代事件總數本身（見規則第 1、4 點）。
         const groupDangerCount = groups.filter(g => g.maxSeverity === 'danger').length
         const groupCautionCount = groups.filter(g => g.maxSeverity === 'caution').length
+        const dangerCell = groupDangerCount < stats.dangerCount ? `${stats.dangerCount}（${groupDangerCount} 類問題）` : `${stats.dangerCount}`
+        const cautionCell = groupCautionCount < stats.cautionCount ? `${stats.cautionCount}（${groupCautionCount} 類問題）` : `${stats.cautionCount}`
 
         const page1 = `
   <div class="sec-hdr page-break">${esc(r.zoneName)}　分區圖面與審查</div>
@@ -2884,7 +2953,7 @@ export default function DxfReviewPage({
         <td>面積</td><td>${areaStats ? areaStats.zoneAreaM2.toFixed(1) + ' m²' : '—'}</td></tr>
         <tr><td>喬木數</td><td>${areaStats?.treeTotalCount ?? r.spatialInstances.filter(i => i.kind === 'tree').length}</td>
         <td>灌木／地被面積</td><td>${areaStats ? (areaStats.shrubAreaM2 + areaStats.groundLawnAreaM2).toFixed(1) + ' m²' : '—'}</td></tr>
-        <tr><td>嚴重／提醒／需人工確認</td><td colspan="3">${groupDangerCount} ／ ${groupCautionCount} ／ ${nr.count}</td></tr>
+        <tr><td>嚴重／提醒／需人工確認</td><td colspan="3">${dangerCell} ／ ${cautionCell} ／ ${nr.count}</td></tr>
       </tbody>
     </table>
     <div style="margin-top:12px">
@@ -3435,7 +3504,17 @@ function PlantDropdown({
   const rule = savedRules.find(r => r.blockName === blockName)
   const btnRef = useRef<HTMLButtonElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
+  // 植物資料庫常有上百筆，純下拉滾動很難選到目標——面板打開時可直接打字篩選，
+  // 不用捲動；關閉時清空搜尋字串，下次打開才不會殘留上次的篩選結果。
+  const [search, setSearch] = useState('')
+  useEffect(() => {
+    if (isOpen) { setSearch(''); requestAnimationFrame(() => searchRef.current?.focus()) }
+  }, [isOpen])
+  const filteredPlants = search.trim()
+    ? plants.filter(p => normalizeForCompare(p.name).includes(normalizeForCompare(search)))
+    : plants
 
   // 表格外層容器有 overflow-hidden（用來裁角），絕對定位的下拉選單若仍放在容器內會被
   // 裁切而看起來「按了沒反應」──改用 portal 掛到 document.body，並用 fixed + 實測座標
@@ -3483,6 +3562,17 @@ function PlantDropdown({
           <div className="px-3 py-2 bg-stone-50 border-b border-stone-100 text-xs text-stone-500">
             選擇植物後，選擇套用方式
           </div>
+          <div className="relative border-b border-stone-100">
+            <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400 pointer-events-none" />
+            <input
+              ref={searchRef}
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              onKeyDown={e => e.stopPropagation()}
+              placeholder="輸入植物名稱搜尋…"
+              className="w-full pl-8 pr-3 py-2 text-sm outline-none placeholder:text-stone-400"
+            />
+          </div>
           {manualOverride && onClearManual && (
             <div className="border-b border-stone-100">
               <button onClick={() => { onClearManual(blockName); setDropdown(null) }}
@@ -3498,7 +3588,10 @@ function PlantDropdown({
             <span className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-600">永久</span>永遠儲存
           </div>
           <div className="max-h-64 overflow-y-auto">
-            {plants.map(p => {
+            {filteredPlants.length === 0 && (
+              <p className="px-3 py-4 text-xs text-stone-400 text-center">查無符合「{search}」的植物</p>
+            )}
+            {filteredPlants.map(p => {
               const isCurrent = p.name === currentPlantName
               const isRuled   = rule?.plantName === p.name
               return (
@@ -4012,16 +4105,6 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones, drawin
     return '#a8a29e'
   }
 
-  // AI 審查結論／修正方案：全部從 reviews（既有 evalResult／proximityConflicts）
-  // 動態算出，見 aiReviewNarrative.ts 檔頭說明——不寫死示範內容。
-  const reviewSummary = generateReviewSummary(reviews)
-  const fixPlanTargetName = fixPlanZone?.zoneName
-  const fixPlans = fixPlanZone ? generateFixPlans(fixPlanZone) : null
-  const fixPlanRecommend = fixPlans
-    ? recommendFixPlan(fixPlans, fixPlanZone!.evalResult?.issues.filter(i => i.level === 'danger').length ?? 0)
-    : null
-  const topPriorityZoneName = reviewSummary.priorityZones[0]?.zoneName
-
   // ── 分區總覽圖資料組裝：座標／面積／植栽統計全部直接讀既有資料，不新增偵測 ──
   // 地圖問題點與分區快覽面板的「主要問題」共用同一份「重複問題合併」結果
   // （clusterZoneEvents，跟審查問題分頁、PDF 匯出同一套運算），確保三處看到的
@@ -4029,16 +4112,69 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones, drawin
   // clusterZoneEvents 是 O(n²) 空間群聚運算，大分區（實測曾遇過單區 3900+ 組
   // 配對）若每次 render（例如純粹 hover 地圖）都重algo 全部 13 區會直接卡死頁面
   // ——這裡用 useMemo 鎖定只在 reviews／drawingUnit 真的變動時才重算一次。
-  const zoneEventGroupsByZone = useMemo(() => {
-    const map = new Map<string, EventGroup[]>()
+  // 嚴重／提醒／通過統計的唯一來源：跟 EventGroup 共用同一份 buildZoneEvents()
+  // 結果（避免算兩次），severityByZone 才是「總數」，zoneEventGroupsByZone 只
+  // 供「問題明細呈現」與「N 項｜M 類問題」顯示用，兩者不得互相取代——見
+  // dxfReportBuilder.ts computeZoneSeverityCounts() 檔頭說明。
+  const { zoneEventGroupsByZone, severityByZone } = useMemo(() => {
+    const groupsMap = new Map<string, EventGroup[]>()
+    const severityMap = new Map<string, ZoneSeverityCounts>()
     for (const r of reviews) {
       const events = buildZoneEvents(r.zoneName, r.proximityConflicts)
       const { groups } = clusterZoneEvents(r.zoneName, events, r.spatialInstances ?? [], drawingUnit)
-      map.set(r.zoneName, groups)
+      groupsMap.set(r.zoneName, groups)
+      const danger = events.filter(e => e.severity === 'danger').length
+      const caution = events.filter(e => e.severity === 'caution').length
+      const needsReview = events.filter(e => e.severity === 'needs-review').length
+      severityMap.set(r.zoneName, {
+        zoneName: r.zoneName, danger, caution, needsReview,
+        passed: Math.max(0, r.evaluatedPairCount - events.length),
+        totalEvaluated: r.evaluatedPairCount,
+        eventCount: events.length,
+        groupedIssueCount: groups.length,
+      })
     }
-    return map
+    return { zoneEventGroupsByZone: groupsMap, severityByZone: severityMap }
   }, [reviews, drawingUnit])
   const buildZoneGroups = (r: ZoneReviewResult): EventGroup[] => zoneEventGroupsByZone.get(r.zoneName) ?? []
+  const zoneSeverity = (r: ZoneReviewResult): ZoneSeverityCounts =>
+    severityByZone.get(r.zoneName) ?? { zoneName: r.zoneName, danger: 0, caution: 0, needsReview: 0, passed: 0, totalEvaluated: 0, eventCount: 0, groupedIssueCount: 0 }
+  const caseSeverity = useMemo(() => computeCaseSeverityCounts([...severityByZone.values()]), [severityByZone])
+  const toZoneReviewInput = (r: ZoneReviewResult): ZoneReviewInput =>
+    ({ zoneName: r.zoneName, evalResult: r.evalResult, proximityConflicts: r.proximityConflicts, severity: zoneSeverity(r) })
+
+  // 畫面總覽分數：跟 PDF 報告總分／各區分數共用同一套評分引擎（computeOverallScore
+  // ／computeZoneScore，見 dxfReportBuilder.ts），各分區分數直接讀 evalResult.score
+  // （buildZoneReviews 已經用同一顆函式算好），這裡只是加總，不重新定義另一套公式。
+  const overallScore = useMemo(() => computeOverallScore(
+    reviewable.map(r => ({
+      zoneName: r.zoneName,
+      score: r.evalResult?.score ?? 100,
+      areaM2: zoneStatistics.find(s => s.zoneId === r.zoneName)?.zoneAreaM2,
+    })),
+    reviewable.reduce((s, r) => s + r.groupedSevereCount, 0),
+  ), [reviewable, zoneStatistics])
+
+  // AI 審查結論／修正方案：全部從 reviews（既有 evalResult／proximityConflicts）
+  // 動態算出，見 aiReviewNarrative.ts 檔頭說明——不寫死示範內容；danger/caution/
+  // passed 等數字全部經由 caseSeverity／zoneSeverity（唯一統計來源）傳入，
+  // generateReviewSummary() 內部不會再自己重新 filter 計數。
+  const reviewSummary = generateReviewSummary(reviews.map(toZoneReviewInput), caseSeverity)
+  const fixPlanTargetName = fixPlanZone?.zoneName
+  const fixPlans = fixPlanZone ? generateFixPlans(fixPlanZone) : null
+  const fixPlanRecommend = fixPlans
+    ? recommendFixPlan(fixPlans, fixPlanZone ? zoneSeverity(fixPlanZone).danger : 0)
+    : null
+  const topPriorityZoneName = reviewSummary.priorityZones[0]?.zoneName
+
+  // 規則第 8 點：debug 完整性檢查——global count（全案合併重算）是否等於 sum of
+  // zone counts（各分區加總）。只在 reviews 真的變動時跑一次，不是每次 render。
+  useEffect(() => {
+    if (reviews.length === 0) return
+    const allConflictsFlat = reviews.flatMap(r => r.proximityConflicts)
+    const allEvaluatedPairCount = reviews.reduce((s, r) => s + r.evaluatedPairCount, 0)
+    verifySeverityCountIntegrity([...severityByZone.values()], allConflictsFlat, allEvaluatedPairCount, 0)
+  }, [reviews, severityByZone])
 
   const buildIssuePoints = (r: ZoneReviewResult): ZoneMapIssuePoint[] => buildZoneGroups(r)
     .map((g): ZoneMapIssuePoint | null => {
@@ -4068,15 +4204,16 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones, drawin
   const buildMapEntries = (): ZoneMapEntry[] => reviews.map((r, i) => {
     const stats = zoneStatistics.find(s => s.zoneId === r.zoneName)
     const matchConfidencePercent = zoneMatchConfidence(r)
+    const sev = zoneSeverity(r)
     return {
       zoneName: r.zoneName,
       boundary: detectedZones.find(z => z.name === r.zoneName)?.boundary,
       labelPosition: detectedZones.find(z => z.name === r.zoneName)?.labelPosition,
       areaM2: stats?.zoneAreaM2 ?? r.boundaryArea,
       plantSummary: stats ? `喬木 ${stats.treeTotalCount} 株・灌木地被 ${stats.plantingAreaM2.toFixed(1)} ㎡` : undefined,
-      dangerCount: r.evalResult?.issues.filter(i2 => i2.level === 'danger').length ?? 0,
-      cautionCount: r.evalResult?.issues.filter(i2 => i2.level === 'caution').length ?? 0,
-      passedCount: r.proximityConflicts.filter(c => c.riskLevel === 'low' || c.riskLevel === 'unmatched').length,
+      dangerCount: sev.danger,
+      cautionCount: sev.caution,
+      passedCount: sev.passed,
       colorIndex: i,
       issuePoints: buildIssuePoints(r),
       matchConfidencePercent,
@@ -4110,8 +4247,8 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones, drawin
           {[...reviews]
             .map(r => ({
               r,
-              dangerCnt: r.evalResult?.issues.filter(i2 => i2.level === 'danger').length ?? 0,
-              cautionCnt: r.evalResult?.issues.filter(i2 => i2.level === 'caution').length ?? 0,
+              dangerCnt: zoneSeverity(r).danger,
+              cautionCnt: zoneSeverity(r).caution,
             }))
             .sort((a, b) => (b.dangerCnt - a.dangerCnt) || (b.cautionCnt - a.cautionCnt))
             .map(({ r, dangerCnt, cautionCnt }) => {
@@ -4191,6 +4328,7 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones, drawin
                     {reviewSummary.stats.zoneCount > 0 && (
                       <AIReviewSummary
                         summary={reviewSummary}
+                        overallScore={overallScore}
                         onSelectZone={setActiveTab}
                         onGenerateFixPlan={topPriorityZoneName ? () => setFixPlanZone(reviews.find(r => r.zoneName === topPriorityZoneName) ?? null) : undefined}
                       />
@@ -4200,14 +4338,15 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones, drawin
                     {quickPanelZone && (() => {
                       const qr = reviews.find(rr => rr.zoneName === quickPanelZone)
                       if (!qr) return null
+                      const qrSev = zoneSeverity(qr)
                       return (
                         <ZoneQuickPanel
                           zoneName={qr.zoneName}
                           riskLabel={riskLabel(qr)}
-                          dangerCount={qr.evalResult?.issues.filter(i2 => i2.level === 'danger').length ?? 0}
-                          cautionCount={qr.evalResult?.issues.filter(i2 => i2.level === 'caution').length ?? 0}
-                          passedCount={qr.proximityConflicts.filter(c => c.riskLevel === 'low' || c.riskLevel === 'unmatched').length}
-                          aiOneLiner={generateZoneOneLiner(qr)}
+                          dangerCount={qrSev.danger}
+                          cautionCount={qrSev.caution}
+                          passedCount={qrSev.passed}
+                          aiOneLiner={generateZoneOneLiner(toZoneReviewInput(qr))}
                           issues={buildQuickPanelIssues(qr)}
                           selectedIssueId={quickPanelIssueId}
                           onSelectIssue={id => setQuickPanelIssueId(id)}
@@ -4225,8 +4364,7 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones, drawin
             {/* 各區卡片：AI 分析卡（點擊開啟快覽面板）*/}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               {reviews.map(r => {
-                const dangerCnt  = r.evalResult?.issues.filter(i => i.level === 'danger').length ?? 0
-                const cautionCnt = r.evalResult?.issues.filter(i => i.level === 'caution').length ?? 0
+                const { danger: dangerCnt, caution: cautionCnt } = zoneSeverity(r)
                 const cnt = plantCount(r)
                 const boundary = detectedZones.find(z => z.name === r.zoneName)?.boundary
                 const issuePointCount = dangerCnt + cautionCnt
@@ -4304,8 +4442,7 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones, drawin
                     </thead>
                     <tbody>
                       {reviews.map((r, i) => {
-                        const dangerCnt  = r.evalResult?.issues.filter(i => i.level === 'danger').length ?? 0
-                        const cautionCnt = r.evalResult?.issues.filter(i => i.level === 'caution').length ?? 0
+                        const { danger: dangerCnt, caution: cautionCnt } = zoneSeverity(r)
                         const totalIssues = dangerCnt + cautionCnt
                         const mainIssues  = r.evalResult?.issues
                           .filter(i => i.level === 'danger' || i.level === 'caution')
@@ -4399,9 +4536,7 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones, drawin
           const totalCount     = plantCount(r)
           const stats          = zoneStatistics.find(s => s.zoneId === r.zoneName)
 
-          const severeCnt = r.proximityConflicts.filter(c => c.riskLevel === 'high').length
-          const warningCnt = r.proximityConflicts.filter(c => c.riskLevel === 'medium').length
-          const passedCnt = r.proximityConflicts.filter(c => c.riskLevel === 'low' || c.riskLevel === 'unmatched').length
+          const { danger: severeCnt, caution: warningCnt, passed: passedCnt } = zoneSeverity(r)
           const confirmedCnt = r.hatchPlants?.confirmed.length ?? 0
           const pendingCnt = (r.hatchPlants?.candidates.length ?? 0) + unmatchedBlks.length
 
@@ -4641,7 +4776,13 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones, drawin
                 const { groups } = clusterZoneEvents(r.zoneName, zoneEvents, r.spatialInstances ?? [], drawingUnit)
                 const severeGroups = groups.filter(g => g.maxSeverity === 'danger')
                 const cautionGroups = groups.filter(g => g.maxSeverity === 'caution')
-                const filterStats = { total: groups.length, severe: severeGroups.length, warning: cautionGroups.length, passed: 0 }
+                const severeEventCount = zoneEvents.filter(e => e.severity === 'danger').length
+                const cautionEventCount = zoneEvents.filter(e => e.severity === 'caution').length
+                const filterStats = {
+                  total: groups.length,
+                  severeEventCount, severeGroupCount: severeGroups.length,
+                  cautionEventCount, cautionGroupCount: cautionGroups.length,
+                }
                 const WARNING_PREVIEW = 3
                 const visibleCautionGroups = showAllIssues ? cautionGroups : cautionGroups.slice(0, WARNING_PREVIEW)
                 const hiddenCautionCount = cautionGroups.length - visibleCautionGroups.length
@@ -4666,7 +4807,9 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones, drawin
 
                     {(riskFilter === 'all' || riskFilter === 'severe') && severeGroups.length > 0 && (
                       <div className="space-y-2">
-                        <p className="text-sm font-bold text-red-600">🔴 嚴重（{severeGroups.length}）</p>
+                        <p className="text-sm font-bold text-red-600">
+                          🔴 嚴重 {severeEventCount} 項{severeGroups.length < severeEventCount ? `｜${severeGroups.length} 類問題` : ''}
+                        </p>
                         <div className="grid grid-cols-1 gap-3">
                           {severeGroups.map(g => (
                             <div key={g.id} id={`issue-group-${g.id}`} className={focusedIssueId === g.id ? 'ring-2 ring-green-500 rounded-2xl' : ''}>
@@ -4679,7 +4822,9 @@ function ZoneReviewTab({ reviews, onAskAI, zoneStatistics, detectedZones, drawin
 
                     {(riskFilter === 'all' || riskFilter === 'warning') && cautionGroups.length > 0 && (
                       <div className="space-y-2">
-                        <p className="text-sm font-bold text-blue-600">🔵 提醒（{cautionGroups.length}）</p>
+                        <p className="text-sm font-bold text-blue-600">
+                          🔵 提醒 {cautionEventCount} 項{cautionGroups.length < cautionEventCount ? `｜${cautionGroups.length} 類問題` : ''}
+                        </p>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                           {visibleCautionGroups.map(g => (
                             <div key={g.id} id={`issue-group-${g.id}`} className={focusedIssueId === g.id ? 'ring-2 ring-green-500 rounded-2xl' : ''}>

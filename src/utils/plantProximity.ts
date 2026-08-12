@@ -428,10 +428,17 @@ export function computeZonePlantConflicts(
   resultsByZone: Map<string, PlantConflictResult[]>
   instancesByZone: Map<string, SpatialPlantInstance[]>
   treeInventoryByZone: Map<string, TreeInventoryItem[]>
+  /** 每區「實際完成相容性判定」的配對數（含 judgment==='ok' 的相容配對，僅這裡才有
+   *  記錄——results 本身不保留 'ok' 配對卡片，見下方迴圈）。這是唯一能算出「通過」
+   *  數量的資料來源：通過數 = evaluatedPairCountByZone - results.length，供
+   *  dxfReportBuilder.ts 的 computeZoneSeverityCounts() 做「review events」統計唯一
+   *  來源使用，不得由呼叫端另外用其他方式推算或估計。*/
+  evaluatedPairCountByZone: Map<string, number>
 } {
   const instancesByZone = buildAllSpatialInstances(zones, dxf, mappings, plantDB, keywordMap, scope, unit, layerOverrides)
   const resultsByZone = new Map<string, PlantConflictResult[]>()
   const treeInventoryByZone = new Map<string, TreeInventoryItem[]>()
+  const evaluatedPairCountByZone = new Map<string, number>()
   let seq = 0
 
   for (const [zoneName, instances] of instancesByZone) {
@@ -443,6 +450,7 @@ export function computeZonePlantConflicts(
     const siteDrainageEvidence = detectSiteDrainageEvidence([zoneName, ...instances.map(i => i.sourceLayer)])
 
     const results: PlantConflictResult[] = []
+    let evaluatedPairCount = 0
     for (const pair of pairs) {
       if (pair.a.kind === 'tree' || pair.b.kind === 'tree') continue   // 喬木走盤點，不產生衝突卡
       if (!pair.a.plantName || !pair.b.plantName) continue
@@ -457,6 +465,11 @@ export function computeZonePlantConflicts(
       // 再過濾一次，兩種訊號都要擋，缺一個都會讓喬木漏進衝突判定。
       if (isExcludedFromPlantingEvaluation(recA) || isExcludedFromPlantingEvaluation(recB)) continue
 
+      // 這一步之後的每一對，都是「完成相容性判定」的一個 review event（不論結果
+      // 是 ok／caution／conflict／unmatched），計入 evaluatedPairCount——不得只計
+      // 有問題的配對，否則「通過」永遠算不出來（見上方欄位註解）。
+      evaluatedPairCount++
+
       let judgment: PlantConflictResult['judgment']
       let issues: IssueDetail[]
       if (!recA || !recB) {
@@ -467,7 +480,7 @@ export function computeZonePlantConflicts(
         judgment = evalResult.issues.some(i => i.level === 'danger') ? 'conflict'
           : evalResult.issues.some(i => i.level === 'caution') ? 'caution'
           : 'ok'
-        if (judgment === 'ok') continue   // 相容，不需要檢討
+        if (judgment === 'ok') continue   // 相容，不需要檢討——但已計入 evaluatedPairCount
         issues = evalResult.issues
       }
 
@@ -487,6 +500,7 @@ export function computeZonePlantConflicts(
       })
     }
     resultsByZone.set(zoneName, results)
+    evaluatedPairCountByZone.set(zoneName, evaluatedPairCount)
   }
-  return { resultsByZone, instancesByZone, treeInventoryByZone }
+  return { resultsByZone, instancesByZone, treeInventoryByZone, evaluatedPairCountByZone }
 }

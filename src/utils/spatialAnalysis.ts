@@ -104,11 +104,13 @@ export function zoneLabel(t: ZoneType): string {
 
 // ── Zone label detection ──────────────────────────────────────────────────────
 
-// 寬鬆版 zone 文字判斷（支援 "A區" / "A 區" / "A-區" / "A區域" / "A区"）
+// 寬鬆版 zone 文字判斷（支援 "A區" / "A 區" / "A-區" / "A區域" / "A区" / "01區" / "1區"）
 export function normalizeZoneName(raw: string): string | null {
   const t = raw.trim()
-  // 含「區」字的常見格式：A區 / B 區 / 一區 / 甲區 / A-區 / A區域
-  const m = t.match(/^([A-Z一二三四五六七八九十甲乙丙丁戊己庚辛壬癸]{1,3})\s*[-－]?\s*[區区]/)
+  // 含「區」字的常見格式：A區 / B 區 / 一區 / 甲區 / A-區 / A區域 / 01區 / 16區
+  // （數字前綴：部分圖面用兩位數編號分區，例如「01區」～「16區」，字首必須含
+  // 0-9 才能匹配到，缺這個字元類別會直接讓整份圖面偵測到 0 個分區）
+  const m = t.match(/^([A-Z0-9一二三四五六七八九十甲乙丙丁戊己庚辛壬癸]{1,3})\s*[-－]?\s*[區区]/)
   if (m) return m[1] + '區'
   // 景觀 / 植栽 / 分區 前綴
   if (/^(景觀|植栽|分區)[A-Z0-9一二三四五六]/.test(t)) return t.slice(0, 3)
@@ -326,7 +328,10 @@ export function detectZonesFromText(
   // （本案無獨立 AREA/分區圖層，分區邊界即各自的評估範圍線）。
   // 標籤配對：1) 包含標籤的 polyline  2) 標籤在線外（引線標註）→ 取邊界距離
   // 最近者（上限 = 分區層整體寬度 3%），同一 polyline 不重複配對。
-  const ZONE_LAYER_RE = /AREA|區域定義|區域|分區|ZONE/i
+  // 「範圍線」：部分圖面把分區邊界獨立畫在一個通用邊界線圖層（例如「@--範圍線」），
+  // 不叫 AREA/區域/分區/ZONE，但語意上就是分區邊界，必須一併納入，否則這類圖面
+  // 會直接落到 0 個分區（見下方 Step 7 的「不阻擋整份審查」防呆）。
+  const ZONE_LAYER_RE = /AREA|區域定義|區域|分區|ZONE|範圍線/i
   const zoneLayerPolysStrict = closedPolygons.filter(p =>
     p.source !== 'HATCH' && ZONE_LAYER_RE.test(p.layer))
   // 圖層名稱本身要能辨識出具體是哪一區（含字母/數字/中文數字 + 區），才算「per-zone」
@@ -423,6 +428,19 @@ export function detectZonesFromText(
       zones.push({ name: c.name, labelPosition: { x: c.x, y: c.y }, boundary: p, confidence: 'medium', source: 'text-in-polygon' })
     }
     console.debug(`[Zone] 分區定義圖層模式（${zoneLayerPolysStrict.length >= 2 ? 'AREA/分區圖層' : '各分區獨立評估範圍'}）：polyline×${zoneLayerPolys.length}，標籤×${candidates.length}，配對成功×${zones.length}`)
+    // 規則第 8 點：逐一列出每個分區標籤的配對結果，成功/失敗與失敗原因都要看得到，
+    // 不能只給總數——failed 代表「標籤本身有偵測到，但找不到可配對的邊界 polyline」，
+    // 不代表整份圖面失敗（其餘成功配對的分區仍照常可審查，見 Step 7／10）。
+    console.group('[Zone] 分區標籤配對明細')
+    console.table(candidates.map(c => {
+      const ok = zones.some(z => z.name === c.name && z.labelPosition.x === c.x && z.labelPosition.y === c.y)
+      return {
+        分區標籤: c.name,
+        狀態: ok ? '✅ 配對成功' : '❌ 配對失敗',
+        原因: ok ? '—' : `找不到包含或鄰近（${nearLimit.toFixed(0)} 單位內）的封閉邊界 polyline`,
+      }
+    }))
+    console.groupEnd()
     if (zones.length > 0) {
       // 依區名排序（A區、B區…），避免線外標籤（第二輪配對）排到最後
       zones.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hant', { numeric: true }))
