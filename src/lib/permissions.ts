@@ -11,11 +11,11 @@ import type { Role, Permission } from '@/types/auth'
 export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   admin: [
     'canReviewDxf', 'canReviewPdf', 'canUseAiPlanting',
-    'canManagePlants', 'canManageUsers', 'canExportReport', 'canViewPlantDatabase',
+    'canManagePlants', 'canManageUsers', 'canExportReport', 'canViewPlantDatabase', 'canUseEstimate',
   ],
   reviewer: [
     // 可審查（PDF／DXF／AI 配植），可查看植栽資料庫、可匯出，但不可編輯植栽資料庫
-    'canReviewDxf', 'canReviewPdf', 'canUseAiPlanting', 'canExportReport', 'canViewPlantDatabase',
+    'canReviewDxf', 'canReviewPdf', 'canUseAiPlanting', 'canExportReport', 'canViewPlantDatabase', 'canUseEstimate',
   ],
   viewer: [
     // 只能查看植栽資料庫（搜尋／篩選／看卡片），不可審查、不可匯出、不可編輯資料

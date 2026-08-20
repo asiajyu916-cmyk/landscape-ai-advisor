@@ -2360,8 +2360,8 @@ export default function DxfReviewPage({
   onZoneReviewsUpdated,
   plantsVersion = 0,
 }: {
-  activeTab?: 'pdf' | 'landscape' | 'dxf' | 'advisor'
-  onTabChange?: (tab: 'pdf' | 'landscape' | 'dxf' | 'advisor') => void
+  activeTab?: 'pdf' | 'landscape' | 'dxf' | 'advisor' | 'estimate'
+  onTabChange?: (tab: 'pdf' | 'landscape' | 'dxf' | 'advisor' | 'estimate') => void
   onImport?: (plantNames: string[]) => void
   // 「AI 審查回覆」批次確認人工確認來源（灌木/地被/草皮/排除）後，套用到這裡立即
   // 重跑整個分區分析——不是各頁各自維護一份判斷，兩邊共用同一份 override 狀態
@@ -2410,6 +2410,29 @@ export default function DxfReviewPage({
   const [drawingUnit, setDrawingUnit] = useState<DrawingUnit>('cm')
   const [unitAutoDefaulted, setUnitAutoDefaulted] = useState(false)
   const [unitAnomaly, setUnitAnomaly] = useState(false)
+
+  // 把分區面積／喬木株數統計橋接到 sessionStorage，供「工程估價」頁讀取——
+  // 純附加，不影響既有分區審查／AI 審查邏輯。跟 saveZoneReviews() 的
+  // dxf-zone-review-full 橋接是同一個模式，只是換一個 key。
+  const zoneStatisticsMounted = useRef(false)
+  useEffect(() => {
+    if (!zoneStatisticsMounted.current) { zoneStatisticsMounted.current = true; if (zoneStatistics.length === 0) return }
+    try {
+      sessionStorage.setItem('dxf-zone-statistics', JSON.stringify(zoneStatistics))
+    } catch (err) { console.warn('zoneStatistics 橋接寫入 sessionStorage 失敗（可能超過容量）', err) }
+    onZoneReviewsUpdated?.()
+  }, [zoneStatistics])
+
+  // 把植栽索引表（含株/M2、株數欄）橋接到 sessionStorage，供「工程估價」頁讀取灌木/
+  // 地被的種植密度——純附加，不影響既有索引表比對/分區審查邏輯，跟上面 zoneStatistics
+  // 橋接同一個模式。
+  const plantScheduleMounted = useRef(false)
+  useEffect(() => {
+    if (!plantScheduleMounted.current) { plantScheduleMounted.current = true; if (plantSchedule.entries.length === 0) return }
+    try {
+      sessionStorage.setItem('dxf-plant-schedule', JSON.stringify(plantSchedule.entries))
+    } catch (err) { console.warn('plantSchedule 橋接寫入 sessionStorage 失敗（可能超過容量）', err) }
+  }, [plantSchedule])
 
   // ── 常駐掛載後用 CSS 隱藏取代 unmount，捲動位置不會自動保留，離開/返回 dxf 分頁
   // 時手動記住/還原（display:none 收合後高度歸零，還原要等瀏覽器重排完才做，

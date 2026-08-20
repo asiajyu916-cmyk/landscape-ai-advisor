@@ -986,7 +986,7 @@ function ZoneAwareResultPanel({
   zonePlantingTable: Array<{ zoneName: string; shrubs: string[]; trees: string[] }>
   advisorPrefill?: string
   setAdvisorPrefill: (q: string | undefined) => void
-  onTabChange?: (tab: 'pdf' | 'landscape' | 'dxf' | 'advisor') => void
+  onTabChange?: (tab: 'pdf' | 'landscape' | 'dxf' | 'advisor' | 'estimate') => void
   adoptedSubstitutes: Record<string, Record<string, string>>
   onAdoptSubstitute: (zoneName: string, originalName: string, altName: string) => void
   layerOverrides?: Map<string, LayerOverrideAction>
@@ -3817,8 +3817,8 @@ export default function LandscapeAdvisorPage({
   zoneReviewsVersion = 0,
   onPlantsUpdated,
 }: {
-  activeTab?: 'pdf' | 'landscape' | 'dxf' | 'advisor'
-  onTabChange?: (tab: 'pdf' | 'landscape' | 'dxf' | 'advisor') => void
+  activeTab?: 'pdf' | 'landscape' | 'dxf' | 'advisor' | 'estimate'
+  onTabChange?: (tab: 'pdf' | 'landscape' | 'dxf' | 'advisor' | 'estimate') => void
   importedPlantNames?: string[]
   onImportConsumed?: () => void
   dxfZonesLinked?: boolean
@@ -3848,8 +3848,9 @@ export default function LandscapeAdvisorPage({
   const canManagePlants = hasPermission(profile?.role, 'canManagePlants')
   const canExportPlantData = hasPermission(profile?.role, 'canExportReport')
   const canViewPlantDatabase = hasPermission(profile?.role, 'canViewPlantDatabase')
-  const tabPermission: Record<'pdf' | 'landscape' | 'dxf' | 'advisor', boolean> = {
-    pdf: canReviewPdf, landscape: canUseAiPlanting, dxf: canReviewDxf, advisor: canUseAiPlanting,
+  const canUseEstimate = hasPermission(profile?.role, 'canUseEstimate')
+  const tabPermission: Record<'pdf' | 'landscape' | 'dxf' | 'advisor' | 'estimate', boolean> = {
+    pdf: canReviewPdf, landscape: canUseAiPlanting, dxf: canReviewDxf, advisor: canUseAiPlanting, estimate: canUseEstimate,
   }
   // viewer 角色的樣貌：能看植栽資料庫，但完全沒有任何審查/配植功能——
   // 用權限組合判斷（不寫死角色名稱），符合「集中式權限設定」原則，未來若有
@@ -4467,6 +4468,7 @@ tr:nth-child(even) td{background:#f7faf5}
                   { id: 'pdf'       as const, label: 'PDF 審圖' },
                   { id: 'landscape' as const, label: 'AI 配植評估' },
                   { id: 'dxf'       as const, label: 'DXF 審查' },
+                  { id: 'estimate'  as const, label: '工程估價' },
                   { id: 'advisor'   as const, label: 'AI 配植助理' },
                 ]).map(t => {
                   const allowed = tabPermission[t.id]
@@ -4567,6 +4569,7 @@ tr:nth-child(even) td{background:#f7faf5}
                   { id: 'pdf' as const, label: 'PDF' },
                   { id: 'landscape' as const, label: 'AI' },
                   { id: 'dxf' as const, label: 'DXF' },
+                  { id: 'estimate' as const, label: '估價' },
                   { id: 'advisor' as const, label: '助理' },
                 ]).map(t => {
                   const allowed = tabPermission[t.id]

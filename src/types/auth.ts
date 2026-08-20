@@ -55,3 +55,4 @@ export type Permission =
   | 'canManageUsers'
   | 'canExportReport'
   | 'canViewPlantDatabase'
+  | 'canUseEstimate'

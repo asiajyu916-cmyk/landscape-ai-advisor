@@ -6,12 +6,13 @@ import type { LayerOverrideAction } from '@/types/dxf'
 import LandscapeAdvisorPage from '@/pages/LandscapeAdvisorPage'
 import DxfReviewPage from '@/pages/DxfReviewPage'
 import PlantAdvisorChatPage from '@/pages/PlantAdvisorChatPage'
+import EstimatePage from '@/pages/EstimatePage'
 import { AuthProvider, useAuth } from '@/contexts/AuthContext'
 import RequireAuth from '@/components/auth/RequireAuth'
 import NoPermissionNotice from '@/components/auth/NoPermissionNotice'
 import { hasPermission } from '@/lib/permissions'
 
-type AppTab = 'pdf' | 'landscape' | 'dxf' | 'advisor'
+type AppTab = 'pdf' | 'landscape' | 'dxf' | 'advisor' | 'estimate'
 
 export default function App() {
   return (
@@ -122,6 +123,11 @@ function AuthenticatedApp() {
         hasPermission(profile?.role, 'canUseAiPlanting')
           ? <PlantAdvisorChatPage />
           : <NoPermissionNotice featureName="AI 配植助理" />
+      )}
+      {activeTab === 'estimate' && (
+        hasPermission(profile?.role, 'canUseEstimate')
+          ? <EstimatePage zoneReviewsVersion={zoneReviewsVersion} />
+          : <NoPermissionNotice featureName="工程估價" />
       )}
     </>
   )

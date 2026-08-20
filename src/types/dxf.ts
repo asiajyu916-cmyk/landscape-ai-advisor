@@ -11,7 +11,7 @@ export interface PlantScheduleEntry {
   scientificName?: string // 學名
   plantType?: string      // 喬木 / 灌木 / 草皮 / 地被（若可判斷）
   spec?: string           // 規格
-  quantity?: number       // 數量（小計 / 株數欄）
+  quantity?: number       // 數量（小計 / 株數欄；沿用既有語意，不拆分，供既有比對/顯示邏輯使用）
   unit?: string           // 單位
   note?: string           // 備註欄
   quantityNote?: string   // 例如「數量待確認」
@@ -19,6 +19,12 @@ export interface PlantScheduleEntry {
   rawRow: string[]        // 原始欄位值
   dbMatched: boolean      // 是否在植栽資料庫中找到
   confidence: 'high' | 'medium' | 'low'
+  // ── 灌木/地被面積型植栽的種植密度／株數（供工程估價換算用，見規格「讀取索引表株/M2」）──
+  areaM2?: number         // 索引表「面積」欄（㎡），與 quantity 分開存放
+  plantsPerM2?: number    // 索引表「株/M2」欄；沒有這欄時，才用 spacingXM/spacingYM 換算（見 dxfParser.ts）
+  plantCount?: number     // 索引表「株數」欄；若表格本身沒有這欄，才用 Math.ceil(areaM2 * plantsPerM2) 推算
+  spacingXM?: number      // 索引表「株距」欄（公尺）
+  spacingYM?: number      // 索引表「行距」欄（公尺）
 }
 
 export interface PlantSchedule {

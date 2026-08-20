@@ -5,14 +5,16 @@ import type { DxfInsert, DxfText, BlockGroup, DxfPolygon, DxfParseResult, ZoneTy
 // ── 植栽索引表偵測 ────────────────────────────────────────────────────────────
 
 // 欄位角色
-type ColRole = 'code' | 'plantName' | 'scientificName' | 'spec' | 'quantity' | 'unit' | 'note' | 'plantType' | 'unknown'
+type ColRole = 'code' | 'plantName' | 'scientificName' | 'spec' | 'quantity' | 'unit' | 'note' | 'plantType' | 'area' | 'density' | 'spacingX' | 'spacingY' | 'spacing' | 'unknown'
 
 const COL_ROLE_PATTERNS: Array<{ kws: string[]; role: ColRole }> = [
   { kws: ['項次', '編號', '代號', '圖例', '符號', '號碼', 'NO', 'No.', '序號'], role: 'code' },
   { kws: ['植物名稱', '植名', '中文名稱', '名稱', '植栽名稱', '植物', '中名'], role: 'plantName' },
   { kws: ['學名', '拉丁名', 'Latin', '學名與規格'], role: 'scientificName' },
   { kws: ['規格', '尺寸', '大小', 'SIZE', '胸徑', '樹高', '冠幅'], role: 'spec' },
-  { kws: ['小計', '數量', '株數', '面積', '合計', '總計', 'QTY', '棵數', '數目'], role: 'quantity' },
+  // 「面積」拆成獨立的 'area' 角色（見下方 headerCellRole），不與株數/數量混在一起，
+  // 才能同時保留「面積」跟「株數」兩個欄位分開計算工程估價（見規格「讀取索引表株/M2」）。
+  { kws: ['小計', '數量', '株數', '合計', '總計', 'QTY', '棵數', '數目'], role: 'quantity' },
   { kws: ['單位', 'UNIT', 'unit'], role: 'unit' },
   { kws: ['備註', '說明', '注意', 'REMARK', 'Remark', '備注'], role: 'note' },
   { kws: ['類型', '型態', '喬木類', '灌木類'], role: 'plantType' },
@@ -24,13 +26,58 @@ const COL_ROLE_PATTERNS: Array<{ kws: string[]; role: ColRole }> = [
 // 產生跟正式植栽表重複、但植物名稱其實是原始圖層字串的假資料列。
 const BLOCK_OR_LAYER_HEADER_RE = /圖塊名稱|圖層名稱|BLOCK\s*NAME|LAYER\s*NAME/i
 
+// 「株/M2」種植密度欄位：圖面可能寫成「株/M2」「株/㎡」「株／M2」「株／㎡」等全形/半形
+// 混用寫法，統一正規化（全形斜線→半形、統一大寫）後再比對，避免因為字元形式不同讀不到。
+function normalizeHeaderForDensityMatch(s: string): string {
+  return s.replace(/／/g, '/').replace(/\s+/g, '').toUpperCase()
+}
+const DENSITY_HEADER_KEYWORDS = ['株/M2', '株/㎡'].map(normalizeHeaderForDensityMatch)
+function isDensityHeader(content: string): boolean {
+  const norm = normalizeHeaderForDensityMatch(content)
+  return DENSITY_HEADER_KEYWORDS.some(kw => norm.includes(kw))
+}
+
+// 種植間距（株距／行距）：沒有「株/M2」欄時，可以用種植間距換算密度
+// （density = 1 / (株距 × 行距)，見規格一）。有些表格分兩欄（株距／行距各一欄），
+// 有些只有一欄合併寫法（例如「種植間距 0.4×0.4m」），兩種都要能讀到。
 function headerCellRole(content: string): ColRole {
   const t = content.trim()
   if (BLOCK_OR_LAYER_HEADER_RE.test(t)) return 'unknown'
+  if (isDensityHeader(t)) return 'density'
+  if (t.includes('株距')) return 'spacingX'
+  if (t.includes('行距')) return 'spacingY'
+  if (/種植間距|栽植間距|植栽間距/.test(t)) return 'spacing'
+  if (t.includes('面積')) return 'area'
   for (const { kws, role } of COL_ROLE_PATTERNS) {
     if (kws.some(kw => t.includes(kw))) return role
   }
   return 'unknown'
+}
+
+// 解析單一數值＋單位的間距（例如「0.4m」「40cm」「0.4」）→ 公尺。沒有標單位時，
+// 依常見種植間距量級判斷：數值 >= 3 視為公分（換算成公尺），否則視為已經是公尺
+// ——景觀種植間距絕大多數落在 0.15～2m（或 15～200cm）這個範圍，跟這個代碼庫其他
+// 地方既有的單位推測慣例（inferUnit）一致，不是憑空發明的規則。
+function parseSpacingMeters(raw: string): number | undefined {
+  const m = raw.trim().match(/(\d+(?:\.\d+)?)\s*(m|公尺|cm|公分)?/i)
+  if (!m) return undefined
+  const value = parseFloat(m[1])
+  if (isNaN(value) || value <= 0) return undefined
+  const unit = m[2]?.toLowerCase()
+  if (unit === 'cm' || unit === '公分') return value / 100
+  if (unit === 'm' || unit === '公尺') return value
+  return value >= 3 ? value / 100 : value
+}
+
+// 合併寫法「0.4×0.4m」「0.4*0.4」「40x40cm」→ [株距, 行距]（公尺）
+function parseCombinedSpacing(raw: string): [number, number] | undefined {
+  const m = raw.trim().match(/(\d+(?:\.\d+)?)\s*[×xX*]\s*(\d+(?:\.\d+)?)\s*(m|公尺|cm|公分)?/)
+  if (!m) return undefined
+  const unit = m[3]
+  const x = parseSpacingMeters(`${m[1]}${unit ?? ''}`)
+  const y = parseSpacingMeters(`${m[2]}${unit ?? ''}`)
+  if (x === undefined || y === undefined) return undefined
+  return [x, y]
 }
 
 // 解析「13株」「120m2」「13」→ { qty, unit }
@@ -221,6 +268,10 @@ function parseRows(
     let note: string | undefined
     let quantityNote: string | undefined
     let unitNote: string | undefined
+    let areaM2: number | undefined
+    let plantsPerM2: number | undefined
+    let spacingXM: number | undefined
+    let spacingYM: number | undefined
 
     if (colSchema.length > 0) {
       // ── 表頭已知：按欄位角色分派 ──────────────────────────────────────────
@@ -247,6 +298,31 @@ function parseRows(
             } else {
               quantityNote = `數量待確認（原始值：${t}）`
             }
+            break
+          }
+          case 'area': {
+            const m = t.match(/^(\d+(?:\.\d+)?)/)
+            if (m) areaM2 = parseFloat(m[1])
+            break
+          }
+          case 'density': {
+            const m = t.match(/^(\d+(?:\.\d+)?)/)
+            if (m) plantsPerM2 = parseFloat(m[1])
+            break
+          }
+          case 'spacingX': {
+            const v = parseSpacingMeters(t)
+            if (v !== undefined) spacingXM = v
+            break
+          }
+          case 'spacingY': {
+            const v = parseSpacingMeters(t)
+            if (v !== undefined) spacingYM = v
+            break
+          }
+          case 'spacing': {
+            const combined = parseCombinedSpacing(t)
+            if (combined) { spacingXM = combined[0]; spacingYM = combined[1] }
             break
           }
         }
@@ -317,9 +393,27 @@ function parseRows(
     // 區域範圍，不是真正的植栽資料列（即使 plantName 欄湊巧抓到別的文字也一樣要排除）。
     if (!plantName || NON_PLANT_NAME_RE.test(plantName) || (code && NON_PLANT_NAME_RE.test(code))) continue
 
+    // ── 3a. 種植密度備援：沒有「株/M2」欄，但讀得到株距／行距時，用
+    // density = 1 / (株距 × 行距) 換算——不會覆蓋表格本身已有的「株/M2」欄
+    // （那個仍然優先），只在完全沒有密度資料時才用這個換算（見規格一）。
+    if (plantsPerM2 === undefined && spacingXM !== undefined && spacingYM !== undefined && spacingXM > 0 && spacingYM > 0) {
+      plantsPerM2 = 1 / (spacingXM * spacingYM)
+    }
+
+    // ── 3b. 灌木/地被株數推算：優先使用索引表本身已有的「株數」欄（quantity 角色，
+    // 例如「株數」「棵數」）；只有在完全沒有株數欄、但同時有「面積」與「株/M2」（含
+    // 上面用株距/行距換算出來的）時，才用 Math.ceil(面積 × 株/M2) 推算——CAD 表格
+    // 本身的株數欄可能有進位/精度差異，不能被重算結果覆蓋掉（見規格「讀取索引表株/M2」）。
+    const plantCount = quantity !== undefined
+      ? quantity
+      : (areaM2 !== undefined && plantsPerM2 !== undefined ? Math.ceil(areaM2 * plantsPerM2) : undefined)
+    // entry.quantity 沿用既有語意（供既有比對/顯示邏輯使用，向下相容）：優先原本解析到
+    // 的數量欄，其次是推算出的株數，最後才退回面積本身（表格只有面積、沒有密度時）。
+    const finalQuantity = quantity ?? plantCount ?? areaM2
+
     // ── 4. 單位補全推測 ──────────────────────────────────────────────────────
     if (!unit) {
-      if (quantity !== undefined) {
+      if (finalQuantity !== undefined) {
         const inf = inferUnit(plantName, spec)
         unit = inf.unit
         unitNote = inf.note
@@ -330,14 +424,15 @@ function parseRows(
 
     // ── 5. 信心評分 ──────────────────────────────────────────────────────────
     const confidence: PlantScheduleEntry['confidence'] =
-      (code && quantity !== undefined) ? 'high'
-      : (code || quantity !== undefined) ? 'medium'
+      (code && finalQuantity !== undefined) ? 'high'
+      : (code || finalQuantity !== undefined) ? 'medium'
       : 'low'
 
     entries.push({
       rowIndex: ri, code, plantName, scientificName, plantType,
-      spec, quantity, unit, note, quantityNote, unitNote,
+      spec, quantity: finalQuantity, unit, note, quantityNote, unitNote,
       rawRow, dbMatched: false, confidence,
+      areaM2, plantsPerM2, plantCount, spacingXM, spacingYM,
     })
   }
 
