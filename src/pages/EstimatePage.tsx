@@ -5,12 +5,13 @@
 // 單價資料獨立存放在 estimatePriceStore（localStorage），不寫進植物生態資料庫。
 
 import { useEffect, useMemo, useState } from 'react'
-import { ChevronDown, ChevronRight, Search, X, Settings2, AlertTriangle } from 'lucide-react'
+import { ChevronDown, ChevronRight, Search, X, Settings2, AlertTriangle, FileOutput } from 'lucide-react'
 import type { ZoneStatisticsResult, PlantScheduleEntry } from '@/types/dxf'
 import type { EstimateCategory, EstimateItem, PlantPrice, PriceSourceType } from '@/types/estimate'
 import { ESTIMATE_CATEGORY_LABEL, PRICING_UNIT_LABEL, PRICE_SOURCE_TYPE_LABEL } from '@/types/estimate'
 import { buildEstimateItemsFromDxf, computeCaseSummary, computeZoneSummary } from '@/utils/estimateAdapter'
 import { loadPlantPrices, savePlantPrices, upsertPlantPrice, type PriceBasis } from '@/lib/estimatePriceStore'
+import { exportEstimatePdf } from '@/utils/exportEstimatePdf'
 
 function formatNT(n: number): string {
   return `NT$ ${Math.round(n).toLocaleString('en-US')}`
@@ -23,6 +24,14 @@ function loadZoneStatistics(): ZoneStatisticsResult[] {
     return JSON.parse(raw) as ZoneStatisticsResult[]
   } catch {
     return []
+  }
+}
+
+function loadDxfFileName(): string | undefined {
+  try {
+    return sessionStorage.getItem('dxf-file-name') || undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -74,6 +83,10 @@ export default function EstimatePage({ zoneReviewsVersion = 0 }: { zoneReviewsVe
 
   const items = useMemo(() => buildEstimateItemsFromDxf(zoneStatistics, prices, scheduleEntries, priceBasis), [zoneStatistics, prices, scheduleEntries, priceBasis])
   const caseSummary = useMemo(() => computeCaseSummary(items), [items])
+
+  const handleExportPdf = () => {
+    exportEstimatePdf(caseSummary.zones, caseSummary, { projectName: loadDxfFileName() })
+  }
 
   useEffect(() => {
     // 分區資料一到，預設全部展開，讓使用者一次看到全案概算
@@ -177,10 +190,16 @@ export default function EstimatePage({ zoneReviewsVersion = 0 }: { zoneReviewsVe
             <div>
               <div className="flex items-center justify-between mb-3">
                 <h2 className="text-base font-bold text-stone-800">分區概算</h2>
-                <button onClick={() => setShowPriceDb(true)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-stone-200 text-stone-700 text-sm font-medium hover:bg-stone-50 transition-colors">
-                  <Settings2 size={14} />單價設定
-                </button>
+                <div className="flex items-center gap-2">
+                  <button onClick={handleExportPdf}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#1a4731] text-white text-sm font-medium hover:bg-[#2d6a4f] transition-colors">
+                    <FileOutput size={14} />匯出 PDF
+                  </button>
+                  <button onClick={() => setShowPriceDb(true)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-stone-200 text-stone-700 text-sm font-medium hover:bg-stone-50 transition-colors">
+                    <Settings2 size={14} />單價設定
+                  </button>
+                </div>
               </div>
 
               <div className="flex items-center gap-1.5 flex-wrap mb-4">

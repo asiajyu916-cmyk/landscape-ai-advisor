@@ -2434,6 +2434,14 @@ export default function DxfReviewPage({
     } catch (err) { console.warn('plantSchedule 橋接寫入 sessionStorage 失敗（可能超過容量）', err) }
   }, [plantSchedule])
 
+  // 把目前載入的 DXF 檔名橋接到 sessionStorage，供「工程估價」PDF 報告顯示圖面來源用。
+  useEffect(() => {
+    try {
+      if (fileName) sessionStorage.setItem('dxf-file-name', fileName)
+      else sessionStorage.removeItem('dxf-file-name')
+    } catch { /* 略過：僅影響 PDF 顯示的圖面名稱，非必要資料 */ }
+  }, [fileName])
+
   // ── 常駐掛載後用 CSS 隱藏取代 unmount，捲動位置不會自動保留，離開/返回 dxf 分頁
   // 時手動記住/還原（display:none 收合後高度歸零，還原要等瀏覽器重排完才做，
   // 不能在同一個 tick 內還原，否則會被還沒展開的高度 clamp 掉）──────────────

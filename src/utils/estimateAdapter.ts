@@ -228,8 +228,12 @@ function pricingQuantity(item: EstimateItem): number {
 }
 
 /** 單一項目對材料費／施工費的實際貢獻——「待設定種植密度」「規格不明確」的項目
- *  不可用面積/原始數量直接乘單價，回傳 0（不計入任何金額），避免灌入錯誤的放大數字。 */
-function itemMaterialCost(item: EstimateItem): number {
+ *  不可用面積/原始數量直接乘單價，回傳 0（不計入任何金額），避免灌入錯誤的放大數字。
+ *  匯出（PDF 匯出等）需要跟畫面顯示的材料費 100% 一致時，直接呼叫這個函式，
+ *  不要另外用 item.subtotal 重算——item.subtotal 需要材料/施工單價都填齊才會有值
+ *  （見 buildItem 的「已計價」定義），但「植栽材料估價表」只看材料單價，兩者標準不同，
+ *  混用會導致 PDF 判斷成「全部未取得單價」而畫面卻顯示得出材料金額的落差。 */
+export function itemMaterialCost(item: EstimateItem): number {
   if (item.pricingStatus === 'missing_density' || item.pricingStatus === 'ambiguous_spec') return 0
   return (item.materialUnitPrice ?? 0) * pricingQuantity(item)
 }
