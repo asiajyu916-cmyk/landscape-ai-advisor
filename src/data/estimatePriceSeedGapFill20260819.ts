@@ -57,7 +57,8 @@ export const GAP_FILL_20260819_PRICE_SEED: PlantPrice[] = ROWS.map((r, i) => {
     category: r.category,
     specification: r.spec,
     pricingUnit: 'plant',
-    materialPrice: r.materialPrice,
+    // 材料參考價，不是連工帶料單價——只留在 legacyMaterialPrice 供核對用。
+    legacyMaterialPrice: r.materialPrice,
     ...meta,
     note: r.note,
     candidateNote: r.needsReview ? `規格待覆核：${r.note}` : undefined,

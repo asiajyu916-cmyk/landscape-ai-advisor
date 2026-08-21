@@ -72,7 +72,9 @@ export const GOV112_FULL_PRICE_SEED: PlantPrice[] = ROWS.map((r, i) => ({
   category: r.category,
   specification: r.spec || undefined,
   pricingUnit: r.pricingUnit,
-  materialPrice: r.materialPrice,
+  // 這是材料參考價，不是連工帶料單價——只留在 legacyMaterialPrice 供核對用
+  // （見 types/estimate.ts 的價格模型說明），不能直接當成正式計價欄位使用。
+  legacyMaterialPrice: r.materialPrice,
   sourceType: 'gov',
   sourceYear: YEAR,
   priceSource: PRICE_SOURCE,

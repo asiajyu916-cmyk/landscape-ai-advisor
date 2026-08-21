@@ -24,7 +24,7 @@ interface RawRow {
 
 const ROWS: RawRow[] = [
   { plantName: '土肉桂', category: 'tree', spec: '工程會一般喬木工項', materialPrice: 5000, sourceLabel: '110工程會', status: '正式參考', note: '110工程會全區平均', sourceUrl: 'https://www.pcc.gov.tw/' },
-  { plantName: '小葉桑', category: 'tree', spec: '苗木參考', materialPrice: 210, sourceLabel: '市場近似', status: '暫估', note: '以桑椹苗公開價格作近似，正式估價前覆核', sourceUrl: 'https://shop.knownyou.com/categories/%E6%9E%9C%E6%A8%B9%E8%8B%97' },
+  { plantName: '小葉桑', category: 'shrub', spec: '苗木參考', materialPrice: 210, sourceLabel: '市場近似', status: '暫估', note: '以桑椹苗公開價格作近似，正式估價前覆核（小葉桑實為大灌木，非喬木）', sourceUrl: 'https://shop.knownyou.com/categories/%E6%9E%9C%E6%A8%B9%E8%8B%97' },
   { plantName: '台灣欒樹', category: 'tree', spec: '工程會一般喬木工項', materialPrice: 4225, sourceLabel: '110工程會', status: '正式參考', note: '110工程會全區平均', sourceUrl: 'https://www.pcc.gov.tw/' },
   { plantName: '玉蘭花', category: 'tree', spec: '小苗/盆苗參考', materialPrice: 200, sourceLabel: '市場參考', status: '暫估', note: '玉蘭類公開苗價簡報暫用', sourceUrl: 'https://www.twr.com.tw/' },
   { plantName: '白玉蘭', category: 'tree', spec: '工程會一般喬木工項', materialPrice: 6285, sourceLabel: '110工程會', status: '正式參考', note: '110工程會全區平均', sourceUrl: 'https://www.pcc.gov.tw/' },
@@ -118,7 +118,9 @@ export const GAP_FILL_79_20260819_PRICE_SEED: PlantPrice[] = ROWS.map((r, i) => 
     category: r.category,
     specification: r.spec,
     pricingUnit: 'plant' as const,
-    materialPrice: r.materialPrice,
+    // 這批是「材料參考價」，不是連工帶料單價——不能直接當成正式計價用的 unitPrice，
+    // 只留在 legacyMaterialPrice 供核對用（見 types/estimate.ts 的價格模型說明）。
+    legacyMaterialPrice: r.materialPrice,
     ...meta,
     note: `${r.note}（狀態：${r.status}）`,
     sourceUrl: r.sourceUrl,

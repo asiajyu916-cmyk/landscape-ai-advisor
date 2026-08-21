@@ -3,15 +3,23 @@
 // sessionStorage 的 'dxf-zone-statistics'），透過 estimateAdapter 轉換成估價
 // 明細，不重新解析 DXF、不修改既有分區審查/植物資料庫邏輯。
 // 單價資料獨立存放在 estimatePriceStore（localStorage），不寫進植物生態資料庫。
+//
+// 價格模型：統一用「連工帶料單價」計價，不再拆材料/施工兩欄（見 types/estimate.ts）。
 
 import { useEffect, useMemo, useState } from 'react'
-import { ChevronDown, ChevronRight, Search, X, Settings2, AlertTriangle, FileOutput } from 'lucide-react'
+import { ChevronDown, ChevronRight, Search, X, Settings2, AlertTriangle, FileOutput, FileDown, FileUp } from 'lucide-react'
 import type { ZoneStatisticsResult, PlantScheduleEntry } from '@/types/dxf'
 import type { EstimateCategory, EstimateItem, PlantPrice, PriceSourceType } from '@/types/estimate'
 import { ESTIMATE_CATEGORY_LABEL, PRICING_UNIT_LABEL, PRICE_SOURCE_TYPE_LABEL } from '@/types/estimate'
 import { buildEstimateItemsFromDxf, computeCaseSummary, computeZoneSummary } from '@/utils/estimateAdapter'
 import { loadPlantPrices, savePlantPrices, upsertPlantPrice, type PriceBasis } from '@/lib/estimatePriceStore'
 import { exportEstimatePdf } from '@/utils/exportEstimatePdf'
+import { loadPlantsWithCsvMerge } from '@/data/plantStore'
+import { normalizeForCompare } from '@/utils/plantNameMatch'
+import {
+  buildPriceRequestRows, downloadPriceRequestCsv, parsePriceRequestCsv, applyPriceRequestImport,
+  type PriceImportResult,
+} from '@/utils/plantPriceRequestSheet'
 
 function formatNT(n: number): string {
   return `NT$ ${Math.round(n).toLocaleString('en-US')}`
@@ -101,10 +109,10 @@ export default function EstimatePage({ zoneReviewsVersion = 0 }: { zoneReviewsVe
     })
   }
 
-  // 編輯單一項目的材料/施工單價：優先精準更新這個項目目前實際採用的那一筆 PlantPrice
+  // 編輯單一項目的連工帶料單價：優先精準更新這個項目目前實際採用的那一筆 PlantPrice
   // （item.priceId）；沒有採用中的價格時（缺少單價/規格不明確）才新增一筆「自訂單價」
   // （sourceType:'manual'），不會動到植物生態資料庫，也不會動到工程會/市場價原始資料。
-  const updateItemPrice = (item: EstimateItem, field: 'material' | 'labor', value: number | undefined) => {
+  const updateItemPrice = (item: EstimateItem, value: number | undefined) => {
     setPrices(prev => {
       const existing = item.priceId ? prev.find(p => p.id === item.priceId) : undefined
       const base: PlantPrice = existing ?? {
@@ -115,14 +123,8 @@ export default function EstimatePage({ zoneReviewsVersion = 0 }: { zoneReviewsVe
         pricingUnit: item.unit === '株' ? 'plant' : 'm2',
         sourceType: 'manual',
         priceSource: '人工設定',
-        materialPrice: item.materialUnitPrice,
-        laborPrice: item.laborUnitPrice,
       }
-      const updated: PlantPrice = {
-        ...base,
-        materialPrice: field === 'material' ? value : base.materialPrice,
-        laborPrice: field === 'labor' ? value : base.laborPrice,
-      }
+      const updated: PlantPrice = { ...base, unitPrice: value }
       const next = upsertPlantPrice(prev, updated)
       savePlantPrices(next)
       return next
@@ -130,7 +132,7 @@ export default function EstimatePage({ zoneReviewsVersion = 0 }: { zoneReviewsVe
   }
 
   // 「規格不明確」項目：使用者從候選價格中手動挑一筆採用——寫成一筆新的「自訂單價」，
-  // 規格沿用圖面規格（讓它之後變成規格完全相符），材料/施工單價複製自挑選的候選，
+  // 規格沿用圖面規格（讓它之後變成規格完全相符），連工帶料單價複製自挑選的候選，
   // 並保留候選來源說明，不會偷偷把兩個不同規格當成同一筆。
   const resolveAmbiguous = (item: EstimateItem, candidate: PlantPrice) => {
     setPrices(prev => {
@@ -142,8 +144,7 @@ export default function EstimatePage({ zoneReviewsVersion = 0 }: { zoneReviewsVe
         pricingUnit: candidate.pricingUnit,
         sourceType: 'manual',
         priceSource: `人工指定（採用 ${candidate.priceSource ?? candidate.sourceType} 的「${candidate.specification ?? '未標示規格'}」）`,
-        materialPrice: candidate.materialPrice,
-        laborPrice: candidate.laborPrice,
+        unitPrice: candidate.unitPrice,
         note: `原候選規格：${candidate.specification ?? '未標示規格'}；使用者於「規格不明確」清單人工選定採用。`,
       }
       const next = upsertPlantPrice(prev, manual)
@@ -152,15 +153,13 @@ export default function EstimatePage({ zoneReviewsVersion = 0 }: { zoneReviewsVe
     })
   }
 
-  const laborFeeAvailable = false // 尚未有施工單價資料來源，第一版先顯示「尚未設定」
-
   return (
     <div className="min-h-screen bg-[#f7f6f3]">
       <div className="max-w-6xl mx-auto px-4 md:px-6 py-6 space-y-6">
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div>
             <h1 className="text-xl md:text-2xl font-bold text-stone-800">景觀工程概算</h1>
-            <p className="text-sm text-stone-500 mt-1">依據 DXF 圖面解析之植栽數量與面積，自動產生初步工程概算。</p>
+            <p className="text-sm text-stone-500 mt-1">依據 DXF 圖面解析之植栽數量與面積，套用連工帶料單價自動產生初步工程概算。</p>
           </div>
           <div className="flex items-center gap-2">
             <span className="text-xs text-stone-400 font-medium">價格基準</span>
@@ -185,7 +184,7 @@ export default function EstimatePage({ zoneReviewsVersion = 0 }: { zoneReviewsVe
           </div>
         ) : (
           <>
-            <SummaryCards summary={caseSummary} laborAvailable={laborFeeAvailable} onOpenPriceDb={() => setShowPriceDb(true)} />
+            <SummaryCards summary={caseSummary} onOpenPriceDb={() => setShowPriceDb(true)} />
 
             <div>
               <div className="flex items-center justify-between mb-3">
@@ -247,19 +246,16 @@ export default function EstimatePage({ zoneReviewsVersion = 0 }: { zoneReviewsVe
 
 // ── 統計卡片 ────────────────────────────────────────────────────────────────
 
-function SummaryCards({ summary, laborAvailable, onOpenPriceDb }: {
+function SummaryCards({ summary, onOpenPriceDb }: {
   summary: ReturnType<typeof computeCaseSummary>
-  laborAvailable: boolean
   onOpenPriceDb: () => void
 }) {
-  const soilFee = undefined // 第一版保留欄位，尚未有資料來源
   return (
-    <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-      <StatCard label="預估總工程費" value={formatNT(summary.total)} big highlight />
-      <StatCard label="植栽材料費" value={formatNT(summary.materialTotal)}
-        sub={`喬木 ${formatNT(summary.categoryMaterialTotal.tree)}・灌木 ${formatNT(summary.categoryMaterialTotal.shrub)}`} />
-      <StatCard label="種植施工費" value={laborAvailable ? formatNT(summary.laborTotal) : '尚未設定'} muted={!laborAvailable} />
-      <StatCard label="土壤／資材費" value={soilFee === undefined ? '尚未設定' : formatNT(soilFee)} muted />
+    <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+      <StatCard label="預估總工程費（連工帶料）" value={formatNT(summary.total)} big highlight />
+      <StatCard label="分類金額"
+        sub={`喬木 ${formatNT(summary.categoryTotal.tree)}・灌木 ${formatNT(summary.categoryTotal.shrub)}・地被 ${formatNT(summary.categoryTotal.groundcover)}・草皮 ${formatNT(summary.categoryTotal.grass)}`}
+        value="" small />
       <button onClick={onOpenPriceDb} className="text-left">
         <StatCard label="已計價比例" value={`${summary.pricedCount} / ${summary.totalCount} 項`}
           accent={summary.pricedCount < summary.totalCount ? 'amber' : 'green'} />
@@ -268,19 +264,21 @@ function SummaryCards({ summary, laborAvailable, onOpenPriceDb }: {
   )
 }
 
-function StatCard({ label, value, sub, big, highlight, muted, accent }: {
+function StatCard({ label, value, sub, big, highlight, muted, accent, small }: {
   label: string; value: string; sub?: string; big?: boolean; highlight?: boolean; muted?: boolean
-  accent?: 'amber' | 'green'
+  accent?: 'amber' | 'green'; small?: boolean
 }) {
   return (
     <div className={`rounded-2xl border p-4 h-full ${highlight ? 'bg-[#1a4731] border-[#1a4731]' : 'bg-white border-stone-200'}`}>
       <div className={`text-xs font-medium mb-1.5 ${highlight ? 'text-green-200' : 'text-stone-500'}`}>{label}</div>
-      <div className={`font-bold leading-tight ${big ? 'text-2xl md:text-3xl' : 'text-lg'} ${
-        highlight ? 'text-white' : muted ? 'text-stone-400' : accent === 'amber' ? 'text-amber-600' : accent === 'green' ? 'text-emerald-600' : 'text-stone-800'
-      }`}>
-        {value}
-      </div>
-      {sub && <div className={`text-[11px] mt-1.5 ${highlight ? 'text-green-200/80' : 'text-stone-400'}`}>{sub}</div>}
+      {value && (
+        <div className={`font-bold leading-tight ${big ? 'text-2xl md:text-3xl' : 'text-lg'} ${
+          highlight ? 'text-white' : muted ? 'text-stone-400' : accent === 'amber' ? 'text-amber-600' : accent === 'green' ? 'text-emerald-600' : 'text-stone-800'
+        }`}>
+          {value}
+        </div>
+      )}
+      {sub && <div className={`leading-relaxed ${small ? 'text-xs mt-1 text-stone-600' : 'text-[11px] mt-1.5'} ${highlight ? 'text-green-200/80' : 'text-stone-400'}`}>{sub}</div>}
     </div>
   )
 }
@@ -293,7 +291,7 @@ function ZoneEstimateCard({ zone, summary, expanded, onToggle, filter, onEditPri
   expanded: boolean
   onToggle: () => void
   filter: CategoryFilter
-  onEditPrice: (item: EstimateItem, field: 'material' | 'labor', value: number | undefined) => void
+  onEditPrice: (item: EstimateItem, value: number | undefined) => void
   onResolveAmbiguous: (item: EstimateItem, candidate: PlantPrice) => void
 }) {
   const filteredItems = summary.items.filter(i => {
@@ -340,7 +338,7 @@ const SOURCE_TYPE_BADGE_CLASS: Record<PriceSourceType, string> = {
 
 function BoqTable({ items, onEditPrice, onResolveAmbiguous }: {
   items: EstimateItem[]
-  onEditPrice: (item: EstimateItem, field: 'material' | 'labor', value: number | undefined) => void
+  onEditPrice: (item: EstimateItem, value: number | undefined) => void
   onResolveAmbiguous: (item: EstimateItem, candidate: PlantPrice) => void
 }) {
   if (items.length === 0) {
@@ -348,7 +346,7 @@ function BoqTable({ items, onEditPrice, onResolveAmbiguous }: {
   }
   return (
     <div className="overflow-x-auto -mx-1">
-      <table className="w-full text-sm border-collapse min-w-[720px]">
+      <table className="w-full text-sm border-collapse min-w-[680px]">
         <thead>
           <tr className="text-left text-stone-400 text-xs">
             <th className="font-medium px-2 py-2">項目</th>
@@ -362,9 +360,7 @@ function BoqTable({ items, onEditPrice, onResolveAmbiguous }: {
                 </span>
               </span>
             </th>
-            <th className="font-medium px-2 py-2">單位</th>
-            <th className="font-medium px-2 py-2 text-right">材料單價</th>
-            <th className="font-medium px-2 py-2 text-right">施工單價</th>
+            <th className="font-medium px-2 py-2 text-right">連工帶料單價</th>
             <th className="font-medium px-2 py-2 text-right">小計</th>
             <th className="font-medium px-2 py-2">狀態</th>
           </tr>
@@ -383,7 +379,7 @@ function BoqTable({ items, onEditPrice, onResolveAmbiguous }: {
                   </span>
                 )}
                 {item.isProvisional && (
-                  <span title="這筆單價目前是暫估（尚未找到精準同規格公開價），可正常計價，後續建議替換成正式價格"
+                  <span title="這筆單價目前是暫估，可正常計價，後續建議替換成正式的連工帶料報價"
                     className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-semibold border bg-yellow-50 text-yellow-700 border-yellow-300 cursor-help">
                     暫估
                   </span>
@@ -406,23 +402,16 @@ function BoqTable({ items, onEditPrice, onResolveAmbiguous }: {
                 )}
               </td>
               {item.plantCount !== undefined ? (
-                <>
-                  <td className="px-2 py-2.5 text-right text-stone-700 whitespace-nowrap">
-                    <div>{item.plantCount.toLocaleString('en-US')}</div>
-                    <div className="text-[10px] text-stone-400 font-normal" title="面積來源：DXF HATCH／索引表；密度來源：DXF 植栽索引表「株/M2」">
-                      面積 {item.areaM2?.toFixed(2)}㎡ × 密度 {item.plantsPerM2?.toFixed(2)}株/㎡
-                    </div>
-                  </td>
-                  <td className="px-2 py-2.5 text-stone-500 whitespace-nowrap">株</td>
-                </>
+                <td className="px-2 py-2.5 text-right text-stone-700 whitespace-nowrap">
+                  <div>{item.plantCount.toLocaleString('en-US')} 株</div>
+                  <div className="text-[10px] text-stone-400 font-normal" title="面積來源：DXF HATCH／索引表；密度來源：DXF 植栽索引表「株/M2」">
+                    面積 {item.areaM2?.toFixed(2)}㎡ × 密度 {item.plantsPerM2?.toFixed(2)}株/㎡
+                  </div>
+                </td>
               ) : (
-                <>
-                  <td className="px-2 py-2.5 text-right text-stone-700 whitespace-nowrap">{item.quantity.toFixed(item.unit === '㎡' ? 1 : 0)}</td>
-                  <td className="px-2 py-2.5 text-stone-500 whitespace-nowrap">{item.unit}</td>
-                </>
+                <td className="px-2 py-2.5 text-right text-stone-700 whitespace-nowrap">{item.quantity.toFixed(item.unit === '㎡' ? 1 : 0)} {item.unit}</td>
               )}
-              <td className="px-2 py-2.5 text-right"><PriceInput value={item.materialUnitPrice} onChange={v => onEditPrice(item, 'material', v)} /></td>
-              <td className="px-2 py-2.5 text-right"><PriceInput value={item.laborUnitPrice} onChange={v => onEditPrice(item, 'labor', v)} /></td>
+              <td className="px-2 py-2.5 text-right"><PriceInput value={item.unitPrice} onChange={v => onEditPrice(item, v)} /></td>
               <td className="px-2 py-2.5 text-right font-semibold text-stone-800 whitespace-nowrap">
                 {item.subtotal !== undefined ? formatNT(item.subtotal) : '--'}
               </td>
@@ -431,19 +420,19 @@ function BoqTable({ items, onEditPrice, onResolveAmbiguous }: {
                   <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-600 text-[11px] font-semibold border border-emerald-200">已計價</span>
                 )}
                 {item.pricingStatus === 'missing_price' && (
-                  <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-600 text-[11px] font-semibold border border-amber-200">缺少單價</span>
+                  <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-600 text-[11px] font-semibold border border-amber-200">尚未取得單價</span>
                 )}
                 {item.pricingStatus === 'missing_density' && (
-                  <span title="此項目的單價是「元/株」計價，但 DXF 只解析出 HATCH 面積，需要「每㎡種植株數」才能換算成金額"
+                  <span title="此項目是「元/株」計價，但 DXF 只解析出 HATCH 面積，需要「每㎡種植株數」才能換算成金額"
                     className="px-2 py-0.5 rounded-full bg-purple-50 text-purple-600 text-[11px] font-semibold border border-purple-200 cursor-help">
                     待設定種植密度
                   </span>
                 )}
                 {item.pricingStatus === 'ambiguous_spec' && item.ambiguousCandidates && (
                   <div className="space-y-1">
-                    <span title="找到多筆不同規格的市場/工程會價格，但沒有一筆跟圖面規格相符，無法自動判斷該用哪一筆，禁止跨規格計價"
+                    <span title="找到多筆不同規格的候選價格，但沒有一筆跟圖面規格相符，無法自動判斷該用哪一筆，禁止跨規格計價"
                       className="inline-block px-2 py-0.5 rounded-full bg-red-50 text-red-600 text-[11px] font-semibold border border-red-200 cursor-help">
-                      目前僅找到不同規格市場價格
+                      目前僅找到不同規格價格
                     </span>
                     <select
                       defaultValue=""
@@ -455,7 +444,7 @@ function BoqTable({ items, onEditPrice, onResolveAmbiguous }: {
                       <option value="" disabled>選擇規格採用…</option>
                       {item.ambiguousCandidates.map(c => (
                         <option key={c.id} value={c.id}>
-                          {(c.specification ?? '未標示規格')}・{PRICE_SOURCE_TYPE_LABEL[c.sourceType]}・NT${c.materialPrice ?? '?'}
+                          {(c.specification ?? '未標示規格')}・{PRICE_SOURCE_TYPE_LABEL[c.sourceType]}・{c.unitPrice !== undefined ? `NT$${c.unitPrice}` : '尚未取得單價'}
                         </option>
                       ))}
                     </select>
@@ -478,10 +467,10 @@ function PriceInput({ value, onChange }: { value?: number; onChange: (v: number 
       <input
         type="number"
         value={text}
-        placeholder="尚未設定"
+        placeholder="尚未取得單價"
         onChange={e => setText(e.target.value)}
         onBlur={() => onChange(text.trim() === '' ? undefined : Number(text))}
-        className="w-20 px-1.5 py-1 text-right border border-stone-200 rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-[#1a4731] placeholder:text-stone-300"
+        className="w-24 px-1.5 py-1 text-right border border-stone-200 rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-[#1a4731] placeholder:text-stone-300"
       />
       <span className="text-stone-400 text-xs">元</span>
     </div>
@@ -490,12 +479,9 @@ function PriceInput({ value, onChange }: { value?: number; onChange: (v: number 
 
 function ZoneTotalsFooter({ summary }: { summary: ReturnType<typeof computeZoneSummary> }) {
   return (
-    <div className="mt-4 pt-4 border-t border-stone-100 flex flex-col items-end gap-1 text-sm">
-      <div className="font-bold text-stone-700 mb-1">本區概算</div>
-      <div className="text-stone-500">材料費：{formatNT(summary.materialTotal)}</div>
-      <div className="text-stone-500">施工費：{formatNT(summary.laborTotal)}</div>
-      <div className="text-stone-500">其他：{formatNT(summary.otherTotal)}</div>
-      <div className="font-bold text-[#1a4731] text-base mt-1">本區合計：{formatNT(summary.total)}</div>
+    <div className="mt-4 pt-4 border-t border-stone-100 flex items-center justify-end gap-3 text-sm">
+      <span className="font-bold text-stone-700">本區合計（連工帶料）：</span>
+      <span className="font-bold text-[#1a4731] text-base">{formatNT(summary.total)}</span>
     </div>
   )
 }
@@ -505,13 +491,13 @@ function CaseTotalCard({ summary }: { summary: ReturnType<typeof computeCaseSumm
     <div className="bg-white rounded-2xl border-2 border-[#1a4731]/20 p-6">
       <h2 className="text-base font-bold text-stone-800 mb-4">全案景觀工程概算</h2>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <TotalRow label="植栽材料費" value={formatNT(summary.materialTotal)} />
-        <TotalRow label="施工費" value={formatNT(summary.laborTotal)} />
-        <TotalRow label="土壤／資材" value="尚未設定" muted />
-        <TotalRow label="其他" value={formatNT(summary.otherTotal)} />
+        <TotalRow label="喬木" value={formatNT(summary.categoryTotal.tree)} />
+        <TotalRow label="灌木" value={formatNT(summary.categoryTotal.shrub)} />
+        <TotalRow label="地被" value={formatNT(summary.categoryTotal.groundcover)} />
+        <TotalRow label="草皮" value={formatNT(summary.categoryTotal.grass)} />
       </div>
       <div className="mt-5 pt-5 border-t border-stone-100 flex items-center justify-between">
-        <span className="text-stone-600 font-medium">預估總工程費</span>
+        <span className="text-stone-600 font-medium">預估總工程費（連工帶料）</span>
         <span className="text-2xl md:text-3xl font-bold text-[#1a4731]">{formatNT(summary.total)}</span>
       </div>
     </div>
@@ -535,6 +521,9 @@ function PriceDatabaseModal({ prices, onChange, onClose }: {
   onClose: () => void
 }) {
   const [search, setSearch] = useState('')
+  const [exporting, setExporting] = useState(false)
+  const [importResult, setImportResult] = useState<PriceImportResult | null>(null)
+  const [importError, setImportError] = useState<string | null>(null)
   const filtered = prices.filter(p => p.plantName.includes(search.trim()))
 
   const updateRow = (id: string, patch: Partial<PlantPrice>) => {
@@ -553,24 +542,90 @@ function PriceDatabaseModal({ prices, onChange, onClose }: {
   }
   const removeRow = (id: string) => onChange(prices.filter(p => p.id !== id))
 
+  const handleExportRequestSheet = async () => {
+    setExporting(true)
+    try {
+      const res = await loadPlantsWithCsvMerge()
+      const rows = buildPriceRequestRows(res.plants, prices)
+      downloadPriceRequestCsv(rows)
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  const handleImportFile = async (file: File) => {
+    setImportError(null)
+    setImportResult(null)
+    try {
+      const text = await file.text()
+      const importedRows = parsePriceRequestCsv(text)
+      if (importedRows.length === 0) {
+        setImportError('讀不到任何資料列，請確認 CSV 欄位標題（植物名稱／連工帶料單價）有沒有被改掉。')
+        return
+      }
+      const res = await loadPlantsWithCsvMerge()
+      const knownPlantNames = new Set(res.plants.map(p => normalizeForCompare(p.name)))
+      const result = applyPriceRequestImport(prices, importedRows, knownPlantNames)
+      onChange(result.updatedPrices)
+      savePlantPrices(result.updatedPrices)
+      setImportResult(result)
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : '匯入失敗，請確認檔案格式。')
+    }
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="bg-white rounded-2xl shadow-xl w-full max-w-4xl max-h-[85vh] flex flex-col overflow-hidden">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-5xl max-h-[85vh] flex flex-col overflow-hidden">
         <div className="flex items-center justify-between px-6 py-4 border-b border-stone-100">
           <div>
-            <h3 className="font-bold text-stone-800">植栽單價資料庫</h3>
-            <p className="text-xs text-stone-400 mt-0.5">獨立於植物生態資料庫，只用來計算工程估價</p>
+            <h3 className="font-bold text-stone-800">植栽連工帶料單價資料庫</h3>
+            <p className="text-xs text-stone-400 mt-0.5">獨立於植物生態資料庫，只用來計算工程估價；正式計價只看「連工帶料單價」</p>
           </div>
           <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-stone-100 text-stone-400"><X size={18} /></button>
         </div>
 
-        <div className="px-6 py-3 border-b border-stone-100">
+        <div className="px-6 py-3 border-b border-stone-100 flex items-center justify-between flex-wrap gap-2">
           <div className="relative max-w-xs">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-300" />
             <input value={search} onChange={e => setSearch(e.target.value)} placeholder="搜尋植物名稱"
               className="w-full pl-8 pr-3 py-2 rounded-lg border border-stone-200 text-sm focus:outline-none focus:ring-1 focus:ring-[#1a4731]" />
           </div>
+          <div className="flex items-center gap-2">
+            <button onClick={handleExportRequestSheet} disabled={exporting}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white border border-stone-200 text-stone-700 text-xs font-semibold hover:bg-stone-50 transition-colors disabled:opacity-60">
+              <FileDown size={14} />{exporting ? '匯出中…' : '匯出價格請款單 CSV'}
+            </button>
+            <label className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white border border-stone-200 text-stone-700 text-xs font-semibold hover:bg-stone-50 transition-colors cursor-pointer">
+              <FileUp size={14} />匯入填好的連工帶料 CSV
+              <input type="file" accept=".csv" className="hidden" onChange={e => {
+                const file = e.target.files?.[0]
+                if (file) handleImportFile(file)
+                e.target.value = ''
+              }} />
+            </label>
+          </div>
         </div>
+
+        {(importResult || importError) && (
+          <div className="px-6 py-3 border-b border-stone-100 bg-stone-50 text-xs space-y-1">
+            {importError && <div className="text-red-600 font-semibold">{importError}</div>}
+            {importResult && (
+              <>
+                <div className="text-emerald-700 font-semibold">
+                  匯入完成：成功套用 {importResult.matchedCount} 筆連工帶料單價
+                  {importResult.skippedEmptyCount > 0 && `，略過 ${importResult.skippedEmptyCount} 筆單價欄位空白`}
+                  {importResult.unmatched.length > 0 && `，${importResult.unmatched.length} 筆待確認（植物名稱不在目前資料庫）`}
+                </div>
+                {importResult.unmatched.length > 0 && (
+                  <div className="text-amber-700">
+                    待確認植物名稱：{importResult.unmatched.map(r => r.plantName).join('、')}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
 
         <div className="flex-1 overflow-y-auto px-6 py-3">
           <table className="w-full text-sm border-collapse min-w-[720px]">
@@ -580,8 +635,7 @@ function PriceDatabaseModal({ prices, onChange, onClose }: {
                 <th className="font-medium px-2 py-2">分類</th>
                 <th className="font-medium px-2 py-2">規格</th>
                 <th className="font-medium px-2 py-2">計價單位</th>
-                <th className="font-medium px-2 py-2 text-right">材料單價</th>
-                <th className="font-medium px-2 py-2 text-right">施工單價</th>
+                <th className="font-medium px-2 py-2 text-right">連工帶料單價</th>
                 <th className="font-medium px-2 py-2">來源</th>
                 <th className="font-medium px-2 py-2">更新日期</th>
                 <th className="font-medium px-2 py-2" />
@@ -615,19 +669,17 @@ function PriceDatabaseModal({ prices, onChange, onClose }: {
                     </select>
                   </td>
                   <td className="px-2 py-2 text-right">
-                    <input type="number" value={p.materialPrice ?? ''} placeholder="尚未設定"
-                      onChange={e => updateRow(p.id, { materialPrice: e.target.value === '' ? undefined : Number(e.target.value) })}
-                      className="w-20 px-2 py-1 border border-stone-200 rounded-md text-sm text-right placeholder:text-stone-300" />
-                  </td>
-                  <td className="px-2 py-2 text-right">
-                    <input type="number" value={p.laborPrice ?? ''} placeholder="尚未設定"
-                      onChange={e => updateRow(p.id, { laborPrice: e.target.value === '' ? undefined : Number(e.target.value) })}
-                      className="w-20 px-2 py-1 border border-stone-200 rounded-md text-sm text-right placeholder:text-stone-300" />
+                    <input type="number" value={p.unitPrice ?? ''} placeholder="尚未取得單價"
+                      onChange={e => updateRow(p.id, { unitPrice: e.target.value === '' ? undefined : Number(e.target.value) })}
+                      className="w-24 px-2 py-1 border border-stone-200 rounded-md text-sm text-right placeholder:text-stone-300" />
                   </td>
                   <td className="px-2 py-2 whitespace-nowrap">
                     <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border ${SOURCE_TYPE_BADGE_CLASS[p.sourceType]}`} title={p.priceSource}>
                       {PRICE_SOURCE_TYPE_LABEL[p.sourceType]}
                     </span>
+                    {p.quotedByCompany && (
+                      <span className="ml-1 px-1.5 py-0.5 rounded text-[10px] font-semibold border bg-emerald-50 text-emerald-700 border-emerald-200">景觀公司報價</span>
+                    )}
                   </td>
                   <td className="px-2 py-2 text-xs text-stone-400 whitespace-nowrap">
                     {p.updatedAt ? new Date(p.updatedAt).toLocaleDateString('zh-TW') : '—'}
@@ -638,7 +690,7 @@ function PriceDatabaseModal({ prices, onChange, onClose }: {
                 </tr>
               ))}
               {filtered.length === 0 && (
-                <tr><td colSpan={9} className="text-center text-stone-400 py-8">尚無資料</td></tr>
+                <tr><td colSpan={8} className="text-center text-stone-400 py-8">尚無資料</td></tr>
               )}
             </tbody>
           </table>

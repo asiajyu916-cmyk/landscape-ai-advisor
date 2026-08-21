@@ -2,6 +2,8 @@
 // 只讀取既有 ZoneStatisticsResult（src/utils/zoneStatistics.ts 產出），
 // 不重新解析 DXF、不修改原始解析結果。所有金額計算都是純函式加減乘除，
 // 不經過 AI，符合「計價公式必須用程式計算」的要求。
+//
+// 價格模型：統一用「連工帶料單價」（PlantPrice.unitPrice）計價，不再拆材料/施工兩欄。
 
 import type { ZoneStatisticsResult, PlantStatCategory, PlantScheduleEntry } from '@/types/dxf'
 import type { EstimateItem, EstimateCategory, PlantPrice, EstimateZoneSummary, EstimateCaseSummary, PriceMatchKind } from '@/types/estimate'
@@ -51,7 +53,7 @@ interface DebugRow {
   areaM2: number | undefined
   plantsPerM2: number | undefined
   plantCount: number | undefined
-  materialPrice: number | undefined
+  unitPrice: number | undefined
   subtotal: number | undefined
 }
 
@@ -74,8 +76,8 @@ export function buildEstimateItemsFromDxf(
   const items: EstimateItem[] = []
   const debugRows: DebugRow[] = []
   // 單一分區的圖面：分區面積等同全圖面積，索引表本身的「株數」欄可以直接信任、
-  // 不必重算（見規格二）。多分區圖面則沒有辦法把索引表的全圖總株數直接套用到單一
-  // 分區，改用「本分區 HATCH 面積 × 株/M2」個別換算（見規格三）。
+  // 不必重算。多分區圖面則沒有辦法把索引表的全圖總株數直接套用到單一分區，
+  // 改用「本分區 HATCH 面積 × 株/M2」個別換算。
   const isSingleZone = zoneStatistics.length === 1
 
   for (const zone of zoneStatistics) {
@@ -106,7 +108,7 @@ export function buildEstimateItemsFromDxf(
         rawBlockName: tree.blockName, detectedPlantName: tree.plantName, normalizedPlantName: plantName,
         dxfSpec, matchedPriceName: resolved.selected?.plantName, matchedSpec: resolved.selected?.specification,
         matchKind: resolved.matchKind, areaM2: undefined, plantsPerM2: undefined, plantCount: undefined,
-        materialPrice: resolved.selected?.materialPrice, subtotal: item.subtotal,
+        unitPrice: resolved.selected?.unitPrice, subtotal: item.subtotal,
       })
     }
     for (const hatch of zone.hatchPlants) {
@@ -121,13 +123,13 @@ export function buildEstimateItemsFromDxf(
         ? resolvePlantPrice(prices, plantName, dxfSpec, priceBasis)
         : { status: 'missing_price' as const, matchKind: 'none' as const, candidates: [] }
 
-      // 灌木/地被面積型植栽的株數換算：草皮一律用㎡計價，不套用密度換算（規格七）。
+      // 灌木/地被面積型植栽的株數換算：草皮一律用㎡計價，不套用密度換算。
       let plantsPerM2: number | undefined
       let plantCount: number | undefined
       if (category === 'shrub' || category === 'groundcover') {
         if (scheduleEntry?.plantsPerM2 !== undefined) {
           plantsPerM2 = scheduleEntry.plantsPerM2
-          // 單一分區圖面且索引表本身已有株數欄時，直接信任該值（不重算覆蓋，見規格二）；
+          // 單一分區圖面且索引表本身已有株數欄時，直接信任該值（不重算覆蓋）；
           // 否則用本分區實際 HATCH 面積 × 株/M2 換算（Math.ceil，沿用索引表解析同一套進位規則）。
           plantCount = (isSingleZone && scheduleEntry.plantCount !== undefined)
             ? scheduleEntry.plantCount
@@ -158,13 +160,13 @@ export function buildEstimateItemsFromDxf(
         rawBlockName: hatch.layerName, detectedPlantName: hatch.plantName, normalizedPlantName: plantName,
         dxfSpec, matchedPriceName: resolved.selected?.plantName, matchedSpec: resolved.selected?.specification,
         matchKind: resolved.matchKind, areaM2: hatch.areaM2, plantsPerM2, plantCount,
-        materialPrice: resolved.selected?.materialPrice, subtotal: item.subtotal,
+        unitPrice: resolved.selected?.unitPrice, subtotal: item.subtotal,
       })
     }
   }
 
   if (debugRows.length > 0) {
-    console.group('[工程估價] DXF 植物名稱 → 規格／價格／株數 配對結果')
+    console.group('[工程估價] DXF 植物名稱 → 規格／連工帶料單價／株數 配對結果')
     console.table(debugRows)
     console.groupEnd()
   }
@@ -181,44 +183,38 @@ function buildItem(args: {
 }): EstimateItem {
   const { id, zoneId, plantName, rawBlockName, category, quantity, unit, dxfSpec, resolved, areaM2, plantsPerM2, plantCount } = args
   const price = resolved.selected
-  const materialUnitPrice = price?.materialPrice
-  const laborUnitPrice = price?.laborPrice
+  const unitPrice = price?.unitPrice
   const base = {
     id, zoneId, plantName, rawBlockName, category, specification: price?.specification, quantity, unit,
-    materialUnitPrice, laborUnitPrice, priceId: price?.id, priceSource: price?.priceSource, priceSourceType: price?.sourceType,
+    unitPrice, priceId: price?.id, priceSource: price?.priceSource, priceSourceType: price?.sourceType,
     isProvisional: price?.isProvisional,
     areaM2, plantsPerM2, plantCount, dxfSpec, priceMatchKind: resolved.matchKind, candidateNote: resolved.candidateNote,
     ambiguousCandidates: resolved.status === 'ambiguous_spec' ? resolved.candidates : undefined,
   }
 
-  // 規格不明確（多筆不同規格候選、沒有一筆跟圖面規格相符）：禁止跨規格計價，不自動選價
-  // （見規格七），交給使用者在 UI 手動挑選或自訂單價。
+  // 規格不明確（多筆不同規格候選、沒有一筆跟圖面規格相符）：禁止跨規格計價，不自動選價，
+  // 交給使用者在 UI 手動挑選或自訂單價。
   if (resolved.status === 'ambiguous_spec') {
-    return { ...base, materialUnitPrice: undefined, laborUnitPrice: undefined, subtotal: undefined, pricingStatus: 'ambiguous_spec' }
+    return { ...base, unitPrice: undefined, subtotal: undefined, pricingStatus: 'ambiguous_spec' }
   }
 
-  // 灌木/地被目前是用 HATCH 面積(㎡)解析，但價格表若是「元/株」計價，不能直接拿
-  // 面積去乘單株價格——需要換算成株數才能計價（優先用 DXF 索引表的株/M2，見上方
-  // buildEstimateItemsFromDxf；沒有株數換算結果時才標示「待設定種植密度」）。
+  // 灌木/地被目前是用 HATCH 面積(㎡)解析，但價格是「元/株」計價時，不能直接拿面積去乘
+  // 單株價格——需要換算成株數才能計價（優先用 DXF 索引表的株/M2；沒有株數換算結果時
+  // 才標示「待設定種植密度」）。
   const unitMismatch = unit === '㎡' && price?.pricingUnit === 'plant'
   if (unitMismatch) {
     if (plantCount === undefined) {
       return { ...base, subtotal: undefined, pricingStatus: 'missing_density' }
     }
-    const hasFullPrice = materialUnitPrice !== undefined && laborUnitPrice !== undefined
     return {
       ...base,
-      subtotal: hasFullPrice ? plantCount * (materialUnitPrice + laborUnitPrice) : undefined,
-      pricingStatus: hasFullPrice ? 'priced' : 'missing_price',
+      subtotal: unitPrice !== undefined ? plantCount * unitPrice : undefined,
+      pricingStatus: unitPrice !== undefined ? 'priced' : 'missing_price',
     }
   }
 
-  // 「已計價」須材料單價與施工單價都已設定（哪怕其中一項刻意填 0）才算完整——
-  // 只填其中一項時仍視為「缺少單價」，不計入已計價比例，也不計算小計，
-  // 避免用一半的資料算出誤導性的金額（見規格四）。
-  const hasFullPrice = materialUnitPrice !== undefined && laborUnitPrice !== undefined
-  const subtotal = hasFullPrice ? quantity * (materialUnitPrice + laborUnitPrice) : undefined
-  return { ...base, subtotal, pricingStatus: hasFullPrice ? 'priced' : 'missing_price' }
+  const subtotal = unitPrice !== undefined ? quantity * unitPrice : undefined
+  return { ...base, subtotal, pricingStatus: unitPrice !== undefined ? 'priced' : 'missing_price' }
 }
 
 /** 計價實際採用的數量基礎：有換算出株數（plantCount）就用株數，否則用 quantity
@@ -227,34 +223,24 @@ function pricingQuantity(item: EstimateItem): number {
   return item.plantCount ?? item.quantity
 }
 
-/** 單一項目對材料費／施工費的實際貢獻——「待設定種植密度」「規格不明確」的項目
- *  不可用面積/原始數量直接乘單價，回傳 0（不計入任何金額），避免灌入錯誤的放大數字。
- *  匯出（PDF 匯出等）需要跟畫面顯示的材料費 100% 一致時，直接呼叫這個函式，
- *  不要另外用 item.subtotal 重算——item.subtotal 需要材料/施工單價都填齊才會有值
- *  （見 buildItem 的「已計價」定義），但「植栽材料估價表」只看材料單價，兩者標準不同，
- *  混用會導致 PDF 判斷成「全部未取得單價」而畫面卻顯示得出材料金額的落差。 */
-export function itemMaterialCost(item: EstimateItem): number {
+/** 單一項目的估價金額——「待設定種植密度」「規格不明確」的項目不可用面積/原始數量
+ *  直接乘單價，回傳 0（不計入任何金額），避免灌入錯誤的放大數字。
+ *  匯出（PDF 匯出等）需要跟畫面顯示的金額 100% 一致時，直接呼叫這個函式，
+ *  不要另外用 item.subtotal 重算。 */
+export function itemAmount(item: EstimateItem): number {
   if (item.pricingStatus === 'missing_density' || item.pricingStatus === 'ambiguous_spec') return 0
-  return (item.materialUnitPrice ?? 0) * pricingQuantity(item)
-}
-function itemLaborCost(item: EstimateItem): number {
-  if (item.pricingStatus === 'missing_density' || item.pricingStatus === 'ambiguous_spec') return 0
-  return (item.laborUnitPrice ?? 0) * pricingQuantity(item)
+  return (item.unitPrice ?? 0) * pricingQuantity(item)
 }
 
-/** 重新計算單一分區彙總（材料費／施工費／合計；供價格編輯後即時更新用） */
+/** 重新計算單一分區彙總（合計；供價格編輯後即時更新用） */
 export function computeZoneSummary(zoneId: string, items: EstimateItem[]): EstimateZoneSummary {
   const zoneItems = items.filter(i => i.zoneId === zoneId)
-  const materialTotal = zoneItems.reduce((s, i) => s + itemMaterialCost(i), 0)
-  const laborTotal = zoneItems.reduce((s, i) => s + itemLaborCost(i), 0)
+  const total = zoneItems.reduce((s, i) => s + itemAmount(i), 0)
   const pricedCount = zoneItems.filter(i => i.pricingStatus === 'priced').length
   return {
     zoneId,
     items: zoneItems,
-    materialTotal,
-    laborTotal,
-    otherTotal: 0,
-    total: materialTotal + laborTotal,
+    total,
     pricedCount,
     totalCount: zoneItems.length,
   }
@@ -264,24 +250,14 @@ export function computeZoneSummary(zoneId: string, items: EstimateItem[]): Estim
 export function computeCaseSummary(items: EstimateItem[]): EstimateCaseSummary {
   const zoneIds = [...new Set(items.map(i => i.zoneId))]
   const zones = zoneIds.map(zoneId => computeZoneSummary(zoneId, items))
-  const materialTotal = zones.reduce((s, z) => s + z.materialTotal, 0)
-  const laborTotal = zones.reduce((s, z) => s + z.laborTotal, 0)
+  const total = zones.reduce((s, z) => s + z.total, 0)
   const pricedCount = zones.reduce((s, z) => s + z.pricedCount, 0)
   const totalCount = zones.reduce((s, z) => s + z.totalCount, 0)
 
-  const categoryMaterialTotal: Record<EstimateCategory, number> = { tree: 0, shrub: 0, groundcover: 0, grass: 0 }
+  const categoryTotal: Record<EstimateCategory, number> = { tree: 0, shrub: 0, groundcover: 0, grass: 0 }
   for (const item of items) {
-    categoryMaterialTotal[item.category] += itemMaterialCost(item)
+    categoryTotal[item.category] += itemAmount(item)
   }
 
-  return {
-    zones,
-    materialTotal,
-    laborTotal,
-    otherTotal: 0,
-    total: materialTotal + laborTotal,
-    pricedCount,
-    totalCount,
-    categoryMaterialTotal,
-  }
+  return { zones, total, pricedCount, totalCount, categoryTotal }
 }

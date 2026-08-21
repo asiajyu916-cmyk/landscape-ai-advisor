@@ -7,15 +7,14 @@
 // 報表內容注入目前頁面一個「只在列印時顯示」的隱藏區塊，直接對目前分頁呼叫
 // window.print()——不會被彈出視窗封鎖擋下來，因為根本沒有開新視窗。
 //
-// 「有資料才顯示」：施工費／土壤客土／運搬／吊車／其他工程費等章節，只在真的有對應
-// 金額（> 0）時才輸出；目前系統還沒有土壤/運搬/吊車/其他工程費的資料來源，因此這幾個
-// 章節現階段一律不會出現，不是漏做，是刻意不虛構空章節（見規格「有資料才顯示原則」）。
-// 材料表本身也只列出「已計價」的項目——缺少單價的植栽不塞進正式估價表充數，改在表格
-// 下方用一行提示「還有 N 項尚未計價」，不是用「—」或「尚未設定」佔位。
+// 價格模型：統一用「連工帶料單價」計價，PDF 不再拆材料/施工兩欄或兩個章節。
+// 「有資料才顯示」：估價表只列出「已取得連工帶料單價」的項目——缺少單價的植栽不塞進
+// 正式估價表充數，改在表格下方用一行提示「還有 N 項尚未計價」，不是用「—」或
+// 「尚未設定」佔位。
 
 import type { EstimateCategory, EstimateItem, EstimateZoneSummary, EstimateCaseSummary } from '@/types/estimate'
 import { ESTIMATE_CATEGORY_LABEL } from '@/types/estimate'
-import { itemMaterialCost } from '@/utils/estimateAdapter'
+import { itemAmount } from '@/utils/estimateAdapter'
 
 export interface EstimatePdfMeta {
   projectName?: string   // 專案／DXF 圖面名稱
@@ -37,20 +36,19 @@ function formatQuantity(item: EstimateItem): string {
   return `${item.quantity.toFixed(item.unit === '㎡' ? 2 : 0)} ${item.unit}`
 }
 
-// PDF 只收錄「有材料單價可用」的項目——注意這裡刻意不是用 item.pricingStatus==='priced'
-// （那個要求材料+施工單價都填齊才算數，見 estimateAdapter.ts buildItem），而是跟畫面上
-// 「植栽材料費」卡片、分區小計同一套標準：只要有材料單價、且不是「待設定種植密度／
-// 規格不明確」（這兩種狀態下 quantity 基礎不可靠，不能直接乘），就算「材料估價表」裡
-// 可以出現的一筆——這樣 PDF 呈現的材料費才會跟畫面上看到的數字 100% 一致。
-// 施工單價缺少不影響材料表：那是另一個獨立章節（見下方 hasLabor 判斷），不是「未取得單價」。
-function hasMaterialCost(item: EstimateItem): boolean {
-  return item.materialUnitPrice !== undefined
+// PDF 只收錄「有連工帶料單價可用」的項目——跟畫面上分區小計同一套標準：只要有連工帶料
+// 單價、且不是「待設定種植密度／規格不明確」（這兩種狀態下 quantity 基礎不可靠，不能
+// 直接乘），就算「估價表」裡可以出現的一筆，PDF 呈現的金額才會跟畫面上看到的數字
+// 100% 一致。尚未取得連工帶料單價的項目不進表，改在表格下方用一行提示，不用「—」
+// 或「尚未設定」佔位。
+function hasUsableCost(item: EstimateItem): boolean {
+  return item.unitPrice !== undefined
     && item.pricingStatus !== 'missing_density'
     && item.pricingStatus !== 'ambiguous_spec'
 }
 
 function pricedItems(items: EstimateItem[]): EstimateItem[] {
-  return items.filter(hasMaterialCost)
+  return items.filter(hasUsableCost)
 }
 
 const CATEGORY_ORDER: EstimateCategory[] = ['tree', 'shrub', 'groundcover', 'grass']
@@ -63,8 +61,8 @@ function itemRows(items: EstimateItem[]): string {
       <td>${ESTIMATE_CATEGORY_LABEL[i.category]}</td>
       <td>${esc(i.specification ?? '')}</td>
       <td class="ep-num">${esc(formatQuantity(i))}</td>
-      <td class="ep-num">${formatNT(i.materialUnitPrice ?? 0)}</td>
-      <td class="ep-num ep-strong">${formatNT(itemMaterialCost(i))}</td>
+      <td class="ep-num">${formatNT(i.unitPrice ?? 0)}</td>
+      <td class="ep-num ep-strong">${formatNT(itemAmount(i))}</td>
     </tr>`).join('')
 }
 
@@ -72,29 +70,29 @@ function zoneSection(zone: EstimateZoneSummary): string {
   const priced = pricedItems(zone.items)
   if (priced.length === 0) return ''
   const skippedCount = zone.items.length - priced.length
-  // 跟畫面上「本區合計」用同一個欄位（zone.materialTotal 本身就是 itemMaterialCost 加總），
+  // 跟畫面上「本區合計」用同一個欄位（zone.total 本身就是 itemAmount 加總），
   // 不要在這裡另外重算，避免兩邊算法分岔又對不上。
-  const materialTotal = zone.materialTotal
+  const zoneTotal = zone.total
 
   // 刻意不強制換頁（沒有 ep-page-break）——分區之間改成連續流式排列，讓瀏覽器依照
   // 實際內容高度自動判斷要不要換頁：.ep-section 的 page-break-inside:avoid 讓「小分區」
   // 整塊留在同一頁（放不下就整塊移到下一頁，不會被攔腰切開)；分區大到連一整頁都放不下時，
   // 瀏覽器才會被迫在 .ep-table 內部（tr 之間）換頁，並靠 thead 的 table-header-group
-  // 自動在下一頁重複表頭（見規格五、規格七）。
+  // 自動在下一頁重複表頭。
   return `
 <div class="ep-section">
-  <div class="ep-section-title">${esc(zone.zoneId)}　植栽材料估價</div>
+  <div class="ep-section-title">${esc(zone.zoneId)}　植栽估價（連工帶料）</div>
   <table class="ep-table">
     <thead>
       <tr>
         <th>植物名稱</th><th>分類</th><th>規格</th>
-        <th class="ep-num">數量</th><th class="ep-num">材料單價</th><th class="ep-num">材料小計</th>
+        <th class="ep-num">數量</th><th class="ep-num">連工帶料單價</th><th class="ep-num">小計</th>
       </tr>
     </thead>
     <tbody>${itemRows(priced)}</tbody>
   </table>
   ${skippedCount > 0 ? `<div class="ep-skip-note">另有 ${skippedCount} 項植栽尚未取得單價，未列入本表。</div>` : ''}
-  <div class="ep-zone-total">${esc(zone.zoneId)} 植栽材料費小計：<span class="ep-amount">${formatNT(materialTotal)}</span></div>
+  <div class="ep-zone-total">${esc(zone.zoneId)} 小計：<span class="ep-amount">${formatNT(zoneTotal)}</span></div>
 </div>`
 }
 
@@ -103,23 +101,16 @@ function buildReportBodyHtml(zones: EstimateZoneSummary[], caseSummary: Estimate
   const dateStr = now.toLocaleDateString('zh-TW', { timeZone: 'Asia/Taipei', year: 'numeric', month: 'long', day: 'numeric' })
 
   const zonesWithPricedItems = zones.filter(z => pricedItems(z.items).length > 0)
-  // 跟畫面上「全案植栽材料費」卡片用同一個欄位（caseSummary.materialTotal），不要另外
-  // 重新加總——這正是這次修的問題：PDF 之前另外用 item.subtotal 重算，跟畫面上的
-  // itemMaterialCost 加總標準不一致，才會出現畫面有價格、PDF 卻判斷「未取得單價」。
-  const totalMaterial = caseSummary.materialTotal
+  // 跟畫面上「預估總工程費」卡片用同一個欄位（caseSummary.total 本身就是 itemAmount
+  // 加總），不要另外重新加總，避免兩邊算法分岔又對不上。
+  const grandTotal = caseSummary.total
   const totalPricedCount = zonesWithPricedItems.reduce((s, z) => s + pricedItems(z.items).length, 0)
   const totalSkippedCount = zones.reduce((s, z) => s + z.items.length, 0) - totalPricedCount
-
-  // 施工費／土壤客土／運搬／吊車／其他工程費：只有真的有金額時才輸出對應章節
-  // （見規格「動態判斷」）。目前系統沒有這幾類的資料來源，laborTotal 也一律是 0，
-  // 因此現階段這段邏輯運作起來就是「完全不顯示」，等未來有資料再自然出現。
-  const hasLabor = caseSummary.laborTotal > 0
-  const reportSubtitle = hasLabor ? '完整景觀工程估價' : '植栽材料估價'
 
   return `
 <div class="ep-report-header">
   <div class="ep-report-title">景觀工程估價表</div>
-  <div class="ep-report-subtitle">${esc(reportSubtitle)}</div>
+  <div class="ep-report-subtitle">連工帶料估價</div>
   <div class="ep-report-meta">
     ${meta.projectName ? `<span>專案／圖面名稱：<b>${esc(meta.projectName)}</b></span>` : ''}
     <span>估價產生日期：<b>${esc(dateStr)}</b></span>
@@ -131,17 +122,9 @@ ${zonesWithPricedItems.map(z => zoneSection(z)).join('')}
 <div class="ep-section">
   <div class="ep-section-title">全案總計</div>
   <div class="ep-grand-total-box">
-    <div class="ep-grand-total-row">
-      <span class="ep-grand-total-label">全案植栽材料費總計</span>
-      <span class="ep-grand-total-value">${formatNT(totalMaterial)}</span>
-    </div>
-    ${hasLabor ? `<div class="ep-grand-total-row">
-      <span class="ep-grand-total-label">種植施工費總計</span>
-      <span class="ep-grand-total-value">${formatNT(caseSummary.laborTotal)}</span>
-    </div>` : ''}
     <div class="ep-grand-total-row ep-final">
-      <span class="ep-grand-total-label">預估總工程費</span>
-      <span class="ep-grand-total-value">${formatNT(totalMaterial + (hasLabor ? caseSummary.laborTotal : 0))}</span>
+      <span class="ep-grand-total-label">預估總工程費（連工帶料）</span>
+      <span class="ep-grand-total-value">${formatNT(grandTotal)}</span>
     </div>
   </div>
   ${totalSkippedCount > 0 ? `<div class="ep-skip-note" style="margin-top:3mm">全案另有 ${totalSkippedCount} 項植栽尚未取得單價，未列入本估價表金額。</div>` : ''}
